@@ -81,8 +81,8 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
   {
     kind: "plantuml",
     displayName: "PlantUML JAR",
-    version: "1.2026.5",
-    checksum: "379955744583fa8306ab760122a6b0f8a032fcf833143ce473a4343a8b66b7ce",
+    version: "1.2026.6",
+    checksum: "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1",
     fileName: "plantuml.jar",
     rustVersionConst: "PLANTUML_JAR_VERSION",
     rustChecksumConst: "PLANTUML_JAR_CHECKSUM",

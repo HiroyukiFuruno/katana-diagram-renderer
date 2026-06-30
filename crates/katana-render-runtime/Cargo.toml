@@ -15,7 +15,7 @@ include = [
     "vendor/drawio/30.0.4/**",
     "vendor/mermaid/11.15.0/**",
     "vendor/mermaid-zenuml/0.2.3/**",
-    "vendor/plantuml/1.2026.5/plantuml.jar.sha256",
+    "vendor/plantuml/1.2026.6/plantuml.jar.sha256",
     "vendor/zenuml-core/3.47.9/**",
     "src/markdown/drawio_renderer/js_runtime/resources/drawio-resource-manifest.json",
     "src/markdown/drawio_renderer/js_runtime/resources/shapes/**",
