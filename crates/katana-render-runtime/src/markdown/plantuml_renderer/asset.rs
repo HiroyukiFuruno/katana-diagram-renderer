@@ -1,10 +1,10 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub const PLANTUML_JAR_VERSION: &str = "1.2026.5";
+pub const PLANTUML_JAR_VERSION: &str = "1.2026.6";
 pub const PLANTUML_JAR_CHECKSUM: &str =
-    "379955744583fa8306ab760122a6b0f8a032fcf833143ce473a4343a8b66b7ce";
-pub const PLANTUML_DOWNLOAD_URL: &str = "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.5/plantuml-lgpl-1.2026.5.jar";
+    "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1";
+pub const PLANTUML_DOWNLOAD_URL: &str = "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.6/plantuml-lgpl-1.2026.6.jar";
 
 const DOWNLOAD_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const HEX_HIGH_NIBBLE_SHIFT: u8 = 4;
