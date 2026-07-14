@@ -69,6 +69,6 @@ impl RenderInputFactory {
     }
 
     fn string_or_empty(value: Option<String>) -> String {
-        value.map_or_else(String::new, std::convert::identity)
+        value.into_iter().collect()
     }
 }
