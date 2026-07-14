@@ -32,7 +32,6 @@ impl ChromiumPage {
             .map_err(string_error)?;
         let browser = Browser::new(options).map_err(string_error)?;
         let tab = browser.new_tab().map_err(string_error)?;
-        tab.activate().map_err(string_error)?;
         let mut page = Self {
             _browser: browser,
             tab,
@@ -102,6 +101,7 @@ impl ChromiumPage {
             .and_then(|tab| tab.wait_until_navigated())
             .map_err(string_error)?;
         self.tab.bring_to_front().map_err(string_error)?;
+        self.emulate_focus(true)?;
         self.synchronize_rendering()
     }
 

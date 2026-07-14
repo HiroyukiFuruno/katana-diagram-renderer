@@ -1,10 +1,14 @@
 use super::page::ChromiumPage;
 use crate::{HtmlBrowserInput, HtmlBrowserNavigationEvent};
-use headless_chrome::{browser::tab::point::Point, protocol::cdp::Input};
+use headless_chrome::{
+    browser::tab::point::Point,
+    protocol::cdp::{Emulation, Input},
+};
 use serde_json::Value;
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
+        let requires_render_sync = !matches!(&input, HtmlBrowserInput::Focus { focused: false });
         match input {
             HtmlBrowserInput::Focus { focused } => self.focus(focused)?,
             HtmlBrowserInput::PointerMove { x, y } => self.move_mouse(x, y)?,
@@ -22,7 +26,9 @@ impl ChromiumPage {
             HtmlBrowserInput::KeyUp { .. } => {}
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
-        self.synchronize_rendering()?;
+        if requires_render_sync {
+            self.synchronize_rendering()?;
+        }
         Ok(())
     }
 
@@ -89,9 +95,17 @@ impl ChromiumPage {
         } else {
             "if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); window.blur(); true;"
         };
+        self.tab.activate().map_err(string_error)?;
+        self.emulate_focus(focused)?;
         self.tab
-            .activate()
-            .and_then(|tab| tab.evaluate(script, false))
+            .evaluate(script, false)
+            .map(|_| ())
+            .map_err(string_error)
+    }
+
+    pub(super) fn emulate_focus(&self, focused: bool) -> Result<(), String> {
+        self.tab
+            .call_method(Emulation::SetFocusEmulationEnabled { enabled: focused })
             .map(|_| ())
             .map_err(string_error)
     }
@@ -99,7 +113,7 @@ impl ChromiumPage {
     pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
-                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
+                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); if (!document.hasFocus()) return true; return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
                 true,
             )
             .map(|_| ())
