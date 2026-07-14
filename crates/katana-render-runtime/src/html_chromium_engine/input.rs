@@ -8,7 +8,6 @@ use serde_json::Value;
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
-        let requires_render_sync = !matches!(&input, HtmlBrowserInput::Focus { focused: false });
         match input {
             HtmlBrowserInput::Focus { focused } => self.focus(focused)?,
             HtmlBrowserInput::PointerMove { x, y } => self.move_mouse(x, y)?,
@@ -26,10 +25,7 @@ impl ChromiumPage {
             HtmlBrowserInput::KeyUp { .. } => {}
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
-        if requires_render_sync {
-            self.synchronize_rendering()?;
-        }
-        Ok(())
+        self.synchronize_rendering()
     }
 
     pub(super) fn take_navigation(&self) -> Result<Option<HtmlBrowserNavigationEvent>, String> {
@@ -113,7 +109,7 @@ impl ChromiumPage {
     pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
-                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); if (!document.hasFocus()) return true; return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
+                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return true; })",
                 true,
             )
             .map(|_| ())

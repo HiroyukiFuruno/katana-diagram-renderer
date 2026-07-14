@@ -385,11 +385,16 @@ fn packaged_browser_config_reports_missing_adjacent_helper() -> TestResult {
     unsafe { std::env::remove_var("KRR_HTML_BROWSER_ENGINE") };
 
     let result = HtmlBrowserProcessConfig::packaged();
+    let expected_engine_name = if cfg!(target_os = "windows") {
+        "krr-html-chromium-engine.exe"
+    } else {
+        "krr-html-chromium-engine"
+    };
 
     assert!(matches!(
         result,
         Err(HtmlBrowserError::EngineBinaryNotFound { path })
-            if path.ends_with("krr-html-chromium-engine")
+            if path.ends_with(expected_engine_name)
     ));
     Ok(())
 }
