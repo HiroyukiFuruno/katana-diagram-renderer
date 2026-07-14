@@ -69,11 +69,11 @@ dependency-leak:
     fi
 
 # Run workspace tests
-unit-test: plantuml-install
+unit-test: plantuml-install chromium-install
     {{CARGO}} test --workspace --all-targets --all-features
 
 # Run coverage as a required full-check gate
-coverage: plantuml-install
+coverage: plantuml-install chromium-install
     {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}
 
 # Verify pinned runtime asset checksums

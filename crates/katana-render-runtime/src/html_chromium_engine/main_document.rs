@@ -64,7 +64,9 @@ mod tests {
 
     #[test]
     fn main_document_is_not_created_for_file_origin() -> Result<(), Box<dyn std::error::Error>> {
-        let origin = url::Url::parse("file:///tmp/krr-main-document.html")?;
+        let origin_path = std::env::temp_dir().join("krr-main-document.html");
+        let origin = url::Url::from_file_path(origin_path)
+            .map_err(|()| "temporary path is not a valid file URL")?;
         let source = crate::HtmlBrowserSource::new("<p>local</p>", origin.to_string())?;
         let source = BrowserSource::validate(source)?;
 

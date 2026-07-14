@@ -33,13 +33,13 @@ pub(super) fn browser_document(source: &BrowserSource) -> String {
 }
 
 fn local_document_url(origin: Url, document: String) -> Result<(String, Option<PathBuf>), String> {
-    let origin_path = match origin.to_file_path() {
-        Ok(path) => path,
-        Err(()) => return Err(invalid_file_origin(())),
-    };
-    if origin_path.parent().is_none() {
+    if origin.host_str().is_some() {
+        return Err(invalid_file_origin(()));
+    }
+    if origin.path() == "/" {
         return Err("file origin has no parent directory".to_string());
     }
+    origin.to_file_path().map_err(invalid_file_origin)?;
     let suffix = NEXT_TEMP_DOCUMENT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         ".katana-krr-browser-{}-{suffix}.html",

@@ -425,9 +425,9 @@ fn start_session(
 }
 
 fn chromium_session_guard() -> TestResult<MutexGuard<'static, ()>> {
-    CHROMIUM_SESSION_LOCK
+    Ok(CHROMIUM_SESSION_LOCK
         .lock()
-        .map_err(|error| error.to_string())
+        .unwrap_or_else(|error| error.into_inner()))
 }
 
 fn viewport(width: u32, height: u32) -> TestResult<HtmlBrowserViewport> {
@@ -583,8 +583,10 @@ fn browser_process_config() -> TestResult<HtmlBrowserProcessConfig> {
 
 #[cfg(target_os = "macos")]
 fn test_chromium_binary() -> TestResult<PathBuf> {
+    let [adjacent_bundle, build_bundle] = bundled_chromium_binaries()?;
     chromium_candidate([
-        bundled_chromium_binary()?,
+        adjacent_bundle,
+        build_bundle,
         PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         PathBuf::from(
             "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
@@ -594,8 +596,10 @@ fn test_chromium_binary() -> TestResult<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn test_chromium_binary() -> TestResult<PathBuf> {
+    let [adjacent_bundle, build_bundle] = bundled_chromium_binaries()?;
     chromium_candidate([
-        bundled_chromium_binary()?,
+        adjacent_bundle,
+        build_bundle,
         PathBuf::from("/usr/bin/google-chrome"),
         PathBuf::from("/usr/bin/google-chrome-stable"),
         PathBuf::from("/usr/bin/chromium"),
@@ -605,7 +609,7 @@ fn test_chromium_binary() -> TestResult<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn test_chromium_binary() -> TestResult<PathBuf> {
-    let mut candidates = vec![bundled_chromium_binary()?];
+    let mut candidates = Vec::from(bundled_chromium_binaries()?);
     for base in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
         if let Some(root) = std::env::var_os(base) {
             candidates.push(PathBuf::from(root).join("Google/Chrome/Application/chrome.exe"));
@@ -621,12 +625,19 @@ fn chromium_candidate(candidates: impl IntoIterator<Item = PathBuf>) -> TestResu
         .ok_or_else(|| "test Chromium binary was not found in known install locations".to_string())
 }
 
-fn bundled_chromium_binary() -> TestResult<PathBuf> {
+fn bundled_chromium_binaries() -> TestResult<[PathBuf; 2]> {
     let helper = PathBuf::from(env!("CARGO_BIN_EXE_krr-html-chromium-engine"));
     let directory = helper
         .parent()
         .ok_or_else(|| "browser helper test binary has no parent directory".to_string())?;
-    Ok(directory.join(bundled_chromium_relative_path()))
+    let relative_path = bundled_chromium_relative_path();
+    let build_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target/debug");
+    Ok([
+        directory.join(relative_path),
+        build_directory.join(relative_path),
+    ])
 }
 
 fn child_response_for_line(line: &str) -> TestResult<HtmlBrowserResponse> {
