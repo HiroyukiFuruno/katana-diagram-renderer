@@ -69,7 +69,8 @@ fn coverage_gate_includes_integration_test_targets() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn test_gates_install_plantuml_before_executing_tests() -> Result<(), Box<dyn std::error::Error>> {
+fn test_gates_install_required_runtimes_before_executing_tests()
+-> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
     let justfile = fs::read_to_string(root.join("Justfile"))?;
     for recipe_name in ["unit-test", "coverage"] {
@@ -90,6 +91,13 @@ fn test_gates_install_plantuml_before_executing_tests() -> Result<(), Box<dyn st
     assert!(
         install < tests,
         "PlantUML must be installed before workspace tests"
+    );
+    let chromium_install = workflow
+        .find("name: Install Chromium browser runtime")
+        .ok_or("Chromium install step is missing")?;
+    assert!(
+        chromium_install < tests,
+        "Chromium must be installed before workspace tests"
     );
     Ok(())
 }

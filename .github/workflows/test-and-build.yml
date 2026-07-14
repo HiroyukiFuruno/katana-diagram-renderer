@@ -149,6 +149,9 @@ jobs:
       - name: Install PlantUML runtime
         run: just plantuml-install
 
+      - name: Install Chromium browser runtime
+        run: just chromium-install
+
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features --locked
 
