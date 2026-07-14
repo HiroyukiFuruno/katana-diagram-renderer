@@ -200,6 +200,7 @@ fn plantuml_missing_runtime_returns_raw_code_with_warning() -> Result<(), Box<dy
 #[test]
 fn plantuml_renders_svg_when_local_runtime_is_available() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
@@ -222,6 +223,7 @@ fn plantuml_renders_svg_when_local_runtime_is_available() -> Result<(), Box<dyn 
 #[test]
 fn plantuml_representative_fixtures_render_when_local_runtime_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
@@ -245,6 +247,7 @@ fn plantuml_representative_fixtures_render_when_local_runtime_is_available()
 #[test]
 fn plantuml_official_fixtures_render_when_local_runtime_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
@@ -268,6 +271,7 @@ fn plantuml_official_fixtures_render_when_local_runtime_is_available()
 #[test]
 fn plantuml_dark_mode_uses_official_color_mapper_when_local_runtime_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
@@ -289,6 +293,7 @@ fn plantuml_dark_mode_uses_official_color_mapper_when_local_runtime_is_available
 #[test]
 fn plantuml_theme_option_uses_official_theme_directive_when_local_runtime_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
@@ -315,12 +320,13 @@ fn plantuml_theme_option_uses_official_theme_directive_when_local_runtime_is_ava
 #[test]
 fn plantuml_invalid_source_returns_runtime_error_when_runtime_is_available()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = PLANTUML_ENV_LOCK.lock()?;
     let jar_path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
     if !jar_path.exists() {
         return Ok(());
     }
     let renderer = PlantUmlRenderer::with_runtime_path(jar_path);
-    let result = renderer.render(&input("@startuml\nthis is not valid ???\n@enduml"));
+    let result = renderer.render(&input("@startuml\n!error forced test failure\n@enduml"));
 
     assert!(matches!(
         result,

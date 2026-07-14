@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn render_plantuml_with_jar_path_reports_runtime_errors() {
         assert!(matches!(
-            render_cached("@startuml\nthis is not valid ???\n@enduml"),
+            render_cached("@startuml\n!error forced test failure\n@enduml"),
             DiagramResult::Err { error, .. } if error.contains("PlantUML render failed")
         ));
     }

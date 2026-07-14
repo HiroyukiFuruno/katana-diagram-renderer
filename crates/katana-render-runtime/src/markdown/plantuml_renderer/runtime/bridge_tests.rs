@@ -40,7 +40,7 @@ fn bridge_reports_invalid_diagram_descriptions() -> Result<(), String> {
         PlantUmlThemeOps::style(DiagramColorPreset::light(), &PlantUmlThemeConfig::default());
 
     let result = PlantUmlJvmRuntimeOps::render_svg(
-        "@startuml\nthis is not valid ???\n@enduml",
+        "@startuml\n!error forced test failure\n@enduml",
         &paths,
         &style,
     );
