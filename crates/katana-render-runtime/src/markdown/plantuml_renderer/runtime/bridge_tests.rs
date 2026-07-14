@@ -5,7 +5,6 @@ use crate::markdown::plantuml_renderer::asset::PlantUmlJarAssetOps;
 use crate::markdown::plantuml_renderer::theme::{
     PlantUmlRenderStyle, PlantUmlThemeConfig, PlantUmlThemeOps,
 };
-use jni::objects::JObject;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -47,14 +46,6 @@ fn bridge_reports_invalid_diagram_descriptions() -> Result<(), String> {
 
     assert!(matches!(result, Err(message) if message.contains("PlantUML render failed")));
     Ok(())
-}
-
-#[test]
-fn missing_diagram_description_reports_render_error() {
-    assert_eq!(
-        super::PlantUmlJvmBridgeOps::missing_description(&JObject::null()),
-        Some("error: PlantUML did not return a diagram description".to_string())
-    );
 }
 
 #[test]

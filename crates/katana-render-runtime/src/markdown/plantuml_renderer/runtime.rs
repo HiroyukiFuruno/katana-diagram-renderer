@@ -1,4 +1,5 @@
 mod bridge;
+mod diagram_description;
 
 use super::resolve::PlantUmlRuntimePaths;
 use super::theme::PlantUmlRenderStyle;

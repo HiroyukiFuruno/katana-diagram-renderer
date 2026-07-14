@@ -1,4 +1,5 @@
 use super::super::theme::PlantUmlRenderStyle;
+use super::diagram_description::PlantUmlDiagramDescriptionOps;
 use jni::{
     JavaVM, jni_sig, jni_str,
     objects::{JByteArray, JObject, JString, JValue},
@@ -88,15 +89,12 @@ impl PlantUmlJvmBridgeOps {
     ) -> jni::errors::Result<String> {
         let format_option = Self::svg_format_option(env, style)?;
         let description = Self::call_output_image(env, reader, output_stream, &format_option)?;
-        Self::missing_description(&description)
+        if let Some(error) = PlantUmlDiagramDescriptionOps::error(env, &description)? {
+            return Ok(error);
+        }
+        PlantUmlDiagramDescriptionOps::missing(&description)
             .map(Ok)
-            .unwrap_or_else(|| Self::description(env, description))
-    }
-
-    fn missing_description(description: &JObject<'_>) -> Option<String> {
-        description
-            .is_null()
-            .then(|| "error: PlantUML did not return a diagram description".to_string())
+            .unwrap_or_else(|| PlantUmlDiagramDescriptionOps::text(env, &description))
     }
 
     fn svg_format_option<'local>(
@@ -146,19 +144,6 @@ impl PlantUmlJvmBridgeOps {
         let arguments = [JValue::Object(output_stream), JValue::Object(format_option)];
         let value = env.call_method(reader, jni_str!("outputImage"), signature, &arguments)?;
         value.l()
-    }
-
-    fn description<'local>(
-        env: &mut jni::Env<'local>,
-        description: JObject<'local>,
-    ) -> jni::errors::Result<String> {
-        let arguments: &[JValue<'_>] = &[];
-        let method = jni_str!("getDescription");
-        let signature = jni_sig!("()Ljava/lang/String;");
-        let value = env.call_method(description, method, signature, arguments)?;
-        let text = value.l()?;
-        let java_text = env.cast_local::<JString>(text)?;
-        java_text.try_to_string(env)
     }
 
     fn svg_from_stream(
