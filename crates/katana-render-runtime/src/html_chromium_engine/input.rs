@@ -99,7 +99,7 @@ impl ChromiumPage {
     fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
-                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); if (!document.hasFocus()) return true; return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
+                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
                 true,
             )
             .map(|_| ())

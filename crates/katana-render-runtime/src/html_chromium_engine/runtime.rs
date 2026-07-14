@@ -1,7 +1,13 @@
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::{ffi::OsStr, path::PathBuf};
 
 const CHROMIUM_BINARY_ENV: &str = "KRR_CHROME_BIN";
+const RENDERING_ARGS: [&str; 4] = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--run-all-compositor-stages-before-draw",
+];
 
 #[cfg(test)]
 pub(super) static CHROMIUM_BINARY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -22,6 +28,10 @@ pub(super) fn chrome_binary_path() -> Result<PathBuf, String> {
             .join(artifact.executable),
         "KRR Chromium bundle",
     )
+}
+
+pub(super) fn rendering_args() -> Vec<&'static OsStr> {
+    RENDERING_ARGS.map(OsStr::new).to_vec()
 }
 
 #[derive(Deserialize)]
@@ -124,6 +134,21 @@ mod tests {
                 "missing"
             ),
             Err("KRR Chromium manifest has no artifact for missing".to_string())
+        );
+    }
+
+    #[test]
+    fn rendering_args_keep_compositor_frames_available() {
+        let args = rendering_args();
+
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--disable-background-timer-throttling"),
+                OsStr::new("--disable-backgrounding-occluded-windows"),
+                OsStr::new("--disable-renderer-backgrounding"),
+                OsStr::new("--run-all-compositor-stages-before-draw"),
+            ]
         );
     }
 

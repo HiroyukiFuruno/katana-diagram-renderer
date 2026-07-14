@@ -1,7 +1,4 @@
-use super::{
-    document::document_url, main_document::MainDocument, policy::BrowserResourcePolicy,
-    runtime::chrome_binary_path, source::BrowserSource,
-};
+use super::{document, main_document, policy, runtime, source};
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
 use headless_chrome::{
     Browser, LaunchOptionsBuilder,
@@ -14,7 +11,7 @@ use std::{fs, path::PathBuf, sync::Arc};
 pub(super) struct ChromiumPage {
     pub(super) tab: Arc<headless_chrome::Tab>,
     _browser: Browser,
-    pub(super) source: BrowserSource,
+    pub(super) source: source::BrowserSource,
     pub(super) viewport: HtmlBrowserViewport,
     pub(super) generation: u64,
     pub(super) pointer_down: Option<(f32, f32, u8)>,
@@ -23,13 +20,14 @@ pub(super) struct ChromiumPage {
 
 impl ChromiumPage {
     pub(super) fn new(
-        source: BrowserSource,
+        source: source::BrowserSource,
         viewport: HtmlBrowserViewport,
     ) -> Result<Self, String> {
-        let chrome_binary = chrome_binary_path()?;
+        let chrome_binary = runtime::chrome_binary_path()?;
         let options = LaunchOptionsBuilder::default()
             .path(Some(chrome_binary))
             .window_size(Some((viewport.width, viewport.height)))
+            .args(runtime::rendering_args())
             .build()
             .map_err(string_error)?;
         let browser = Browser::new(options).map_err(string_error)?;
@@ -50,7 +48,7 @@ impl ChromiumPage {
 
     pub(super) fn navigate(
         &mut self,
-        source: BrowserSource,
+        source: source::BrowserSource,
         viewport: HtmlBrowserViewport,
     ) -> Result<(), String> {
         self.source = source;
@@ -95,7 +93,7 @@ impl ChromiumPage {
 
     fn load(&mut self) -> Result<(), String> {
         self.remove_temporary_document();
-        let (url, temporary_document) = document_url(&self.source)?;
+        let (url, temporary_document) = document::document_url(&self.source)?;
         self.temporary_document = temporary_document;
         self.install_resource_policy(self.temporary_document.as_deref())?;
         self.tab
@@ -131,11 +129,11 @@ impl ChromiumPage {
         &self,
         temporary_document: Option<&std::path::Path>,
     ) -> Result<(), String> {
-        let policy = BrowserResourcePolicy::from_source_with_temporary_document(
+        let policy = policy::BrowserResourcePolicy::from_source_with_temporary_document(
             &self.source,
             temporary_document,
         );
-        let main_document = MainDocument::from_source(&self.source);
+        let main_document = main_document::MainDocument::from_source(&self.source);
         self.tab
             .enable_request_interception(Arc::new(
                 move |_transport, _session_id, event: Fetch::events::RequestPausedEvent| {
@@ -156,8 +154,8 @@ impl ChromiumPage {
 
 fn request_decision(
     event: Fetch::events::RequestPausedEvent,
-    main_document: &Option<MainDocument>,
-    policy: &BrowserResourcePolicy,
+    main_document: &Option<main_document::MainDocument>,
+    policy: &policy::BrowserResourcePolicy,
 ) -> RequestPausedDecision {
     if let Some(document) = main_document
         && document.matches(&event.params.request.url)
