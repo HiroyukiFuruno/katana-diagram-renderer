@@ -101,7 +101,8 @@ impl ChromiumPage {
             .navigate_to(&url)
             .and_then(|tab| tab.wait_until_navigated())
             .map_err(string_error)?;
-        Ok(())
+        self.tab.bring_to_front().map_err(string_error)?;
+        self.synchronize_rendering()
     }
 
     fn set_viewport(&self, viewport: HtmlBrowserViewport) -> Result<(), String> {

@@ -96,7 +96,7 @@ impl ChromiumPage {
             .map_err(string_error)
     }
 
-    fn synchronize_rendering(&self) -> Result<(), String> {
+    pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
                 "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); })",
