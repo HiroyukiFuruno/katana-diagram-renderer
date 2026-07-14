@@ -22,6 +22,7 @@ impl ChromiumPage {
             HtmlBrowserInput::KeyUp { .. } => {}
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
+        self.wait_for_paint()?;
         Ok(())
     }
 
@@ -91,6 +92,16 @@ impl ChromiumPage {
         self.tab
             .activate()
             .and_then(|tab| tab.evaluate(script, false))
+            .map(|_| ())
+            .map_err(string_error)
+    }
+
+    fn wait_for_paint(&self) -> Result<(), String> {
+        self.tab
+            .evaluate(
+                "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+                true,
+            )
             .map(|_| ())
             .map_err(string_error)
     }
