@@ -109,7 +109,7 @@ impl ChromiumPage {
     pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
-                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return true; })",
+                "new Promise(resolve => setTimeout(resolve, 0)).then(() => new Promise(resolve => setTimeout(resolve, 0))).then(() => { document.documentElement.getBoundingClientRect(); return true; })",
                 true,
             )
             .map(|_| ())
