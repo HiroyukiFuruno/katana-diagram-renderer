@@ -33,6 +33,10 @@ class StableVersion:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-version", required=True)
+    parser.add_argument(
+        "--latest-version",
+        help="Override the latest stable version for deterministic guard tests",
+    )
     parser.add_argument("--repo", default="HiroyukiFuruno/katana-render-runtime")
     parser.add_argument("--remote", default="origin")
     return parser.parse_args()
@@ -90,13 +94,18 @@ def expected_targets(latest: StableVersion | None) -> tuple[StableVersion, ...]:
     return (
         StableVersion(latest.major, latest.minor, latest.patch + 1),
         StableVersion(latest.major, latest.minor + 1, 0),
+        StableVersion(latest.major + 1, 0, 0),
     )
 
 
 def main() -> int:
     args = parse_args()
     target = StableVersion.parse(args.target_version)
-    latest = latest_github_release(args.repo) or latest_remote_tag(args.remote)
+    latest = (
+        StableVersion.parse(args.latest_version)
+        if args.latest_version
+        else latest_github_release(args.repo) or latest_remote_tag(args.remote)
+    )
     expected = expected_targets(latest)
     if target not in expected:
         latest_text = "no remote release" if latest is None else latest.tag()

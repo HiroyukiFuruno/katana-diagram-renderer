@@ -95,6 +95,7 @@ impl RuntimeAsset {
         std::fs::write(&temp_path, self.bytes).map_err(runtime_asset_error)?;
         match std::fs::rename(&temp_path, path) {
             Ok(()) => Ok(()),
+            #[cfg(windows)]
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 self.handle_existing_destination(path, &temp_path)
             }
@@ -112,6 +113,7 @@ impl RuntimeAsset {
         ))
     }
 
+    #[cfg(windows)]
     fn handle_existing_destination(&self, path: &Path, temp_path: &Path) -> Result<(), String> {
         if self.exists_with_same_bytes(path)? {
             std::fs::remove_file(temp_path).map_err(runtime_asset_error)?;
@@ -139,6 +141,7 @@ fn runtime_asset_error(error: std::io::Error) -> String {
     error.to_string()
 }
 
+#[cfg(windows)]
 fn remove_existing_destination(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),

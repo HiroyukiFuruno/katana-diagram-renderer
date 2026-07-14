@@ -1,7 +1,9 @@
 use katana_render_runtime::{
-    DiagramKind, DrawioRenderer, MermaidRenderer, RenderConfig, RenderContext, RenderDiagnostics,
-    RenderError, RenderInput, RenderOutput, RenderPolicy, Renderer, RendererProfile,
-    RuntimeVersion,
+    DiagramKind, DrawioRenderer, HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserInput,
+    HtmlBrowserProcessConfig, HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport,
+    HtmlRenderInput, HtmlRenderer, HtmlRuntime, MermaidRenderer, RenderConfig, RenderContext,
+    RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy, Renderer,
+    RendererProfile, RuntimeVersion,
 };
 use std::path::PathBuf;
 
@@ -137,4 +139,86 @@ fn drawio_renderer_reports_missing_runtime_without_stub_svg()
 
     assert!(matches!(error, RenderError::NotInstalled { .. }));
     Ok(())
+}
+
+#[test]
+fn html_renderer_static_export_contract_remains_separate() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output = HtmlRenderer.render(&HtmlRenderInput {
+        source: "<style>p { color: red; }</style><p id=state>Static</p>".to_string(),
+    })?;
+
+    assert!(
+        output
+            .content
+            .contains(r#"<p id="state" style="color: red">Static</p>"#),
+        "{}",
+        output.content
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = HtmlRuntime.open(browser_source()?, viewport()?, &shell_config())?;
+
+    assert_eq!(session.state(), HtmlBrowserSessionState::Active);
+    assert_eq!(
+        session.latest_frame().map(|frame| frame.generation),
+        Some(1)
+    );
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.generation),
+        Some(1)
+    );
+
+    session.dispatch_input(HtmlBrowserInput::Text {
+        text: "typed".to_string(),
+    })?;
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.generation),
+        Some(2)
+    );
+    session.close()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn shell_config() -> HtmlBrowserProcessConfig {
+    HtmlBrowserProcessConfig {
+        program: PathBuf::from("/bin/sh"),
+        args: vec!["-c".to_string(), browser_session_script()],
+        chromium_binary: None,
+    }
+}
+
+#[cfg(unix)]
+fn browser_source() -> Result<HtmlBrowserSource, Box<dyn std::error::Error>> {
+    Ok(HtmlBrowserSource::new(
+        "<button id=action>Run</button>",
+        "https://example.test/index.html",
+    )?)
+}
+
+#[cfg(unix)]
+fn viewport() -> Result<HtmlBrowserViewport, Box<dyn std::error::Error>> {
+    Ok(HtmlBrowserViewport::new(2, 2, 1.0)?)
+}
+
+#[cfg(unix)]
+fn browser_session_script() -> String {
+    format!(
+        r#"count=0
+while IFS= read -r request; do
+  case "$request" in
+    *'"command":"close"'*)
+      printf '%s\n' '{{"result":"closed","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION}}}'
+      exit 0
+      ;;
+  esac
+  count=$((count + 1))
+  printf '%s\n' '{{"result":"frame","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION},"frame":{{"generation":'"$count"',"origin":"https://example.test/index.html","viewport":{{"width":2,"height":2,"device_scale_factor":1.0}},"pixel_format":"Rgba8","pixels":[0,0,0,255,0,0,0,255,0,0,0,255,0,0,0,255]}}}}'
+done"#
+    )
 }

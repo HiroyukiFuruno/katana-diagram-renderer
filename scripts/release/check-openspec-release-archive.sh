@@ -31,7 +31,7 @@ parse_version() {
   return 1
 }
 
-change_version_at_or_before_target() {
+change_version_before_target() {
   local change_name="$1"
   local target_major="$2"
   local target_minor="$3"
@@ -57,7 +57,7 @@ change_version_at_or_before_target() {
   if [[ "${minor}" -gt "${target_minor}" ]]; then
     return 1
   fi
-  [[ "${patch}" -le "${target_patch}" ]]
+  [[ "${patch}" -lt "${target_patch}" ]]
 }
 
 target_version="${1:-}"
@@ -83,7 +83,7 @@ remaining_changes=()
 for change_dir in openspec/changes/v*-*-*-*; do
   [[ -d "${change_dir}" ]] || continue
   change_name="$(basename "${change_dir}")"
-  if change_version_at_or_before_target \
+  if change_version_before_target \
     "${change_name}" \
     "${target_major}" \
     "${target_minor}" \
@@ -93,7 +93,7 @@ for change_dir in openspec/changes/v*-*-*-*; do
 done
 
 if [[ "${#remaining_changes[@]}" -gt 0 ]]; then
-  error "v${target_version#v} 以前の OpenSpec change が active のまま残っています。"
+  error "v${target_version#v} より前の OpenSpec change が active のまま残っています。"
   error "release/v* の PR 作成前に archive へ移動してください。"
   for change_name in "${remaining_changes[@]}"; do
     error " - ${change_name}"
@@ -101,4 +101,4 @@ if [[ "${#remaining_changes[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-success "v${target_version#v} 以前の OpenSpec change は archive 済みです。"
+success "v${target_version#v} より前の OpenSpec change は archive 済みです。"

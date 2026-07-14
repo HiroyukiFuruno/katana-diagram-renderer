@@ -49,13 +49,13 @@ impl PlantUmlRendererOps {
             Err(warning) => return Self::raw(block, warning.message()),
         };
         let style = PlantUmlThemeOps::style(preset, theme_config);
-        PlantUmlJvmRuntimeOps::render_svg(&block.source, &paths, &style).map_or_else(
-            |error| DiagramResult::Err {
+        match PlantUmlJvmRuntimeOps::render_svg(&block.source, &paths, &style) {
+            Ok(svg) => DiagramResult::Ok(svg),
+            Err(error) => DiagramResult::Err {
                 source: block.source.clone(),
                 error,
             },
-            DiagramResult::Ok,
-        )
+        }
     }
 
     fn raw(block: &DiagramBlock, warning: String) -> DiagramResult {
@@ -63,5 +63,43 @@ impl PlantUmlRendererOps {
             source: block.source.clone(),
             warning,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown::DiagramKind;
+
+    #[test]
+    fn render_plantuml_with_jar_path_reports_runtime_errors() {
+        assert!(matches!(
+            render_cached("@startuml\nthis is not valid ???\n@enduml"),
+            DiagramResult::Err { error, .. } if error.contains("PlantUML render failed")
+        ));
+    }
+
+    #[test]
+    fn render_plantuml_with_jar_path_returns_runtime_svg() {
+        assert!(matches!(
+            render_cached("@startuml\nAlice -> Bob\n@enduml"),
+            DiagramResult::Ok(svg) if svg.contains("<svg")
+        ));
+    }
+
+    fn render_cached(source: &str) -> DiagramResult {
+        let jar_path = asset::PlantUmlJarAssetOps::cache_path(None);
+        assert!(jar_path.exists(), "PlantUML cache jar is required");
+        let block = DiagramBlock {
+            kind: DiagramKind::PlantUml,
+            source: source.to_string(),
+        };
+        PlantUmlRendererOps::render_plantuml_with_jar_path(
+            &block,
+            &jar_path,
+            DiagramColorPreset::light(),
+            &PlantUmlThemeConfig::default(),
+            &PlantUmlRuntimeConfig::default(),
+        )
     }
 }

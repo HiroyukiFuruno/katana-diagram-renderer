@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.8"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/HiroyukiFuruno/katana-render-runtime"
@@ -16,7 +16,7 @@ authors = ["Hiroyuki Furuno"]
 description = "Versioned render runtime for KatanA diagrams and math (Mermaid, Draw.io, ZenUML, PlantUML, MathJax)."
 
 [workspace.dependencies]
-katana-render-runtime = { path = "crates/katana-render-runtime", version = "0.3.8" }
+katana-render-runtime = { path = "crates/katana-render-runtime", version = "0.4.0" }
 katana-ast-lint = "0.5.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,4 +36,9 @@ sha2 = "0.11"
 tiny-skia = "0.12"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 v8 = "=150.0.0"
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
 xmltree = "0.12"
+percent-encoding = "2.3"
+headless_chrome = "1.0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }

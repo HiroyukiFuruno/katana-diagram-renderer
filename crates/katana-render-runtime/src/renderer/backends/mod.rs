@@ -1,9 +1,34 @@
 mod drawio;
+mod html;
+mod html_browser;
+mod html_css;
+mod html_css_rule;
+mod html_css_selector;
+mod html_document;
+mod html_document_fragment;
+mod html_dom_helpers;
+mod html_runtime;
+#[cfg(test)]
+mod html_runtime_tests;
+mod html_snapshot;
+mod html_table;
 mod mathjax;
 mod mermaid;
 mod plantuml;
 
 pub use drawio::DrawioRenderer;
+pub use html::{HtmlRenderInput, HtmlRenderOutput, HtmlRenderer};
+pub use html_browser::{
+    HTML_BROWSER_MAX_SOURCE_BYTES, HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand,
+    HtmlBrowserEngineErrorCode, HtmlBrowserError, HtmlBrowserFrame, HtmlBrowserInput,
+    HtmlBrowserNavigation, HtmlBrowserNavigationEvent, HtmlBrowserOrigin, HtmlBrowserPixelFormat,
+    HtmlBrowserProcess, HtmlBrowserProcessConfig, HtmlBrowserRequest, HtmlBrowserResponse,
+    HtmlBrowserSession, HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport,
+    HtmlRuntime, HtmlRuntimeSession,
+};
+pub use html_runtime::HtmlRuntimeError;
+#[cfg(test)]
+pub(crate) use html_runtime::{HtmlNodeId, HtmlRuntimeEvent, StaticHtmlRuntime};
 pub use mathjax::MathJaxRenderer;
 pub use mermaid::MermaidRenderer;
 pub use plantuml::PlantUmlRenderer;
@@ -30,6 +55,7 @@ mod tests {
         assert!(drawio.render(&input(DiagramKind::Drawio, "x")).is_err());
         assert!(mathjax.render(&input(DiagramKind::MathJax, " ")).is_ok());
         assert!(plantuml.render(&input(DiagramKind::PlantUml, " ")).is_ok());
+        assert!(plantuml.render(&input(DiagramKind::PlantUml, "x")).is_ok());
     }
 
     fn input(kind: DiagramKind, source: &str) -> RenderInput {

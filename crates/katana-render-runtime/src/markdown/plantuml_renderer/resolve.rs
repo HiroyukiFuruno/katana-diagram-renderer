@@ -39,9 +39,20 @@ impl PlantUmlRuntimePathOps {
         jar_path: &Path,
         cache_dir: Option<&Path>,
     ) -> Result<PlantUmlRuntimePaths, PlantUmlRuntimeWarning> {
-        let jar_path = Self::resolve_existing_jar(jar_path, cache_dir)?;
-        let jvm_path = Self::resolve_existing_jvm()?;
-        Ok(PlantUmlRuntimePaths { jvm_path, jar_path })
+        Self::resolve_existing_jar(jar_path, cache_dir).and_then(Self::runtime_paths_for_jar)
+    }
+
+    fn runtime_paths_for_jar(
+        jar_path: PathBuf,
+    ) -> Result<PlantUmlRuntimePaths, PlantUmlRuntimeWarning> {
+        Self::runtime_paths_for_candidates(jar_path, Self::jvm_candidates())
+    }
+    fn runtime_paths_for_candidates(
+        jar_path: PathBuf,
+        candidates: Vec<PathBuf>,
+    ) -> Result<PlantUmlRuntimePaths, PlantUmlRuntimeWarning> {
+        Self::resolve_jvm_from_candidates(candidates)
+            .map(|jvm_path| PlantUmlRuntimePaths { jvm_path, jar_path })
     }
 
     fn resolve_existing_jar(
@@ -59,8 +70,10 @@ impl PlantUmlRuntimePathOps {
                 Self::display_paths(&candidates),
             ));
         }
-        PlantUmlJarAssetOps::verify_jar(jar_path).map_err(Self::jar_warning)?;
-        Ok(jar_path.to_path_buf())
+        match PlantUmlJarAssetOps::verify_jar(jar_path) {
+            Ok(()) => Ok(jar_path.to_path_buf()),
+            Err(reason) => Err(Self::jar_warning(reason)),
+        }
     }
 
     fn can_override_cache_path(jar_path: &Path) -> bool {
@@ -85,21 +98,15 @@ impl PlantUmlRuntimePathOps {
         ]
     }
 
-    fn resolve_existing_jvm() -> Result<PathBuf, PlantUmlRuntimeWarning> {
-        let candidates = Self::jvm_candidates();
-        Self::resolve_jvm_from_candidates(candidates)
-    }
-
     fn resolve_jvm_from_candidates(
         candidates: Vec<PathBuf>,
     ) -> Result<PathBuf, PlantUmlRuntimeWarning> {
-        Self::first_existing(candidates.clone()).ok_or_else(|| {
-            PlantUmlRuntimeWarning::new(
-                "libjvm was not found",
-                vec![KRR_PLANTUML_JVM_ENV, KDR_PLANTUML_JVM_ENV, JAVA_HOME_ENV],
-                Self::display_paths(&candidates),
-            )
-        })
+        let warning = PlantUmlRuntimeWarning::new(
+            "libjvm was not found",
+            vec![KRR_PLANTUML_JVM_ENV, KDR_PLANTUML_JVM_ENV, JAVA_HOME_ENV],
+            Self::display_paths(&candidates),
+        );
+        Self::first_existing(candidates).ok_or(warning)
     }
 
     fn first_existing(candidates: Vec<PathBuf>) -> Option<PathBuf> {
@@ -119,49 +126,49 @@ impl PlantUmlRuntimePathOps {
 
     fn java_home_jvm_candidates(java_home: &Path) -> Vec<PathBuf> {
         vec![
-            java_home
-                .join("lib")
-                .join("server")
-                .join(Self::libjvm_name()),
-            java_home
-                .join("jre")
-                .join("lib")
-                .join("server")
-                .join(Self::libjvm_name()),
-            java_home
-                .join("bin")
-                .join("server")
-                .join(Self::libjvm_name()),
+            java_home.join("lib/server").join(Self::libjvm_name()),
+            java_home.join("jre/lib/server").join(Self::libjvm_name()),
+            java_home.join("bin/server").join(Self::libjvm_name()),
         ]
     }
 
+    #[cfg(target_os = "macos")]
     fn platform_jvm_candidates() -> Vec<PathBuf> {
-        if cfg!(target_os = "macos") {
-            return vec![
-                "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
-                "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
-                "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
-            ];
-        }
-        if cfg!(target_os = "linux") {
-            return vec![
-                "/usr/lib/jvm/default-java/lib/server/libjvm.so".into(),
-                "/usr/lib/jvm/default/lib/server/libjvm.so".into(),
-                "/usr/lib/jvm/java-21-openjdk-amd64/lib/server/libjvm.so".into(),
-                "/usr/lib/jvm/java-17-openjdk-amd64/lib/server/libjvm.so".into(),
-            ];
-        }
+        vec![
+            "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
+            "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
+            "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/lib/server/libjvm.dylib".into(),
+        ]
+    }
+
+    #[cfg(target_os = "linux")]
+    fn platform_jvm_candidates() -> Vec<PathBuf> {
+        vec![
+            "/usr/lib/jvm/default-java/lib/server/libjvm.so".into(),
+            "/usr/lib/jvm/default/lib/server/libjvm.so".into(),
+            "/usr/lib/jvm/java-21-openjdk-amd64/lib/server/libjvm.so".into(),
+            "/usr/lib/jvm/java-17-openjdk-amd64/lib/server/libjvm.so".into(),
+        ]
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn platform_jvm_candidates() -> Vec<PathBuf> {
         Vec::new()
     }
 
+    #[cfg(target_os = "windows")]
     fn libjvm_name() -> &'static str {
-        if cfg!(target_os = "windows") {
-            "jvm.dll"
-        } else if cfg!(target_os = "macos") {
-            "libjvm.dylib"
-        } else {
-            "libjvm.so"
-        }
+        "jvm.dll"
+    }
+
+    #[cfg(target_os = "macos")]
+    fn libjvm_name() -> &'static str {
+        "libjvm.dylib"
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    fn libjvm_name() -> &'static str {
+        "libjvm.so"
     }
 
     fn push_env_path(candidates: &mut Vec<PathBuf>, name: &'static str) {
@@ -185,7 +192,6 @@ impl PlantUmlRuntimePathOps {
         paths.iter().map(|it| it.display().to_string()).collect()
     }
 }
-
 #[cfg(test)]
 #[path = "resolve_tests.rs"]
 mod tests;

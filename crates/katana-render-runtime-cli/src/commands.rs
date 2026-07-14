@@ -83,14 +83,13 @@ impl ThemeModeArg {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, DiagramAction};
+    use super::{Cli, Commands, DiagramAction, ThemeModeArg};
     use clap::Parser;
 
     #[test]
     fn parses_mermaid_render_command() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "krr", "mermaid", "render", "--input", "in.md", "--output", "out.svg",
-        ])?;
+        let args = "krr mermaid render --input in.md --output out.svg";
+        let cli = Cli::try_parse_from(args.split_whitespace())?;
         assert!(matches!(
             cli.command,
             Commands::Mermaid {
@@ -102,15 +101,8 @@ mod tests {
 
     #[test]
     fn parses_drawio_compare_command() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "krr",
-            "drawio",
-            "compare",
-            "--fixtures",
-            "tests/fixtures/drawio",
-            "--min-score",
-            "99.5",
-        ])?;
+        let args = "krr drawio compare --fixtures tests/fixtures/drawio --min-score 99.5";
+        let cli = Cli::try_parse_from(args.split_whitespace())?;
         assert!(matches!(
             cli.command,
             Commands::Drawio {
@@ -122,60 +114,43 @@ mod tests {
 
     #[test]
     fn parses_plantuml_render_command() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "krr",
-            "plantuml",
-            "render",
-            "--input",
-            "in.puml",
-            "--theme",
-            "cyborg",
-            "--theme-mode",
-            "light",
-        ])?;
-        let Commands::Plantuml {
-            action: DiagramAction::Render {
-                theme, theme_mode, ..
-            },
-        } = cli.command
-        else {
-            return Err("expected plantuml render command".into());
-        };
-
-        assert_eq!(theme.as_deref(), Some("cyborg"));
-        assert_eq!(theme_mode.map(|it| it.as_str()), Some("light"));
+        let args = "krr plantuml render --input in.puml --theme cyborg --theme-mode light";
+        let cli = Cli::try_parse_from(args.split_whitespace())?;
+        assert!(matches!(
+            cli.command,
+            Commands::Plantuml {
+                action: DiagramAction::Render {
+                    theme: Some(ref theme),
+                    theme_mode: Some(ThemeModeArg::Light),
+                    ..
+                }
+            } if theme == "cyborg"
+        ));
         Ok(())
     }
 
     #[test]
     fn parses_plantuml_cache_dir() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "krr",
-            "plantuml",
-            "render",
-            "--input",
-            "in.puml",
-            "--cache-dir",
-            "/tmp/krr-cache",
-        ])?;
-        let Commands::Plantuml {
-            action: DiagramAction::Render { cache_dir, .. },
-        } = cli.command
-        else {
-            return Err("expected plantuml render command".into());
-        };
-
-        assert_eq!(cache_dir, Some(std::path::PathBuf::from("/tmp/krr-cache")));
+        let args = "krr plantuml render --input in.puml --cache-dir /tmp/krr-cache";
+        let cli = Cli::try_parse_from(args.split_whitespace())?;
+        assert!(matches!(
+            cli.command,
+            Commands::Plantuml {
+                action: DiagramAction::Render {
+                    cache_dir: Some(ref path),
+                    ..
+                }
+            } if path == std::path::Path::new("/tmp/krr-cache")
+        ));
         Ok(())
     }
 
     #[test]
     fn plantuml_render_help_lists_theme_options() -> Result<(), Box<dyn std::error::Error>> {
         let result = Cli::try_parse_from(["krr", "plantuml", "render", "--help"]);
-        let Err(error) = result else {
-            return Err("expected help output".into());
-        };
-        let help = error.to_string();
+        let help = result
+            .err()
+            .map_or_else(String::new, |error| error.to_string());
 
         assert!(help.contains("--theme <THEME>"), "{help}");
         assert!(help.contains("cyborg"), "{help}");
@@ -190,13 +165,18 @@ mod tests {
     fn help_uses_canonical_krr_name_when_executable_has_extension()
     -> Result<(), Box<dyn std::error::Error>> {
         let result = Cli::try_parse_from(["krr.exe", "--help"]);
-        let Err(error) = result else {
-            return Err("expected help output".into());
-        };
-        let help = error.to_string();
+        let help = result
+            .err()
+            .map_or_else(String::new, |error| error.to_string());
 
         assert!(help.contains("Usage: krr <COMMAND>"), "{help}");
         assert!(!help.contains("Usage: krr.exe <COMMAND>"), "{help}");
         Ok(())
+    }
+
+    #[test]
+    fn theme_mode_values_have_canonical_names() {
+        assert_eq!(ThemeModeArg::Dark.as_str(), "dark");
+        assert_eq!(ThemeModeArg::Light.as_str(), "light");
     }
 }

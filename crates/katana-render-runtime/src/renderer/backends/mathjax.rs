@@ -23,26 +23,23 @@ impl Renderer for MathJaxRenderer {
         }
         let runtime = RuntimeDescriptor::mathjax();
         match self.render_block(input) {
-            crate::markdown::DiagramResult::Ok(svg) => RenderOutputFactory::from_diagram_result(
+            Ok(svg) => RenderOutputFactory::from_diagram_result(
                 input,
                 crate::markdown::DiagramResult::Ok(svg),
                 runtime,
             ),
-            crate::markdown::DiagramResult::RawCode { source, warning } => Ok(
-                RenderOutputFactory::from_raw_string(input, source, warning, runtime),
-            ),
-            crate::markdown::DiagramResult::Err { error, source } => Ok(
-                RenderOutputFactory::from_raw_string(input, source, error, runtime),
-            ),
-            _ => Err(RenderError::Runtime(
-                "unexpected MathJax output".to_string(),
+            Err(warning) => Ok(RenderOutputFactory::from_raw_string(
+                input,
+                input.source.clone(),
+                warning,
+                runtime,
             )),
         }
     }
 }
 
 impl MathJaxRenderer {
-    fn render_block(&self, input: &RenderInput) -> crate::markdown::DiagramResult {
+    fn render_block(&self, input: &RenderInput) -> Result<String, String> {
         let block = DiagramBlock {
             kind: crate::markdown::DiagramKind::MathJax,
             source: input.source.clone(),
@@ -67,5 +64,32 @@ impl MathJaxRenderConfig {
             .get("display")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::api::{RenderConfig, RenderContext, RenderPolicy};
+
+    #[test]
+    fn display_config_accepts_only_boolean_values() {
+        assert!(MathJaxRenderConfig::display(&input(serde_json::json!({
+            "display": true
+        }))));
+        assert!(!MathJaxRenderConfig::display(&input(serde_json::json!({
+            "display": "true"
+        }))));
+        assert!(!MathJaxRenderConfig::display(&input(serde_json::json!({}))));
+    }
+
+    fn input(vendor_config: serde_json::Value) -> RenderInput {
+        RenderInput {
+            kind: DiagramKind::MathJax,
+            source: String::new(),
+            config: RenderConfig { vendor_config },
+            policy: RenderPolicy::default(),
+            context: RenderContext::default(),
+        }
     }
 }

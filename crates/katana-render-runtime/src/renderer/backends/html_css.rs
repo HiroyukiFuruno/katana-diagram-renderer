@@ -1,0 +1,122 @@
+use super::html_css_rule::{CssDeclaration, CssRule, parse_rules};
+use markup5ever_rcdom::{Handle, NodeData};
+
+pub(super) type HtmlAttributes = Vec<(String, String)>;
+
+#[derive(Debug, Default)]
+pub(super) struct StaticCss {
+    rules: Vec<CssRule>,
+}
+
+impl StaticCss {
+    pub(super) fn from_document(document: &Handle) -> Self {
+        let mut source = String::new();
+        collect_style_blocks(document, &mut source);
+        Self {
+            rules: parse_rules(&source),
+        }
+    }
+
+    pub(super) fn apply(&self, tag: &str, attributes: &HtmlAttributes) -> HtmlAttributes {
+        let mut rendered = attributes
+            .iter()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("style"))
+            .cloned()
+            .collect::<HtmlAttributes>();
+        let stylesheet = self.resolved_declarations(tag, attributes);
+        let inline = style_attribute(attributes);
+        if stylesheet.is_empty() && inline.trim().is_empty() {
+            return rendered;
+        }
+        let mut declarations = stylesheet;
+        if !inline.trim().is_empty() {
+            declarations.push(inline);
+        }
+        rendered.push(("style".to_string(), declarations.join("; ")));
+        rendered
+    }
+
+    fn resolved_declarations(&self, tag: &str, attributes: &HtmlAttributes) -> Vec<String> {
+        let mut selected = Vec::<SelectedDeclaration>::new();
+        for (rule_order, rule) in self.rules.iter().enumerate() {
+            let Some(specificity) = rule.matches(tag, attributes) else {
+                continue;
+            };
+            for declaration in &rule.declarations {
+                select_declaration(&mut selected, declaration, specificity, rule_order);
+            }
+        }
+        selected
+            .into_iter()
+            .map(|selected| format!("{}: {}", selected.name, selected.value))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct SelectedDeclaration {
+    name: String,
+    value: String,
+    specificity: u16,
+    rule_order: usize,
+}
+
+fn collect_style_blocks(node: &Handle, source: &mut String) {
+    if element_name(node).is_some_and(|name| name == "style") {
+        source.push_str(&text_content(node));
+        source.push('\n');
+        return;
+    }
+    for child in node.children.borrow().iter() {
+        collect_style_blocks(child, source);
+    }
+}
+
+fn element_name(node: &Handle) -> Option<String> {
+    match &node.data {
+        NodeData::Element { name, .. } => Some(name.local.to_string().to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn text_content(node: &Handle) -> String {
+    let own = match &node.data {
+        NodeData::Text { contents } => contents.borrow().to_string(),
+        _ => String::new(),
+    };
+    node.children.borrow().iter().fold(own, |mut text, child| {
+        text.push_str(&text_content(child));
+        text
+    })
+}
+
+fn style_attribute(attributes: &HtmlAttributes) -> String {
+    attributes
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("style"))
+        .map_or_else(String::new, |(_, value)| value.clone())
+}
+
+fn select_declaration(
+    selected: &mut Vec<SelectedDeclaration>,
+    declaration: &CssDeclaration,
+    specificity: u16,
+    rule_order: usize,
+) {
+    let candidate = SelectedDeclaration {
+        name: declaration.name.clone(),
+        value: declaration.value.clone(),
+        specificity,
+        rule_order,
+    };
+    let Some(current) = selected
+        .iter_mut()
+        .find(|item| item.name == declaration.name)
+    else {
+        selected.push(candidate);
+        return;
+    };
+    if (candidate.specificity, candidate.rule_order) >= (current.specificity, current.rule_order) {
+        *current = candidate;
+    }
+}

@@ -166,9 +166,11 @@ fn extract_resource_groups(source: &str) -> BTreeSet<String> {
     let mut remaining = source;
     while let Some(index) = remaining.find("shape=mxgraph.") {
         remaining = &remaining[index + "shape=mxgraph.".len()..];
-        if let Some(prefix) = drawio_prefix(remaining) {
-            groups.extend(resource_groups(prefix));
-        }
+        groups.extend(
+            drawio_prefix(remaining)
+                .into_iter()
+                .flat_map(resource_groups),
+        );
     }
     groups
 }

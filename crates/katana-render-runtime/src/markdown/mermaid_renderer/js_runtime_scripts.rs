@@ -80,6 +80,13 @@ mod tests {
     }
 
     #[test]
+    fn invalid_request_json_does_not_load_zenuml_runtime() {
+        let scripts = MermaidRuntimeScripts::build("bundle", "not-json");
+
+        assert!(!scripts.iter().any(|it| it.name == "zenuml-runtime.min.js"));
+    }
+
+    #[test]
     fn zenuml_registration_runs_before_render() {
         let scripts = MermaidRuntimeScripts::build_with_zenuml(
             fake_mermaid(),

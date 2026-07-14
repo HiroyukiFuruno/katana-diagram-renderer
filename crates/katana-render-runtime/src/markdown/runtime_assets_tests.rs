@@ -120,6 +120,49 @@ fn runtime_asset_error_keeps_io_error_message() {
 }
 
 #[test]
+fn runtime_asset_cleanup_and_read_error_paths_are_explicit() {
+    cleanup_temporary_file_after_rename_error();
+    reports_read_error_for_directory_path();
+}
+
+fn cleanup_temporary_file_after_rename_error() {
+    let temporary = test_path("cleanup.tmp");
+    let parent = temporary.parent();
+    assert!(matches!(parent, Some(it) if std::fs::create_dir_all(it).is_ok()));
+    assert!(std::fs::write(&temporary, b"temporary").is_ok());
+    let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "rename denied");
+
+    let cleanup = RuntimeAsset::cleanup_temp_and_report(temporary.clone(), error);
+
+    assert!(matches!(cleanup, Err(error) if error == "rename denied"));
+    assert!(!temporary.exists());
+}
+
+fn reports_read_error_for_directory_path() {
+    let directory = test_path("read-error");
+    assert!(std::fs::create_dir_all(&directory).is_ok());
+    let read_error = RuntimeAsset::mermaid().exists_with_same_bytes(&directory);
+
+    assert!(read_error.is_err());
+    remove_parent(&directory);
+}
+
+#[test]
+fn runtime_asset_reports_rename_failure_after_temporary_write() {
+    let destination = test_path("rename-destination");
+    let parent = destination
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    assert!(std::fs::create_dir_all(parent).is_ok());
+    assert!(std::fs::create_dir_all(&destination).is_ok());
+
+    let result = RuntimeAsset::mermaid().write_atomically(&destination, parent);
+
+    assert!(result.is_err());
+    remove_parent(&destination);
+}
+
+#[test]
 fn remove_parent_accepts_path_without_parent() {
     remove_parent(std::path::Path::new(""));
 }

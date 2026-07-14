@@ -16,6 +16,7 @@ include = [
     "vendor/mermaid/11.15.0/**",
     "vendor/mermaid-zenuml/0.2.3/**",
     "vendor/plantuml/1.2026.6/plantuml.jar.sha256",
+    "vendor/chromium/150.0.7871.115/manifest.json",
     "vendor/zenuml-core/3.47.9/**",
     "src/markdown/drawio_renderer/js_runtime/resources/drawio-resource-manifest.json",
     "src/markdown/drawio_renderer/js_runtime/resources/shapes/**",
@@ -29,6 +30,8 @@ path = "src/lib.rs"
 base64 = { workspace = true }
 include_dir = { workspace = true }
 jni = { workspace = true }
+html5ever = { workspace = true }
+markup5ever_rcdom = { workspace = true }
 resvg = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -37,5 +40,13 @@ thiserror = { workspace = true }
 tiny-skia = { workspace = true }
 tracing = { workspace = true }
 ureq = { workspace = true }
+url = "2.5"
 v8 = { workspace = true }
 xmltree = { workspace = true }
+percent-encoding = { workspace = true }
+headless_chrome = { workspace = true }
+image = { workspace = true }
+
+[[bin]]
+name = "krr-html-chromium-engine"
+path = "src/bin/html_chromium_engine.rs"

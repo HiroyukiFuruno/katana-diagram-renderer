@@ -6,7 +6,7 @@
 
 `release/vX.Y.Z` ブランチから `master` へ取り込み依頼（Pull Request）を作る。
 その取り込み依頼（Pull Request）では通常の品質ゲート（quality gate）とリリース前検査を必須にする。
-PR 作成前には `lefthook run pre-pr` を実行し、対象版番号（version）以前の完了済み OpenSpec change が `openspec/changes/archive/` に移動済みであることを確認する。
+PR 作成前には `lefthook run pre-pr` を実行し、対象版番号（version）より前の完了済み OpenSpec change が `openspec/changes/archive/` に移動済みであることを確認する。同じ版番号の change に downstream 公開後の作業が残る場合は、その change を release PR の archive 条件に含めない。
 取り込み（merge）後は自動実行基盤（GitHub Actions）がタグ（tag）、GitHub リリース（GitHub Release）、crates.io 公開を実行する。
 
 ## 必須検査
@@ -21,7 +21,7 @@ GitHub のブランチ保護（branch protection）では、少なくとも次�
 ## リリース前検査
 
 `release-preflight` は `release/v...` ブランチの取り込み依頼（Pull Request）で `just release-check` を実行する。
-`just release-check` は、release 予定版番号（version）以前の OpenSpec change が active 側に残っている場合に失敗する。
+`just release-check` は、release 予定版番号（version）より前の OpenSpec change が active 側に残っている場合に失敗する。
 内容は次の通り。
 
 - 版番号（version）が GitHub Release / remote tag 上の自然な次版であること。`v0.3.0` は rename release として KDR の版番号を引き継ぐ

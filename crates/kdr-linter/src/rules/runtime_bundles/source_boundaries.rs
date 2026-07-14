@@ -14,11 +14,26 @@ const FORBIDDEN_IMPORT_PREFIXES: &[&str] = &[
 ];
 
 const SOURCE_BOUNDARIES: &[RuntimeSourceBoundary] = &[
-    RuntimeSourceBoundary::new("/source/shared/", &["#shared/"]),
-    RuntimeSourceBoundary::new("/source/mermaid/", &["#shared/", "#mermaid/"]),
-    RuntimeSourceBoundary::new("/source/drawio/", &["#shared/", "#drawio/"]),
-    RuntimeSourceBoundary::new("/source/zenuml/", &["#shared/", "#zenuml/"]),
-    RuntimeSourceBoundary::new("/source/mathjax/", &["#shared/"]),
+    RuntimeSourceBoundary {
+        marker: "/source/shared/",
+        allowed_package_imports: &["#shared/"],
+    },
+    RuntimeSourceBoundary {
+        marker: "/source/mermaid/",
+        allowed_package_imports: &["#shared/", "#mermaid/"],
+    },
+    RuntimeSourceBoundary {
+        marker: "/source/drawio/",
+        allowed_package_imports: &["#shared/", "#drawio/"],
+    },
+    RuntimeSourceBoundary {
+        marker: "/source/zenuml/",
+        allowed_package_imports: &["#shared/", "#zenuml/"],
+    },
+    RuntimeSourceBoundary {
+        marker: "/source/mathjax/",
+        allowed_package_imports: &["#shared/"],
+    },
 ];
 
 pub(super) struct RuntimeSourceBoundaryRule;
@@ -42,9 +57,9 @@ impl RuntimeSourceBoundaryRule {
                 continue;
             }
             Self::reject_forbidden_prefixes(file, line_index, line, violations);
-            if let Some(rule) = boundary {
+            boundary.into_iter().for_each(|rule| {
                 Self::reject_boundary_crossing_import(file, line_index, line, rule, violations);
-            }
+            });
         }
     }
 
@@ -108,15 +123,6 @@ impl RuntimeSourceBoundaryRule {
 struct RuntimeSourceBoundary {
     marker: &'static str,
     allowed_package_imports: &'static [&'static str],
-}
-
-impl RuntimeSourceBoundary {
-    const fn new(marker: &'static str, allowed_package_imports: &'static [&'static str]) -> Self {
-        Self {
-            marker,
-            allowed_package_imports,
-        }
-    }
 }
 
 struct ImportSpecifier;

@@ -1,0 +1,707 @@
+use katana_render_runtime::{
+    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand, HtmlBrowserError, HtmlBrowserFrame,
+    HtmlBrowserInput, HtmlBrowserNavigation, HtmlBrowserNavigationEvent, HtmlBrowserProcessConfig,
+    HtmlBrowserRequest, HtmlBrowserResponse, HtmlBrowserSession, HtmlBrowserSource,
+    HtmlBrowserViewport,
+};
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+use url::Url;
+
+type TestResult<T = ()> = Result<T, String>;
+static HTML_BROWSER_ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn chromium_child_evaluates_inline_css_and_javascript_into_rgba_pixels() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel { margin: 0; width: 100%; height: 100%; }</style><div id="pixel"></div><script>document.querySelector('#pixel').style.background = 'rgb(17, 34, 51)';</script>"#,
+        "https://example.test/document.html",
+        16,
+        16,
+    )?;
+
+    let frame = latest_frame(&session)?;
+    assert_eq!(frame.pixels.len(), 16 * 16 * 4);
+    assert_frame_contains_rgb(frame, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_resolves_local_css_javascript_and_image_from_source_origin() -> TestResult {
+    let origin = html_browser_fixture_origin()?;
+    let mut session = start_session(
+        r#"<!doctype html><link rel="stylesheet" href="resources/page.css"><img id="asset" src="resources/accent.svg"><div id="pixel"></div><script src="resources/action.js"></script>"#,
+        origin,
+        32,
+        32,
+    )?;
+
+    assert_initial_local_resources(&session)?;
+    dispatch_click(&mut session, 16.0, 16.0)?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [119, 136, 153])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_returns_link_navigation_to_the_source_host() -> TestResult {
+    let origin = html_browser_fixture_origin()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block}</style><a href="next.html">next</a>"#,
+        origin,
+        32,
+        32,
+    )?;
+
+    dispatch_click(&mut session, 16.0, 16.0)?;
+    let navigation = take_navigation(&mut session)?;
+    assert!(navigation.url.as_str().ends_with("/next.html"));
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_forwards_text_to_a_focused_html_form_control() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body{margin:0}input{width:32px;height:16px}#marker{position:absolute;top:16px;width:32px;height:16px;background:rgb(1,2,3)}</style><input id="field" autofocus><div id="marker"></div><script>const field=document.querySelector('#field');field.addEventListener('input',()=>{if(field.value==='ok')document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
+        "https://example.test/form.html",
+        32,
+        32,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "ok".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_applies_surface_focus_before_text_input() -> TestResult {
+    let mut blurred = start_session(
+        focus_form_html(),
+        "https://example.test/blurred.html",
+        32,
+        32,
+    )?;
+    assert_text_ignored_while_blurred(&mut blurred)?;
+    blurred.close().map_err(|error| error.to_string())?;
+
+    let mut focused = start_session(
+        focus_form_html(),
+        "https://example.test/focused.html",
+        32,
+        32,
+    )?;
+    assert_text_delivered_while_focused(&mut focused)?;
+    focused.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{document.querySelector('#pixel').style.background='rgb(17,34,51)'})</script>"#,
+        "https://example.test/frame-update.html",
+        16,
+        16,
+    )?;
+
+    assert_frame_contains_rgb(take_frame_update(&mut session)?, [1, 2, 3])?;
+    assert!(session.take_frame_update().is_none());
+    dispatch_click(&mut session, 8.0, 8.0)?;
+    assert_frame_contains_rgb(take_frame_update(&mut session)?, [17, 34, 51])?;
+    assert!(session.take_frame_update().is_none());
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}.run #pixel{animation:turn 40ms linear forwards}@keyframes turn{from{background:rgb(1,2,3)}to{background:rgb(17,34,51)}}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{Promise.resolve().then(()=>document.body.classList.add('run'))})</script>"#,
+        "https://example.test/animation.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+    wait_for_frame_rgb(&mut session, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(1,2,3)}</style><a id="link" href="next.html">next</a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();event.currentTarget.style.background='rgb(17,34,51)'})</script>"#,
+        "https://example.test/prevent-default.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+    assert!(session.take_navigation().is_none());
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_updates_the_viewport_after_scroll_and_resize() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body{margin:0}#top,#bottom{height:32px;width:100%}#top{background:rgb(17,34,51)}#bottom{background:rgb(68,85,102)}</style><div id="top"></div><div id="bottom"></div>"#,
+        "https://example.test/scroll.html",
+        32,
+        32,
+    )?;
+
+    scroll_down_one_viewport(&mut session)?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [68, 85, 102])?;
+    session
+        .resize(viewport(24, 16)?)
+        .map_err(|error| error.to_string())?;
+    assert_resized_frame(latest_frame(&session)?)?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_navigates_an_existing_browser_session() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><div id="pixel"></div>"#,
+        "https://example.test/first.html",
+        16,
+        16,
+    )?;
+    let source = HtmlBrowserSource::new(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(17,34,51)}</style><div id="pixel"></div>"#,
+        "https://example.test/second.html",
+    )
+    .map_err(|error| error.to_string())?;
+
+    session
+        .navigate(HtmlBrowserNavigation::new(source).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_handles_pointer_move_keydown_and_ignored_pointer_up() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><div id="pixel" tabindex="0"></div><script>document.addEventListener('keydown', event => { if (event.key === 'a') document.querySelector('#pixel').style.background='rgb(17,34,51)' })</script>"#,
+        "https://example.test/input.html",
+        16,
+        16,
+    )?;
+
+    session
+        .dispatch_input(HtmlBrowserInput::PointerMove { x: 4.0, y: 4.0 })
+        .map_err(|error| error.to_string())?;
+    session
+        .dispatch_input(HtmlBrowserInput::PointerUp {
+            x: 4.0,
+            y: 4.0,
+            button: 1,
+        })
+        .map_err(|error| error.to_string())?;
+    session
+        .dispatch_input(HtmlBrowserInput::KeyDown {
+            key: "a".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+    session
+        .dispatch_input(HtmlBrowserInput::KeyUp {
+            key: "a".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_evaluates_timer_driven_javascript_before_the_initial_frame() -> TestResult {
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}</style><div id="pixel"></div><script>setTimeout(() => { document.querySelector('#pixel').style.background='rgb(17,34,51)' }, 0)</script>"#,
+        "https://example.test/timer.html",
+        16,
+        16,
+    )?;
+
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_blocks_local_resources_outside_the_document_directory() -> TestResult {
+    let origin = html_browser_fixture_origin()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><link rel="stylesheet" href="../outside.css"><div id="pixel"></div>"#,
+        origin,
+        16,
+        16,
+    )?;
+
+    let frame = latest_frame(&session)?;
+    assert_frame_contains_rgb(frame, [1, 2, 3])?;
+    assert_frame_excludes_rgb(frame, [119, 136, 153])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_reports_protocol_errors_without_launching_chromium() -> TestResult {
+    let invalid_message = child_response_for_line("not-json")?;
+    assert!(matches!(
+        invalid_message,
+        HtmlBrowserResponse::Error { code, .. } if code == "invalid_message"
+    ));
+    let unsupported_protocol = serde_json::to_string(&HtmlBrowserRequest {
+        protocol_version: HTML_BROWSER_PROTOCOL_VERSION + 1,
+        command: HtmlBrowserCommand::Close,
+    })
+    .map_err(|error| error.to_string())?;
+
+    let response = child_response_for_line(&unsupported_protocol)?;
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, message, .. }
+            if code == "protocol_version" && message.contains("unsupported")
+    ));
+    Ok(())
+}
+
+#[test]
+fn chromium_child_reports_stdin_read_errors_without_launching_chromium() -> TestResult {
+    let response = child_response_for_input(&[0xff, b'\n'])?;
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, message, .. }
+            if code == "stdin_read" && message.contains("stream did not contain valid UTF-8")
+    ));
+    Ok(())
+}
+
+#[test]
+fn chromium_child_uses_packaged_chromium_when_no_override_is_set() -> TestResult {
+    let response = child_response_for_load_with_chromium_override(None)?;
+
+    assert!(match response {
+        HtmlBrowserResponse::Frame { .. } => true,
+        HtmlBrowserResponse::Error { code, .. } => code == "chromium",
+        _ => false,
+    });
+    Ok(())
+}
+
+#[test]
+fn chromium_child_reports_missing_explicit_chromium_override() -> TestResult {
+    let missing =
+        std::env::temp_dir().join(format!("krr-child-missing-chromium-{}", std::process::id()));
+    let response = child_response_for_load_with_chromium_override(Some(missing))?;
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, message, .. }
+            if code == "chromium"
+                && message.contains("KRR_CHROME_BIN executable was not found")
+    ));
+    Ok(())
+}
+
+#[test]
+fn chromium_child_reports_chromium_launch_errors() -> TestResult {
+    let fake_chromium =
+        std::env::temp_dir().join(format!("krr-child-fake-chromium-{}", std::process::id()));
+    std::fs::write(&fake_chromium, b"not a chromium executable")
+        .map_err(|error| error.to_string())?;
+
+    let response = child_response_for_load_with_chromium_override(Some(fake_chromium.clone()))?;
+    let _ = std::fs::remove_file(&fake_chromium);
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, .. } if code == "chromium"
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn chromium_child_opens_local_document_when_source_directory_is_readonly() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = std::env::temp_dir().join(format!(
+        "krr-child-readonly-document-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let origin_path = directory.join("index.html");
+    std::fs::write(&origin_path, b"origin").map_err(|error| error.to_string())?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500))
+        .map_err(|error| error.to_string())?;
+    let origin = Url::from_file_path(&origin_path)
+        .map_err(|()| "readonly document path is not a file URL".to_string())?;
+    let source = HtmlBrowserSource::new("<p>readonly</p>", origin.to_string())
+        .map_err(|error| error.to_string())?;
+
+    let response = child_response_for_source_load_with_chromium_override(
+        source,
+        Some(test_chromium_binary()?),
+    );
+    let _ = std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_file(&origin_path);
+    let _ = std::fs::remove_dir(&directory);
+    let response = response?;
+
+    assert!(matches!(response, HtmlBrowserResponse::Frame { .. }));
+    Ok(())
+}
+
+#[test]
+fn packaged_browser_config_reports_missing_adjacent_helper() -> TestResult {
+    let _guard = HTML_BROWSER_ENGINE_ENV_LOCK
+        .lock()
+        .map_err(|error| error.to_string())?;
+    unsafe { std::env::remove_var("KRR_HTML_BROWSER_ENGINE") };
+
+    let result = HtmlBrowserProcessConfig::packaged();
+
+    assert!(matches!(
+        result,
+        Err(HtmlBrowserError::EngineBinaryNotFound { path })
+            if path.ends_with("krr-html-chromium-engine")
+    ));
+    Ok(())
+}
+
+#[test]
+fn packaged_browser_config_honors_engine_override() -> TestResult {
+    let _guard = HTML_BROWSER_ENGINE_ENV_LOCK
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let helper =
+        std::env::temp_dir().join(format!("krr-html-browser-engine-{}", std::process::id()));
+    unsafe { std::env::set_var("KRR_HTML_BROWSER_ENGINE", &helper) };
+    let result = HtmlBrowserProcessConfig::packaged();
+    unsafe { std::env::remove_var("KRR_HTML_BROWSER_ENGINE") };
+    let config = result.map_err(|error| error.to_string())?;
+
+    assert_eq!(config.program, helper);
+    assert!(config.args.is_empty());
+    assert_eq!(config.chromium_binary, None);
+    Ok(())
+}
+
+fn start_session(
+    raw_html: &str,
+    origin: impl Into<String>,
+    width: u32,
+    height: u32,
+) -> TestResult<HtmlBrowserSession> {
+    let source = HtmlBrowserSource::new(raw_html, origin).map_err(|error| error.to_string())?;
+    let config = browser_process_config()?;
+    HtmlBrowserSession::start(source, viewport(width, height)?, &config)
+        .map_err(|error| error.to_string())
+}
+
+fn viewport(width: u32, height: u32) -> TestResult<HtmlBrowserViewport> {
+    HtmlBrowserViewport::new(width, height, 1.0).map_err(|error| error.to_string())
+}
+
+fn latest_frame(session: &HtmlBrowserSession) -> TestResult<&HtmlBrowserFrame> {
+    session
+        .latest_frame()
+        .ok_or_else(|| "browser session did not return a frame".to_string())
+}
+
+fn take_frame_update(session: &mut HtmlBrowserSession) -> TestResult<&HtmlBrowserFrame> {
+    session
+        .take_frame_update()
+        .ok_or_else(|| "browser session did not return a frame update".to_string())
+}
+
+fn take_navigation(session: &mut HtmlBrowserSession) -> TestResult<HtmlBrowserNavigationEvent> {
+    session
+        .take_navigation()
+        .ok_or_else(|| "browser session did not return a navigation event".to_string())
+}
+
+fn wait_for_frame_rgb(session: &mut HtmlBrowserSession, rgb: [u8; 3]) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        session.refresh_frame().map_err(|error| error.to_string())?;
+        if frame_contains_rgb(latest_frame(session)?, rgb) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return assert_frame_contains_rgb(latest_frame(session)?, rgb);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_text_ignored_while_blurred(session: &mut HtmlBrowserSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::Focus { focused: false })
+        .map_err(|error| error.to_string())?;
+    dispatch_text_ok(session)?;
+    assert_frame_excludes_rgb(latest_frame(session)?, [17, 34, 51])
+}
+
+fn assert_text_delivered_while_focused(session: &mut HtmlBrowserSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::Focus { focused: true })
+        .map_err(|error| error.to_string())?;
+    dispatch_text_ok(session)?;
+    assert_frame_contains_rgb(latest_frame(session)?, [17, 34, 51])
+}
+
+fn dispatch_text_ok(session: &mut HtmlBrowserSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "ok".to_string(),
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn focus_form_html() -> &'static str {
+    r#"<!doctype html><style>html,body{margin:0}input{width:32px;height:16px}#marker{position:absolute;top:16px;width:32px;height:16px;background:rgb(1,2,3)}</style><input id="field" autofocus><div id="marker"></div><script>const field=document.querySelector('#field');field.addEventListener('input',()=>{if(field.value==='ok')document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#
+}
+
+fn dispatch_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResult {
+    for input in [
+        HtmlBrowserInput::PointerDown { x, y, button: 0 },
+        HtmlBrowserInput::PointerUp { x, y, button: 0 },
+    ] {
+        session
+            .dispatch_input(input)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn scroll_down_one_viewport(session: &mut HtmlBrowserSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::Scroll {
+            delta_x: 0.0,
+            delta_y: 32.0,
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn assert_initial_local_resources(session: &HtmlBrowserSession) -> TestResult {
+    let frame = latest_frame(session)?;
+    assert_frame_contains_rgb(frame, [17, 34, 51])?;
+    assert_frame_contains_rgb(frame, [68, 85, 102])
+}
+
+fn assert_resized_frame(frame: &HtmlBrowserFrame) -> TestResult {
+    if frame.viewport.width != 24 || frame.viewport.height != 16 {
+        return Err(format!(
+            "unexpected frame viewport {}x{}",
+            frame.viewport.width, frame.viewport.height
+        ));
+    }
+    if frame.pixels.len() != 24 * 16 * 4 {
+        return Err(format!(
+            "unexpected frame byte length {}",
+            frame.pixels.len()
+        ));
+    }
+    Ok(())
+}
+
+fn assert_frame_contains_rgb(frame: &HtmlBrowserFrame, rgb: [u8; 3]) -> TestResult {
+    if frame_contains_rgb(frame, rgb) {
+        Ok(())
+    } else {
+        Err(format!(
+            "frame did not contain rgb({},{},{})",
+            rgb[0], rgb[1], rgb[2]
+        ))
+    }
+}
+
+fn assert_frame_excludes_rgb(frame: &HtmlBrowserFrame, rgb: [u8; 3]) -> TestResult {
+    if frame_contains_rgb(frame, rgb) {
+        Err(format!(
+            "frame unexpectedly contained rgb({},{},{})",
+            rgb[0], rgb[1], rgb[2]
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn frame_contains_rgb(frame: &HtmlBrowserFrame, rgb: [u8; 3]) -> bool {
+    frame
+        .pixels
+        .chunks_exact(4)
+        .any(|pixel| pixel[0] == rgb[0] && pixel[1] == rgb[1] && pixel[2] == rgb[2])
+}
+
+fn html_browser_fixture_origin() -> TestResult<String> {
+    let origin_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/html_browser/index.html");
+    Url::from_file_path(origin_path)
+        .map(|url| url.to_string())
+        .map_err(|()| "HTML browser fixture path is not a valid file URL".to_string())
+}
+
+fn browser_process_config() -> TestResult<HtmlBrowserProcessConfig> {
+    Ok(
+        HtmlBrowserProcessConfig::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine").into())
+            .with_chromium_binary(test_chromium_binary()?),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn test_chromium_binary() -> TestResult<PathBuf> {
+    chromium_candidate([
+        bundled_chromium_binary()?,
+        PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        PathBuf::from(
+            "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ),
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn test_chromium_binary() -> TestResult<PathBuf> {
+    chromium_candidate([
+        bundled_chromium_binary()?,
+        PathBuf::from("/usr/bin/google-chrome"),
+        PathBuf::from("/usr/bin/google-chrome-stable"),
+        PathBuf::from("/usr/bin/chromium"),
+        PathBuf::from("/usr/bin/chromium-browser"),
+    ])
+}
+
+#[cfg(target_os = "windows")]
+fn test_chromium_binary() -> TestResult<PathBuf> {
+    let mut candidates = vec![bundled_chromium_binary()?];
+    for base in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
+        if let Some(root) = std::env::var_os(base) {
+            candidates.push(PathBuf::from(root).join("Google/Chrome/Application/chrome.exe"));
+        }
+    }
+    chromium_candidate(candidates)
+}
+
+fn chromium_candidate(candidates: impl IntoIterator<Item = PathBuf>) -> TestResult<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| "test Chromium binary was not found in known install locations".to_string())
+}
+
+fn bundled_chromium_binary() -> TestResult<PathBuf> {
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_krr-html-chromium-engine"));
+    let directory = helper
+        .parent()
+        .ok_or_else(|| "browser helper test binary has no parent directory".to_string())?;
+    Ok(directory.join(bundled_chromium_relative_path()))
+}
+
+fn child_response_for_line(line: &str) -> TestResult<HtmlBrowserResponse> {
+    child_response_for_input(format!("{line}\n").as_bytes())
+}
+
+fn child_response_for_input(input: &[u8]) -> TestResult<HtmlBrowserResponse> {
+    child_response_for_input_with_chromium_override(input, None)
+}
+
+fn child_response_for_load_with_chromium_override(
+    chromium_binary: Option<PathBuf>,
+) -> TestResult<HtmlBrowserResponse> {
+    let source = HtmlBrowserSource::new(
+        "<!doctype html><style>html,body{margin:0;background:rgb(1,2,3)}</style>",
+        "https://example.test/packaged.html",
+    )
+    .map_err(|error| error.to_string())?;
+    child_response_for_source_load_with_chromium_override(source, chromium_binary)
+}
+
+fn child_response_for_source_load_with_chromium_override(
+    source: HtmlBrowserSource,
+    chromium_binary: Option<PathBuf>,
+) -> TestResult<HtmlBrowserResponse> {
+    let request = serde_json::to_string(&HtmlBrowserRequest {
+        protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
+        command: HtmlBrowserCommand::Load {
+            source,
+            viewport: viewport(2, 2)?,
+        },
+    })
+    .map_err(|error| error.to_string())?;
+    child_response_for_input_with_chromium_override(
+        format!("{request}\n").as_bytes(),
+        chromium_binary,
+    )
+}
+
+fn child_response_for_input_with_chromium_override(
+    input: &[u8],
+    chromium_binary: Option<PathBuf>,
+) -> TestResult<HtmlBrowserResponse> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine"));
+    if let Some(path) = chromium_binary {
+        command.env("KRR_CHROME_BIN", path);
+    } else {
+        command.env_remove("KRR_CHROME_BIN");
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "browser child stdin was not piped".to_string())?;
+    stdin.write_all(input).map_err(|error| error.to_string())?;
+    drop(stdin);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "browser child stdout was not piped".to_string())?;
+    let mut response = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut response)
+        .map_err(|error| error.to_string())?;
+    child.wait().map_err(|error| error.to_string())?;
+    serde_json::from_str(response.trim_end()).map_err(|error| error.to_string())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn bundled_chromium_relative_path() -> &'static str {
+    "chromium/mac-arm64/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn bundled_chromium_relative_path() -> &'static str {
+    "chromium/mac-x64/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn bundled_chromium_relative_path() -> &'static str {
+    "chromium/linux64/chrome-linux64/chrome"
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn bundled_chromium_relative_path() -> &'static str {
+    "chromium/win64/chrome-win64/chrome.exe"
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "x86_64")
+)))]
+fn bundled_chromium_relative_path() -> &'static str {
+    "chromium/unsupported/chrome"
+}

@@ -1,10 +1,16 @@
-use super::super::asset::PlantUmlJarAssetOps;
+use super::super::asset::{PLANTUML_ENV_LOCK, PlantUmlJarAssetOps};
 use super::PlantUmlRuntimePathOps;
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    MutexGuard,
+    atomic::{AtomicUsize, Ordering},
+};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+#[path = "resolve_runtime_paths_tests.rs"]
+mod runtime_paths_tests;
+
+static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn java_home_candidates_include_server_libjvm() {
@@ -32,13 +38,13 @@ fn missing_paths_create_actionable_warning() {
 }
 
 #[test]
-fn api_cache_dir_overrides_default_cache_path() {
-    if std::env::var_os("KRR_PLANTUML_JAR").is_some()
-        || std::env::var_os("KDR_PLANTUML_JAR").is_some()
-        || std::env::var_os("PLANTUML_JAR").is_some()
-    {
-        return;
-    }
+fn api_cache_dir_overrides_default_cache_path() -> Result<(), String> {
+    let _guard = env_guard()?;
+    let _krr_jar = EnvOverride::unset("KRR_PLANTUML_JAR");
+    let _kdr_jar = EnvOverride::unset("KDR_PLANTUML_JAR");
+    let _plantuml_jar = EnvOverride::unset("PLANTUML_JAR");
+    let _krr_cache = EnvOverride::unset("KRR_PLANTUML_CACHE_DIR");
+    let _kdr_cache = EnvOverride::unset("KDR_PLANTUML_CACHE_DIR");
     let default_path = PlantUmlJarAssetOps::cache_path(None);
     let cache_dir = PathBuf::from("/tmp/krr-api-cache");
     let effective =
@@ -48,6 +54,7 @@ fn api_cache_dir_overrides_default_cache_path() {
         effective,
         PlantUmlJarAssetOps::cache_path(Some(cache_dir.as_path()))
     );
+    Ok(())
 }
 
 #[test]
@@ -120,6 +127,127 @@ fn jar_path_with_spaces_is_reported_without_shell_splitting() {
     ));
 }
 
+#[test]
+fn effective_jar_path_keeps_explicit_non_cache_path() {
+    let explicit = PathBuf::from("/tmp/explicit-plantuml.jar");
+
+    assert_eq!(
+        PlantUmlRuntimePathOps::effective_jar_path(&explicit, None),
+        explicit
+    );
+}
+
+#[test]
+fn existing_invalid_jar_reports_checksum_warning() -> Result<(), String> {
+    let jar = temp_path("invalid.jar");
+    std::fs::write(&jar, b"invalid").map_err(|error| error.to_string())?;
+
+    let result = PlantUmlRuntimePathOps::resolve_existing_jar(&jar, None);
+
+    assert!(matches!(result, Err(warning) if warning.message().contains("checksum mismatch")));
+    Ok(())
+}
+
+#[test]
+fn first_existing_candidate_and_jvm_resolution_use_existing_path() -> Result<(), String> {
+    let existing = temp_path("libjvm.dylib");
+    std::fs::write(&existing, b"placeholder").map_err(|error| error.to_string())?;
+    let candidates = vec![PathBuf::from("missing-libjvm"), existing.clone()];
+
+    assert_eq!(
+        PlantUmlRuntimePathOps::first_existing(candidates.clone()),
+        Some(existing.clone())
+    );
+    assert!(matches!(
+        PlantUmlRuntimePathOps::resolve_jvm_from_candidates(candidates),
+        Ok(path) if path == existing
+    ));
+    Ok(())
+}
+
+#[test]
+fn environment_fallbacks_include_plantuml_and_java_home() -> Result<(), String> {
+    let _guard = env_guard()?;
+    let _krr_jar = EnvOverride::unset("KRR_PLANTUML_JAR");
+    let _kdr_jar = EnvOverride::unset("KDR_PLANTUML_JAR");
+    let _plantuml = EnvOverride::set("PLANTUML_JAR", "/tmp/plantuml-fallback.jar");
+    let _krr_jvm = EnvOverride::unset("KRR_PLANTUML_JVM");
+    let _kdr_jvm = EnvOverride::unset("KDR_PLANTUML_JVM");
+    let _java_home = EnvOverride::set("JAVA_HOME", "/tmp/krr-test-jdk");
+
+    let candidates = PlantUmlRuntimePathOps::jvm_candidates();
+
+    assert_eq!(
+        PlantUmlRuntimePathOps::surface_jar_path(),
+        PathBuf::from("/tmp/plantuml-fallback.jar")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|path| path.starts_with("/tmp/krr-test-jdk"))
+    );
+    Ok(())
+}
+
+#[test]
+fn jvm_candidates_allow_missing_java_home() -> Result<(), String> {
+    let _guard = env_guard()?;
+    let _krr_jvm = EnvOverride::unset("KRR_PLANTUML_JVM");
+    let _kdr_jvm = EnvOverride::unset("KDR_PLANTUML_JVM");
+    let _java_home = EnvOverride::unset("JAVA_HOME");
+
+    let candidates = PlantUmlRuntimePathOps::jvm_candidates();
+
+    assert!(
+        candidates
+            .iter()
+            .all(|path| !path.starts_with("/tmp/krr-test-jdk"))
+    );
+    Ok(())
+}
+
+#[test]
+fn verified_local_jar_is_returned_for_an_explicit_runtime_path() -> Result<(), String> {
+    let jar_path = PlantUmlJarAssetOps::cache_path(None);
+    if !jar_path.exists() {
+        return Ok(());
+    }
+
+    let resolved = PlantUmlRuntimePathOps::resolve_existing_jar(
+        &jar_path,
+        Some(Path::new("/tmp/krr-unrelated-plantuml-cache")),
+    )
+    .map_err(|warning| warning.message())?;
+
+    assert_eq!(resolved, jar_path);
+    Ok(())
+}
+
+#[test]
+fn resolve_paths_accepts_verified_jar_and_env_jvm() -> Result<(), String> {
+    let jar_path = PlantUmlJarAssetOps::cache_path(None);
+    if !jar_path.exists() {
+        return Ok(());
+    }
+    let _guard = env_guard()?;
+    let jvm_path = temp_path("libjvm.dylib");
+    std::fs::write(&jvm_path, b"jvm").map_err(|error| error.to_string())?;
+    let _krr_jvm = EnvOverride::set_path("KRR_PLANTUML_JVM", &jvm_path);
+    let _kdr_jvm = EnvOverride::unset("KDR_PLANTUML_JVM");
+    let _java_home = EnvOverride::unset("JAVA_HOME");
+
+    let paths = PlantUmlRuntimePathOps::resolve_paths(
+        &jar_path,
+        Some(Path::new("/tmp/krr-unrelated-plantuml-cache")),
+    )
+    .map_err(|warning| warning.message())?;
+    let _ = std::fs::remove_file(&jvm_path);
+
+    assert_eq!(paths.jar_path, jar_path);
+    assert_eq!(paths.jvm_path, jvm_path);
+    Ok(())
+}
+
 struct EnvOverride {
     key: &'static str,
     original: Option<OsString>,
@@ -127,6 +255,12 @@ struct EnvOverride {
 
 impl EnvOverride {
     fn set(key: &'static str, value: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+
+    fn set_path(key: &'static str, value: &Path) -> Self {
         let original = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
         Self { key, original }
@@ -149,5 +283,13 @@ impl Drop for EnvOverride {
 }
 
 fn env_guard() -> Result<MutexGuard<'static, ()>, String> {
-    ENV_LOCK.lock().map_err(|error| error.to_string())
+    PLANTUML_ENV_LOCK.lock().map_err(|error| error.to_string())
+}
+
+fn temp_path(name: &str) -> PathBuf {
+    let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "krr-plantuml-resolve-{name}-{}-{id}",
+        std::process::id()
+    ))
 }

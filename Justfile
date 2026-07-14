@@ -22,6 +22,7 @@ MATHJAX_JS_VERSION := "4.1.2"
 ZENUML_CORE_JS_VERSION := "3.47.9"
 PLANTUML_JAR_VERSION := "1.2026.6"
 PLANTUML_JAR_CHECKSUM := "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1"
+CHROMIUM_VERSION := "150.0.7871.115"
 PLAYWRIGHT_VERSION := "1.60.0"
 MERMAID_JS := env_var_or_default("MERMAID_JS", "crates/katana-render-runtime/vendor/mermaid/" + MERMAID_JS_VERSION + "/mermaid.min.js")
 MERMAID_ZENUML_JS := env_var_or_default("MERMAID_ZENUML_JS", "crates/katana-render-runtime/vendor/mermaid-zenuml/" + MERMAID_ZENUML_JS_VERSION + "/mermaid-zenuml.min.js")
@@ -30,6 +31,9 @@ MATHJAX_JS := env_var_or_default("MATHJAX_JS", "crates/katana-render-runtime/ven
 PLANTUML_JAR_URL := "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/" + PLANTUML_JAR_VERSION + "/plantuml-lgpl-" + PLANTUML_JAR_VERSION + ".jar"
 PLANTUML_CACHE_DIR := env_var_or_default("KRR_PLANTUML_CACHE_DIR", `bash scripts/plantuml/cache-dir.sh`)
 PLANTUML_CACHE_JAR := PLANTUML_CACHE_DIR + "/" + PLANTUML_JAR_VERSION + "/plantuml.jar"
+CHROMIUM_MANIFEST := "crates/katana-render-runtime/vendor/chromium/" + CHROMIUM_VERSION + "/manifest.json"
+CHROMIUM_CACHE_DIR := env_var_or_default("KRR_CHROMIUM_CACHE_DIR", REPO_ROOT + "/tmp/chromium-cache")
+HTML_CHROMIUM_ENGINE_BIN := env_var_or_default("KRR_HTML_CHROMIUM_ENGINE_BIN", REPO_ROOT + "/target/debug/krr-html-chromium-engine")
 DRAWIO_RESOURCE_DIR := "crates/katana-render-runtime/src/markdown/drawio_renderer/js_runtime/resources"
 DRAWIO_RESOURCE_MANIFEST := DRAWIO_RESOURCE_DIR + "/drawio-resource-manifest.json"
 
@@ -70,7 +74,7 @@ unit-test:
 
 # Run coverage as a required full-check gate
 coverage:
-    {{CARGO}} llvm-cov --workspace --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}
+    {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}
 
 # Verify pinned runtime asset checksums
 runtime-asset-check:
@@ -82,6 +86,7 @@ runtime-asset-check:
     @grep -qx "{{PLANTUML_JAR_CHECKSUM}}  plantuml.jar" crates/katana-render-runtime/vendor/plantuml/{{PLANTUML_JAR_VERSION}}/plantuml.jar.sha256
     @if [ -f "{{PLANTUML_CACHE_JAR}}" ]; then cd "$(dirname "{{PLANTUML_CACHE_JAR}}")" && shasum -a 256 -c "{{REPO_ROOT}}/crates/katana-render-runtime/vendor/plantuml/{{PLANTUML_JAR_VERSION}}/plantuml.jar.sha256"; fi
     cd crates/katana-render-runtime/src/markdown/diagram_runtime/generated && shasum -a 256 -c runtime-bundles.sha256
+    python3 scripts/chromium/install.py --manifest "{{CHROMIUM_MANIFEST}}" --manifest-only
 
 # Generate TypeScript-managed diagram runtime bundles
 runtime-bundle-build:
@@ -107,7 +112,8 @@ runtime-bundle-package-check:
       "src/markdown/diagram_runtime/generated/drawio-runtime.min.js" \
       "src/markdown/diagram_runtime/generated/mathjax-runtime.min.js" \
       "src/markdown/diagram_runtime/generated/zenuml-runtime.min.js" \
-      "src/markdown/diagram_runtime/generated/runtime-bundles.sha256"; do \
+      "src/markdown/diagram_runtime/generated/runtime-bundles.sha256" \
+      "vendor/chromium/150.0.7871.115/manifest.json"; do \
         if ! printf '%s\n' "$package_files" | grep -qx "$file"; then \
           echo "missing runtime bundle package file: $file" >&2; \
           exit 1; \
@@ -130,8 +136,24 @@ plantuml-runtime-package-check:
 runtime-asset-script-test:
     bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts
 
+# Run Python tests for the Chromium release asset helper
+chromium-asset-script-test:
+    python3 scripts/chromium/install_test.py
+
+# Build the Chromium helper binary used by browser sessions
+chromium-helper-build:
+    {{CARGO}} build -p katana-render-runtime --bin krr-html-chromium-engine
+
+# Download, verify, extract, and place the pinned Chromium bundle next to the helper binary
+chromium-install helper=HTML_CHROMIUM_ENGINE_BIN: chromium-helper-build
+    python3 scripts/chromium/install.py --manifest "{{CHROMIUM_MANIFEST}}" --helper-bin "{{helper}}" --cache-dir "{{CHROMIUM_CACHE_DIR}}"
+
+# Verify the pinned Chromium bundle is installed next to the helper binary
+chromium-asset-check helper=HTML_CHROMIUM_ENGINE_BIN:
+    python3 scripts/chromium/install.py --manifest "{{CHROMIUM_MANIFEST}}" --helper-bin "{{helper}}" --cache-dir "{{CHROMIUM_CACHE_DIR}}" --check-only
+
 # Run the local quality gate
-check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check plantuml-runtime-package-check
+check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check plantuml-runtime-package-check chromium-asset-script-test
     @echo "checks passed"
 
 # Sweep old build artifacts locally (older than 7 days)
@@ -159,7 +181,7 @@ release-target-check:
     bash scripts/release/assert-crates-not-published.sh "{{VERSION}}"
 
 # Verify package metadata and dry-run the first publishable crate
-release-verify: release-target-check
+release-verify: release-target-check chromium-install chromium-asset-check
     bash scripts/release/verify-version.sh "{{VERSION}}"
     bash scripts/release/verify-internal-dependencies.sh "{{VERSION}}"
     {{CARGO}} package -p katana-render-runtime --locked --allow-dirty
@@ -172,7 +194,7 @@ release-openspec-archive:
     bash scripts/release/check-openspec-release-archive.sh "{{VERSION}}"
 
 # Verify release branch readiness before merging
-release-check: release-openspec-archive release-verify
+release-check: release-openspec-archive check coverage release-verify
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:

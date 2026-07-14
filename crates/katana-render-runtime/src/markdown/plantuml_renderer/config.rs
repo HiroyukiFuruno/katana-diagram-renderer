@@ -37,12 +37,10 @@ mod tests {
 
     #[test]
     fn runtime_config_accepts_snake_and_camel_cache_dir() -> Result<(), String> {
-        let snake = PlantUmlRuntimeConfig::from_value(&serde_json::json!({
-            "plantuml_cache_dir": "/tmp/krr-cache",
-        }))?;
-        let camel = PlantUmlRuntimeConfig::from_value(&serde_json::json!({
-            "plantumlCacheDir": "/tmp/krr-cache",
-        }))?;
+        let snake_json = serde_json::json!({"plantuml_cache_dir": "/tmp/krr-cache"});
+        let camel_json = serde_json::json!({"plantumlCacheDir": "/tmp/krr-cache"});
+        let snake = PlantUmlRuntimeConfig::from_value(&snake_json)?;
+        let camel = PlantUmlRuntimeConfig::from_value(&camel_json)?;
 
         assert_eq!(snake.cache_dir(), camel.cache_dir());
         Ok(())
@@ -58,5 +56,12 @@ mod tests {
             result,
             Err(error) if error.contains("plantuml_cache_dir")
         ));
+    }
+
+    #[test]
+    fn runtime_config_rejects_non_object_values() {
+        let result = PlantUmlRuntimeConfig::from_value(&serde_json::json!("/tmp/krr-cache"));
+
+        assert!(matches!(result, Err(error) if !error.is_empty()));
     }
 }

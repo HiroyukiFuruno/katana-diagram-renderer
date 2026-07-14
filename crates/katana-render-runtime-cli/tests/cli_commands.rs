@@ -72,6 +72,24 @@ fn cli_plantuml_raw_fallback_logs_warning() -> TestResult<()> {
 }
 
 #[test]
+fn cli_plantuml_rejects_runtime_and_cache_conflict() -> TestResult<()> {
+    let output = command()
+        .args(["plantuml", "render", "--input"])
+        .arg(temp_file("unread-plantuml.puml"))
+        .arg("--runtime")
+        .arg(temp_file("runtime.jar"))
+        .arg("--cache-dir")
+        .arg(temp_file("plantuml-cache"))
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("--runtime and --cache-dir"), "{stderr}");
+    assert!(!stderr.contains("failed to read"), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn cli_drawio_default_runtime_reports_error_without_stub_svg() -> TestResult<()> {
     let input = temp_file("cli-drawio.drawio");
     let output = temp_file("cli-drawio.svg");
