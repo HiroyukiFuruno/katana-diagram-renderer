@@ -32,6 +32,7 @@ impl ChromiumPage {
             .map_err(string_error)?;
         let browser = Browser::new(options).map_err(string_error)?;
         let tab = browser.new_tab().map_err(string_error)?;
+        tab.activate().map_err(string_error)?;
         let mut page = Self {
             _browser: browser,
             tab,
