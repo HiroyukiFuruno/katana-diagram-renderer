@@ -1,6 +1,6 @@
 use super::PlantUmlJarAssetOps;
-use std::io::Write;
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -75,7 +75,13 @@ fn local_server(response: &'static [u8]) -> Result<(String, LocalJarServer), Str
     let address = listener.local_addr().map_err(|error| error.to_string())?;
     let server = std::thread::spawn(move || -> std::io::Result<()> {
         let (mut stream, _) = listener.accept()?;
-        stream.write_all(response)
+        let mut request = [0_u8; 1024];
+        if stream.read(&mut request)? == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        stream.write_all(response)?;
+        stream.flush()?;
+        stream.shutdown(Shutdown::Write)
     });
     Ok((format!("http://{address}"), server))
 }
