@@ -22,7 +22,7 @@ impl ChromiumPage {
             HtmlBrowserInput::KeyUp { .. } => {}
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
-        self.wait_for_paint()?;
+        self.synchronize_rendering()?;
         Ok(())
     }
 
@@ -96,10 +96,10 @@ impl ChromiumPage {
             .map_err(string_error)
     }
 
-    fn wait_for_paint(&self) -> Result<(), String> {
+    fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
             .evaluate(
-                "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+                "Promise.resolve().then(() => { document.documentElement.getBoundingClientRect(); return true; })",
                 true,
             )
             .map(|_| ())
