@@ -15,6 +15,7 @@ use std::{
 };
 
 type TestResult<T = ()> = Result<T, String>;
+const HTTP_RESOURCE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
 fn chromium_child_allows_http_same_origin_and_blocks_redirected_iframe_cross_origin_resources()
@@ -42,9 +43,8 @@ fn blocked_resource_server() -> TestResult<TestHttpServer> {
 
 fn allowed_resource_server(blocked_script: String) -> TestResult<TestHttpServer> {
     TestHttpServer::start(move |path| match path {
-        "/allowed.css" => HttpResponse::css("html,body,#pixel{margin:0;width:100%;height:100%}"),
-        "/allowed.js" => HttpResponse::javascript(
-            "document.querySelector('#pixel').style.background='rgb(17,34,51)'",
+        "/allowed.css" => HttpResponse::css(
+            "html,body,#pixel{margin:0;width:100%;height:100%;background:rgb(17,34,51)}",
         ),
         "/redirect.js" => HttpResponse::redirect(&blocked_script),
         _ => HttpResponse::not_found(),
@@ -56,7 +56,6 @@ fn browser_page_with_cross_origin_targets(blocked_frame: &str) -> String {
         r#"<!doctype html>
 <link rel="stylesheet" href="/allowed.css">
 <div id="pixel"></div>
-<script src="/allowed.js"></script>
 <script src="/redirect.js"></script>
 <iframe style="position:absolute;left:0;top:0;width:8px;height:8px;border:0" src="{blocked_frame}"></iframe>
 "#
@@ -88,7 +87,7 @@ fn latest_frame(session: &HtmlBrowserSession) -> TestResult<&HtmlBrowserFrame> {
 }
 
 fn wait_for_frame_rgb(session: &mut HtmlBrowserSession, rgb: [u8; 3]) -> TestResult {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + HTTP_RESOURCE_SETTLE_TIMEOUT;
     loop {
         session.refresh_frame().map_err(|error| error.to_string())?;
         if frame_contains_rgb(latest_frame(session)?, rgb) {

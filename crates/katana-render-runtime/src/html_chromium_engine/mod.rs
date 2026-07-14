@@ -2,6 +2,7 @@ mod document;
 mod input;
 mod main_document;
 mod page;
+mod page_slot;
 mod policy;
 mod runtime;
 mod source;
@@ -40,6 +41,7 @@ fn run_with_io(reader: &mut dyn BufRead, writer: &mut dyn Write) {
             break;
         }
     }
+    page_slot::clear();
 }
 
 fn loop_response(
@@ -67,8 +69,7 @@ fn handle_line(line: &str) -> Result<(HtmlBrowserResponse, bool), (String, Strin
             "unsupported protocol version".into(),
         ));
     }
-    thread_local! { static PAGE: std::cell::RefCell<Option<ChromiumPage>> = const { std::cell::RefCell::new(None) }; }
-    PAGE.with(|slot| handle_command(slot, request.command))
+    page_slot::with_page(|slot| handle_command(slot, request.command))
 }
 
 fn handle_command(
@@ -197,10 +198,6 @@ fn io_error(error: io::Error) -> String {
 #[cfg(test)]
 #[path = "mod_io_tests.rs"]
 mod io_tests;
-
-#[cfg(test)]
-#[path = "mod_page_tests.rs"]
-mod page_tests;
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

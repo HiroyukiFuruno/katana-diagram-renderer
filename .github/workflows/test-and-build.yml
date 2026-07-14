@@ -140,11 +140,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y graphviz
 
-      - name: Run tests
-        run: cargo test --workspace --all-targets --all-features --locked
-
       - name: Install PlantUML runtime
         run: just plantuml-install
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --all-features --locked
 
       - name: Run PlantUML smoke check
         if: matrix.os != 'windows-latest'

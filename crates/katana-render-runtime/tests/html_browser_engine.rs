@@ -672,7 +672,10 @@ fn child_response_for_input_with_chromium_override(
     BufReader::new(stdout)
         .read_line(&mut response)
         .map_err(|error| error.to_string())?;
-    child.wait().map_err(|error| error.to_string())?;
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err(format!("browser child exited unsuccessfully: {status}"));
+    }
     serde_json::from_str(response.trim_end()).map_err(|error| error.to_string())
 }
 

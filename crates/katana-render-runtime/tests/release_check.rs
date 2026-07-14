@@ -69,6 +69,32 @@ fn coverage_gate_includes_integration_test_targets() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn test_gates_install_plantuml_before_executing_tests() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let justfile = fs::read_to_string(root.join("Justfile"))?;
+    for recipe_name in ["unit-test", "coverage"] {
+        let recipe = recipe_body(&justfile, recipe_name)?;
+        assert!(
+            recipe.trim_start().starts_with("plantuml-install"),
+            "{recipe_name} must prepare the PlantUML runtime before execution"
+        );
+    }
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/test-and-build.yml"))?;
+    let install = workflow
+        .find("name: Install PlantUML runtime")
+        .ok_or("PlantUML install step is missing")?;
+    let tests = workflow
+        .find("name: Run tests")
+        .ok_or("test step is missing")?;
+    assert!(
+        install < tests,
+        "PlantUML must be installed before workspace tests"
+    );
+    Ok(())
+}
+
+#[test]
 fn release_verify_installs_and_checks_chromium_bundle() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
     let justfile = fs::read_to_string(root.join("Justfile"))?;
