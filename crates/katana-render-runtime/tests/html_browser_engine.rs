@@ -8,15 +8,18 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 use url::Url;
 
 type TestResult<T = ()> = Result<T, String>;
 static HTML_BROWSER_ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CHROMIUM_SESSION_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn chromium_child_evaluates_inline_css_and_javascript_into_rgba_pixels() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel { margin: 0; width: 100%; height: 100%; }</style><div id="pixel"></div><script>document.querySelector('#pixel').style.background = 'rgb(17, 34, 51)';</script>"#,
         "https://example.test/document.html",
@@ -32,6 +35,7 @@ fn chromium_child_evaluates_inline_css_and_javascript_into_rgba_pixels() -> Test
 
 #[test]
 fn chromium_child_resolves_local_css_javascript_and_image_from_source_origin() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
     let mut session = start_session(
         r#"<!doctype html><link rel="stylesheet" href="resources/page.css"><img id="asset" src="resources/accent.svg"><div id="pixel"></div><script src="resources/action.js"></script>"#,
@@ -48,6 +52,7 @@ fn chromium_child_resolves_local_css_javascript_and_image_from_source_origin() -
 
 #[test]
 fn chromium_child_returns_link_navigation_to_the_source_host() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block}</style><a href="next.html">next</a>"#,
@@ -64,6 +69,7 @@ fn chromium_child_returns_link_navigation_to_the_source_host() -> TestResult {
 
 #[test]
 fn chromium_child_forwards_text_to_a_focused_html_form_control() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body{margin:0}input{width:32px;height:16px}#marker{position:absolute;top:16px;width:32px;height:16px;background:rgb(1,2,3)}</style><input id="field" autofocus><div id="marker"></div><script>const field=document.querySelector('#field');field.addEventListener('input',()=>{if(field.value==='ok')document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/form.html",
@@ -83,6 +89,7 @@ fn chromium_child_forwards_text_to_a_focused_html_form_control() -> TestResult {
 
 #[test]
 fn chromium_child_applies_surface_focus_before_text_input() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut blurred = start_session(
         focus_form_html(),
         "https://example.test/blurred.html",
@@ -104,6 +111,7 @@ fn chromium_child_applies_surface_focus_before_text_input() -> TestResult {
 
 #[test]
 fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{document.querySelector('#pixel').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/frame-update.html",
@@ -121,6 +129,7 @@ fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult
 
 #[test]
 fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}.run #pixel{animation:turn 40ms linear forwards}@keyframes turn{from{background:rgb(1,2,3)}to{background:rgb(17,34,51)}}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{Promise.resolve().then(()=>document.body.classList.add('run'))})</script>"#,
         "https://example.test/animation.html",
@@ -135,6 +144,7 @@ fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestR
 
 #[test]
 fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(1,2,3)}</style><a id="link" href="next.html">next</a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();event.currentTarget.style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/prevent-default.html",
@@ -150,6 +160,7 @@ fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> T
 
 #[test]
 fn chromium_child_updates_the_viewport_after_scroll_and_resize() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body{margin:0}#top,#bottom{height:32px;width:100%}#top{background:rgb(17,34,51)}#bottom{background:rgb(68,85,102)}</style><div id="top"></div><div id="bottom"></div>"#,
         "https://example.test/scroll.html",
@@ -168,6 +179,7 @@ fn chromium_child_updates_the_viewport_after_scroll_and_resize() -> TestResult {
 
 #[test]
 fn chromium_child_navigates_an_existing_browser_session() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><div id="pixel"></div>"#,
         "https://example.test/first.html",
@@ -189,6 +201,7 @@ fn chromium_child_navigates_an_existing_browser_session() -> TestResult {
 
 #[test]
 fn chromium_child_handles_pointer_move_keydown_and_ignored_pointer_up() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><div id="pixel" tabindex="0"></div><script>document.addEventListener('keydown', event => { if (event.key === 'a') document.querySelector('#pixel').style.background='rgb(17,34,51)' })</script>"#,
         "https://example.test/input.html",
@@ -222,6 +235,7 @@ fn chromium_child_handles_pointer_move_keydown_and_ignored_pointer_up() -> TestR
 
 #[test]
 fn chromium_child_evaluates_timer_driven_javascript_before_the_initial_frame() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}</style><div id="pixel"></div><script>setTimeout(() => { document.querySelector('#pixel').style.background='rgb(17,34,51)' }, 0)</script>"#,
         "https://example.test/timer.html",
@@ -235,6 +249,7 @@ fn chromium_child_evaluates_timer_driven_javascript_before_the_initial_frame() -
 
 #[test]
 fn chromium_child_blocks_local_resources_outside_the_document_directory() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
     let mut session = start_session(
         r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><link rel="stylesheet" href="../outside.css"><div id="pixel"></div>"#,
@@ -286,6 +301,7 @@ fn chromium_child_reports_stdin_read_errors_without_launching_chromium() -> Test
 
 #[test]
 fn chromium_child_uses_packaged_chromium_when_no_override_is_set() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let response = child_response_for_load_with_chromium_override(None)?;
 
     assert!(match response {
@@ -333,6 +349,7 @@ fn chromium_child_reports_chromium_launch_errors() -> TestResult {
 fn chromium_child_opens_local_document_when_source_directory_is_readonly() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
 
+    let _browser_guard = chromium_session_guard()?;
     let directory = std::env::temp_dir().join(format!(
         "krr-child-readonly-document-{}",
         std::process::id()
@@ -404,6 +421,12 @@ fn start_session(
     let source = HtmlBrowserSource::new(raw_html, origin).map_err(|error| error.to_string())?;
     let config = browser_process_config()?;
     HtmlBrowserSession::start(source, viewport(width, height)?, &config)
+        .map_err(|error| error.to_string())
+}
+
+fn chromium_session_guard() -> TestResult<MutexGuard<'static, ()>> {
+    CHROMIUM_SESSION_LOCK
+        .lock()
         .map_err(|error| error.to_string())
 }
 

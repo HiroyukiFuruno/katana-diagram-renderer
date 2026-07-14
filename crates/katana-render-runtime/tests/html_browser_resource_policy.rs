@@ -7,7 +7,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -16,10 +16,12 @@ use std::{
 
 type TestResult<T = ()> = Result<T, String>;
 const HTTP_RESOURCE_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+static CHROMIUM_SESSION_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn chromium_child_allows_http_same_origin_and_blocks_redirected_iframe_cross_origin_resources()
 -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
     let blocked = blocked_resource_server()?;
     let blocked_script = format!("{}/blocked.js", blocked.origin());
     let blocked_frame = format!("{}/frame.html", blocked.origin());
@@ -74,6 +76,12 @@ fn start_session(raw_html: &str, origin: impl Into<String>) -> TestResult<HtmlBr
     let source = HtmlBrowserSource::new(raw_html, origin).map_err(|error| error.to_string())?;
     let config = browser_process_config()?;
     HtmlBrowserSession::start(source, viewport()?, &config).map_err(|error| error.to_string())
+}
+
+fn chromium_session_guard() -> TestResult<MutexGuard<'static, ()>> {
+    CHROMIUM_SESSION_LOCK
+        .lock()
+        .map_err(|error| error.to_string())
 }
 
 fn viewport() -> TestResult<HtmlBrowserViewport> {
