@@ -15,6 +15,7 @@ use std::{
 
 pub(super) const CHROMIUM_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const CHROMIUM_STDERR_LIMIT: usize = 16 * 1024;
+const CHROMIUM_NO_SANDBOX_ENV: &str = "KRR_CHROMIUM_NO_SANDBOX";
 const DEVTOOLS_LISTENING_PREFIX: &str = "DevTools listening on ";
 static CHROMIUM_PROFILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -42,6 +43,9 @@ pub(super) fn chromium_arguments(
             viewport.width, viewport.height
         )),
     ];
+    if sandbox_disabled_by_environment() {
+        arguments.push(OsString::from("--no-sandbox"));
+    }
     arguments.extend(runtime::rendering_args().into_iter().map(OsString::from));
     arguments
 }
@@ -60,6 +64,10 @@ fn chromium_timestamp(now: SystemTime) -> u128 {
         Ok(duration) => duration.as_nanos(),
         Err(_) => 0,
     }
+}
+
+fn sandbox_disabled_by_environment() -> bool {
+    std::env::var_os(CHROMIUM_NO_SANDBOX_ENV).is_some_and(|value| value == "1")
 }
 
 pub(super) fn wait_for_debug_ws_url(
@@ -186,9 +194,14 @@ fn chromium_stderr_closed_summary(status: Option<std::process::ExitStatus>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static SANDBOX_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn chromium_arguments_keep_the_browser_sandbox_enabled() {
+        let _guard = sandbox_env_guard();
+        unsafe { std::env::remove_var(CHROMIUM_NO_SANDBOX_ENV) };
         let profile = std::env::temp_dir().join("krr-page-test-profile");
         let viewport = must(HtmlBrowserViewport::new(16, 8, 1.0));
         let arguments = chromium_arguments(&profile, viewport)
@@ -201,6 +214,36 @@ mod tests {
         assert!(arguments.contains(&"--disable-gpu".to_string()));
         assert!(arguments.contains(&"--disable-dev-shm-usage".to_string()));
         assert!(arguments.contains(&"--window-size=16,8".to_string()));
+        assert!(!arguments.iter().any(|argument| argument == "--no-sandbox"));
+    }
+
+    #[test]
+    fn chromium_arguments_allow_ci_to_disable_the_browser_sandbox() {
+        let _guard = sandbox_env_guard();
+        unsafe { std::env::set_var(CHROMIUM_NO_SANDBOX_ENV, "1") };
+        let profile = std::env::temp_dir().join("krr-page-test-profile");
+        let viewport = must(HtmlBrowserViewport::new(16, 8, 1.0));
+        let arguments = chromium_arguments(&profile, viewport)
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        unsafe { std::env::remove_var(CHROMIUM_NO_SANDBOX_ENV) };
+
+        assert!(arguments.iter().any(|argument| argument == "--no-sandbox"));
+    }
+
+    #[test]
+    fn chromium_arguments_ignore_other_sandbox_override_values() {
+        let _guard = sandbox_env_guard();
+        unsafe { std::env::set_var(CHROMIUM_NO_SANDBOX_ENV, "0") };
+        let profile = std::env::temp_dir().join("krr-page-test-profile");
+        let viewport = must(HtmlBrowserViewport::new(16, 8, 1.0));
+        let arguments = chromium_arguments(&profile, viewport)
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        unsafe { std::env::remove_var(CHROMIUM_NO_SANDBOX_ENV) };
+
         assert!(!arguments.iter().any(|argument| argument == "--no-sandbox"));
     }
 
@@ -325,6 +368,15 @@ mod tests {
         });
     }
 
+    #[test]
+    fn sandbox_env_guard_recovers_from_poisoned_lock() {
+        assert_panics(|| {
+            let _guard = sandbox_env_guard();
+            std::panic::resume_unwind(Box::new("poison sandbox env lock"));
+        });
+        drop(sandbox_env_guard());
+    }
+
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
@@ -338,5 +390,11 @@ mod tests {
 
     fn fail(message: String) -> ! {
         std::panic::resume_unwind(Box::new(message))
+    }
+
+    fn sandbox_env_guard() -> MutexGuard<'static, ()> {
+        SANDBOX_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }
