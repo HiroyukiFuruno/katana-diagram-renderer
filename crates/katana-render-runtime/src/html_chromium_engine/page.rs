@@ -22,6 +22,7 @@ impl ChromiumPage {
         let chrome_binary = runtime::chrome_binary_path()?;
         let options = LaunchOptionsBuilder::default()
             .path(Some(chrome_binary))
+            .port(Some(0))
             .window_size(Some((viewport.width, viewport.height)))
             .args(runtime::rendering_args())
             .build()
