@@ -16,11 +16,9 @@ fn spawn_passes_explicit_chromium_binary_to_child_environment() -> Result<(), St
     let script = format!(
         "IFS= read -r _request\nif [ \"$KRR_CHROME_BIN\" = '/tmp/krr-test-chrome' ]; then printf '%s\\n' '{{\"result\":\"closed\",\"protocol_version\":{HTML_BROWSER_PROTOCOL_VERSION}}}'; else printf '%s\\n' '{{\"result\":\"error\",\"protocol_version\":{HTML_BROWSER_PROTOCOL_VERSION},\"code\":\"env\",\"message\":\"missing explicit chromium binary\"}}'; fi"
     );
-    let config = HtmlBrowserProcessConfig {
-        program: PathBuf::from("/bin/sh"),
-        args: vec!["-c".to_string(), script],
-        chromium_binary: Some(PathBuf::from("/tmp/krr-test-chrome")),
-    };
+    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"))
+        .with_chromium_binary(PathBuf::from("/tmp/krr-test-chrome"));
+    config.args = vec!["-c".to_string(), script];
 
     let mut process = HtmlBrowserProcess::spawn(&config).map_err(|error| error.to_string())?;
     let response = process
@@ -40,11 +38,7 @@ fn spawn_passes_explicit_chromium_binary_to_child_environment() -> Result<(), St
 #[cfg(unix)]
 #[test]
 fn spawn_reports_missing_program() {
-    let config = HtmlBrowserProcessConfig {
-        program: PathBuf::from("/tmp/krr-missing-browser-child"),
-        args: Vec::new(),
-        chromium_binary: None,
-    };
+    let config = HtmlBrowserProcessConfig::new(PathBuf::from("/tmp/krr-missing-browser-child"));
 
     assert!(matches!(
         HtmlBrowserProcess::spawn(&config),
@@ -85,8 +79,11 @@ fn request_reports_child_exit_without_response() -> Result<(), String> {
 #[cfg(unix)]
 #[test]
 fn request_times_out_and_terminates_silent_child() -> Result<(), String> {
-    let mut process = HtmlBrowserProcess::spawn(&shell_config("IFS= read -r _request\nsleep 1"))
-        .map_err(|error| error.to_string())?;
+    let mut process = HtmlBrowserProcess::spawn(
+        &shell_config("IFS= read -r _request\nsleep 1")
+            .with_request_timeout(Duration::from_millis(100)),
+    )
+    .map_err(|error| error.to_string())?;
 
     assert!(matches!(
         process.request(HtmlBrowserCommand::Close),
@@ -224,11 +221,9 @@ fn child_crashed_with_exit_status_reports_status() {
 
 #[cfg(unix)]
 fn shell_config(script: &str) -> HtmlBrowserProcessConfig {
-    HtmlBrowserProcessConfig {
-        program: PathBuf::from("/bin/sh"),
-        args: vec!["-c".to_string(), script.to_string()],
-        chromium_binary: None,
-    }
+    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"));
+    config.args = vec!["-c".to_string(), script.to_string()];
+    config
 }
 
 struct FailingRead;

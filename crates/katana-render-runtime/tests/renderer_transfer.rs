@@ -186,11 +186,9 @@ fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn s
 
 #[cfg(unix)]
 fn shell_config() -> HtmlBrowserProcessConfig {
-    HtmlBrowserProcessConfig {
-        program: PathBuf::from("/bin/sh"),
-        args: vec!["-c".to_string(), browser_session_script()],
-        chromium_binary: None,
-    }
+    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"));
+    config.args = vec!["-c".to_string(), browser_session_script()];
+    config
 }
 
 #[cfg(unix)]

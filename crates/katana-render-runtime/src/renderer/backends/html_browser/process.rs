@@ -11,10 +11,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(not(test))]
-const HTML_BROWSER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-#[cfg(test)]
-const HTML_BROWSER_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
 const CHROMIUM_BINARY_ENV: &str = "KRR_CHROME_BIN";
 
 #[derive(Debug)]
@@ -22,6 +18,7 @@ pub struct HtmlBrowserProcess {
     child: Child,
     stdin: ChildStdin,
     responses: Receiver<Result<String, String>>,
+    request_timeout: Duration,
 }
 
 impl HtmlBrowserProcess {
@@ -33,6 +30,7 @@ impl HtmlBrowserProcess {
             child,
             stdin,
             responses: Self::read_responses(stdout),
+            request_timeout: config.request_timeout(),
         })
     }
 
@@ -77,7 +75,7 @@ impl HtmlBrowserProcess {
             .and_then(|_| self.stdin.write_all(b"\n"))
             .and_then(|_| self.stdin.flush())
             .map_err(process_write_error)?;
-        match self.responses.recv_timeout(HTML_BROWSER_REQUEST_TIMEOUT) {
+        match self.responses.recv_timeout(self.request_timeout) {
             Ok(line) => Self::decode_response_line(line),
             Err(mpsc::RecvTimeoutError::Timeout) => self.timeout(),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.child_crashed()),

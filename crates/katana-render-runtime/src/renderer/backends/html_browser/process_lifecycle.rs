@@ -1,4 +1,4 @@
-use super::{HTML_BROWSER_REQUEST_TIMEOUT, HtmlBrowserError, HtmlBrowserProcess};
+use super::{HtmlBrowserError, HtmlBrowserProcess};
 use std::process::ExitStatus;
 
 impl HtmlBrowserProcess {
@@ -25,7 +25,7 @@ impl HtmlBrowserProcess {
     pub(super) fn timeout(&mut self) -> Result<super::HtmlBrowserResponse, HtmlBrowserError> {
         let _ = self.terminate();
         Err(HtmlBrowserError::ProcessTimeout {
-            timeout_ms: HTML_BROWSER_REQUEST_TIMEOUT.as_millis() as u64,
+            timeout_ms: self.request_timeout.as_millis() as u64,
         })
     }
 

@@ -80,11 +80,9 @@ fn viewport() -> TestResult<HtmlBrowserViewport> {
 
 #[cfg(unix)]
 fn shell_config(script: &str) -> HtmlBrowserProcessConfig {
-    HtmlBrowserProcessConfig {
-        program: PathBuf::from("/bin/sh"),
-        args: vec!["-c".to_string(), script.to_string()],
-        chromium_binary: None,
-    }
+    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"));
+    config.args = vec!["-c".to_string(), script.to_string()];
+    config
 }
 
 #[cfg(unix)]

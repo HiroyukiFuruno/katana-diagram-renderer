@@ -11,11 +11,18 @@ use std::{
     sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
+#[cfg(unix)]
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use url::Url;
 
 type TestResult<T = ()> = Result<T, String>;
 static HTML_BROWSER_ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static CHROMIUM_SESSION_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(unix)]
+static FAKE_CHROMIUM_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn chromium_child_evaluates_inline_css_and_javascript_into_rgba_pixels() -> TestResult {
@@ -341,6 +348,52 @@ fn chromium_child_reports_chromium_launch_errors() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn chromium_child_reports_devtools_endpoint_connection_failure() -> TestResult {
+    let fake_chromium = fake_chromium_script(
+        "echo 'DevTools listening on ws://127.0.0.1:0/devtools/browser/test' >&2\nsleep 1",
+    )?;
+    let response = child_response_for_load_with_chromium_override(Some(fake_chromium.clone()))?;
+    let _ = std::fs::remove_file(&fake_chromium);
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, .. } if code == "chromium"
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn chromium_child_reports_chromium_exit_before_devtools_endpoint() -> TestResult {
+    let fake_chromium = fake_chromium_script("exit 7")?;
+    let response = child_response_for_load_with_chromium_override(Some(fake_chromium.clone()))?;
+    let _ = std::fs::remove_file(&fake_chromium);
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, message, .. }
+            if code == "chromium" && message.contains("Chromium exited with")
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn chromium_child_reports_chromium_startup_timeout() -> TestResult {
+    let fake_chromium = fake_chromium_script("sleep 11")?;
+    let response = child_response_for_load_with_chromium_override(Some(fake_chromium.clone()))?;
+    let _ = std::fs::remove_file(&fake_chromium);
+
+    assert!(matches!(
+        response,
+        HtmlBrowserResponse::Error { code, message, .. }
+            if code == "chromium" && message.contains("did not expose a DevTools endpoint")
+    ));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn chromium_child_opens_local_document_when_source_directory_is_readonly() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
 
@@ -589,7 +642,8 @@ fn html_browser_fixture_origin() -> TestResult<String> {
 fn browser_process_config() -> TestResult<HtmlBrowserProcessConfig> {
     Ok(
         HtmlBrowserProcessConfig::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine").into())
-            .with_chromium_binary(test_chromium_binary()?),
+            .with_chromium_binary(test_chromium_binary()?)
+            .with_request_timeout(Duration::from_secs(45)),
     )
 }
 
@@ -635,6 +689,25 @@ fn chromium_candidate(candidates: impl IntoIterator<Item = PathBuf>) -> TestResu
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| "test Chromium binary was not found in known install locations".to_string())
+}
+
+#[cfg(unix)]
+fn fake_chromium_script(body: &str) -> TestResult<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sequence = FAKE_CHROMIUM_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "krr-child-fake-chromium-{}-{timestamp}-{sequence}",
+        std::process::id()
+    ));
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).map_err(|error| error.to_string())?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 fn bundled_chromium_binaries() -> TestResult<[PathBuf; 2]> {

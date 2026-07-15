@@ -1,11 +1,15 @@
-use super::{document, policy, runtime, source};
+use super::{
+    chromium_process::{ChromiumProcess, launch_chromium},
+    document, policy, runtime, source,
+};
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
-use headless_chrome::{Browser, LaunchOptionsBuilder, protocol::cdp::Page, types::Bounds};
+use headless_chrome::{Browser, protocol::cdp::Page, types::Bounds};
 use std::{path::PathBuf, sync::Arc};
 
 pub(super) struct ChromiumPage {
     pub(super) tab: Arc<headless_chrome::Tab>,
     _browser: Browser,
+    _chromium: ChromiumProcess,
     pub(super) source: source::BrowserSource,
     pub(super) viewport: HtmlBrowserViewport,
     pub(super) generation: u64,
@@ -20,16 +24,11 @@ impl ChromiumPage {
         viewport: HtmlBrowserViewport,
     ) -> Result<Self, String> {
         let chrome_binary = runtime::chrome_binary_path()?;
-        let options = LaunchOptionsBuilder::default()
-            .path(Some(chrome_binary))
-            .window_size(Some((viewport.width, viewport.height)))
-            .args(runtime::rendering_args())
-            .build()
-            .map_err(string_error)?;
-        let browser = Browser::new(options).map_err(string_error)?;
+        let (browser, chromium) = launch_chromium(&chrome_binary, viewport)?;
         let tab = browser.new_tab().map_err(string_error)?;
         let mut page = Self {
             _browser: browser,
+            _chromium: chromium,
             tab,
             source,
             viewport,
@@ -147,7 +146,6 @@ mod tests {
     #[test]
     fn validate_frame_dimensions_rejects_mismatched_image_size() {
         let viewport = must(HtmlBrowserViewport::new(2, 3, 1.0));
-
         let error = must(
             validate_frame_dimensions(4, 5, viewport)
                 .err()
@@ -187,7 +185,7 @@ mod tests {
         );
     }
 
-    fn must<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> T {
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
         match result {
             Ok(value) => value,
             Err(error) => fail(format!("unexpected test error: {error}")),

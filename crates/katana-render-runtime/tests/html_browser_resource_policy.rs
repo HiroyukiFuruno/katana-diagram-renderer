@@ -280,7 +280,8 @@ fn request_path(request: &str) -> String {
 fn browser_process_config() -> TestResult<HtmlBrowserProcessConfig> {
     Ok(
         HtmlBrowserProcessConfig::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine").into())
-            .with_chromium_binary(test_chromium_binary()?),
+            .with_chromium_binary(test_chromium_binary()?)
+            .with_request_timeout(Duration::from_secs(45)),
     )
 }
 

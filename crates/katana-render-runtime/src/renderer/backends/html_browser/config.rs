@@ -1,7 +1,8 @@
 use super::HtmlBrowserError;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 const HTML_BROWSER_ENGINE_ENV: &str = "KRR_HTML_BROWSER_ENGINE";
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HtmlBrowserProcessConfig {
@@ -10,6 +11,11 @@ pub struct HtmlBrowserProcessConfig {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chromium_binary: Option<PathBuf>,
+    #[serde(
+        default = "default_request_timeout_ms",
+        skip_serializing_if = "is_default_request_timeout_ms"
+    )]
+    pub request_timeout_ms: u64,
 }
 
 impl HtmlBrowserProcessConfig {
@@ -18,12 +24,22 @@ impl HtmlBrowserProcessConfig {
             program,
             args: Vec::new(),
             chromium_binary: None,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         }
     }
 
     pub fn with_chromium_binary(mut self, binary: PathBuf) -> Self {
         self.chromium_binary = Some(binary);
         self
+    }
+
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout_ms = timeout.as_millis().try_into().unwrap_or(u64::MAX);
+        self
+    }
+
+    pub(crate) fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.request_timeout_ms)
     }
 
     pub fn packaged() -> Result<Self, HtmlBrowserError> {
@@ -57,6 +73,14 @@ fn engine_path_error(error: std::io::Error) -> HtmlBrowserError {
     }
 }
 
+fn default_request_timeout_ms() -> u64 {
+    DEFAULT_REQUEST_TIMEOUT_MS
+}
+
+fn is_default_request_timeout_ms(timeout_ms: &u64) -> bool {
+    *timeout_ms == DEFAULT_REQUEST_TIMEOUT_MS
+}
+
 #[cfg(target_os = "windows")]
 fn packaged_engine_name() -> &'static str {
     "krr-html-chromium-engine.exe"
@@ -68,159 +92,5 @@ fn packaged_engine_name() -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-    use std::fs;
-
-    #[test]
-    fn builder_records_explicit_chromium_binary() {
-        let config = HtmlBrowserProcessConfig::new(PathBuf::from("helper"))
-            .with_chromium_binary(PathBuf::from("chrome-for-testing"));
-
-        assert_eq!(config.program, PathBuf::from("helper"));
-        assert_eq!(config.args, Vec::<String>::new());
-        assert_eq!(
-            config.chromium_binary,
-            Some(PathBuf::from("chrome-for-testing"))
-        );
-    }
-
-    #[test]
-    fn serialization_omits_default_chromium_binary() {
-        let config = HtmlBrowserProcessConfig::new(PathBuf::from("helper"));
-        let value = must(serde_json::to_value(config));
-
-        assert_eq!(value.get("chromium_binary"), None);
-    }
-
-    #[test]
-    fn serialization_includes_explicit_chromium_binary() {
-        let config = HtmlBrowserProcessConfig::new(PathBuf::from("helper"))
-            .with_chromium_binary(PathBuf::from("chrome-for-testing"));
-        let value = must(serde_json::to_value(config));
-
-        assert_eq!(
-            value.get("chromium_binary").and_then(Value::as_str),
-            Some("chrome-for-testing")
-        );
-    }
-
-    #[test]
-    fn packaged_uses_environment_override() {
-        unsafe { std::env::set_var(HTML_BROWSER_ENGINE_ENV, "/tmp/krr-test-helper") };
-        let result = HtmlBrowserProcessConfig::packaged();
-        unsafe { std::env::remove_var(HTML_BROWSER_ENGINE_ENV) };
-        let config = must(result);
-        assert_eq!(config.program, PathBuf::from("/tmp/krr-test-helper"));
-        assert_eq!(config.args, Vec::<String>::new());
-        assert_eq!(config.chromium_binary, None);
-
-        assert!(matches!(
-            HtmlBrowserProcessConfig::packaged(),
-            Err(HtmlBrowserError::EngineBinaryNotFound { .. })
-        ));
-    }
-
-    #[test]
-    fn packaged_adjacent_to_reports_parentless_executable() {
-        let result = HtmlBrowserProcessConfig::packaged_adjacent_to(PathBuf::new());
-
-        assert_eq!(
-            result,
-            Err(HtmlBrowserError::EnginePath {
-                error: "current executable has no parent directory".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn packaged_adjacent_to_reports_missing_helper() {
-        let missing =
-            std::env::temp_dir().join(format!("krr-missing-browser-helper-{}", std::process::id()));
-        let helper = missing.join(packaged_engine_name());
-
-        assert_eq!(
-            HtmlBrowserProcessConfig::packaged_adjacent_to(missing.join("test-runner")),
-            Err(HtmlBrowserError::EngineBinaryNotFound {
-                path: helper.display().to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn packaged_adjacent_to_uses_existing_helper() {
-        let directory = std::env::temp_dir().join(format!(
-            "krr-existing-browser-helper-{}",
-            std::process::id()
-        ));
-        must(fs::create_dir_all(&directory));
-        let helper = directory.join(packaged_engine_name());
-        must(fs::write(&helper, b"helper"));
-
-        let config = must(HtmlBrowserProcessConfig::packaged_adjacent_to(
-            directory.join("test-runner"),
-        ));
-        let _ = fs::remove_file(&helper);
-        let _ = fs::remove_dir(&directory);
-
-        assert_eq!(config.program, helper);
-        assert_eq!(config.args, Vec::<String>::new());
-        assert_eq!(config.chromium_binary, None);
-    }
-
-    #[test]
-    fn engine_path_error_preserves_message() {
-        assert_eq!(
-            engine_path_error(std::io::Error::other("boom")),
-            HtmlBrowserError::EnginePath {
-                error: "boom".to_string()
-            }
-        );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "unexpected test error: browser viewport dimensions must be non-zero"
-    )]
-    fn must_reports_unexpected_test_errors() {
-        let _: () = must(Err(HtmlBrowserError::InvalidViewport));
-    }
-
-    #[test]
-    fn must_error_branch_covers_test_value_types() {
-        assert!(
-            std::panic::catch_unwind(|| {
-                let _: HtmlBrowserProcessConfig = must::<HtmlBrowserProcessConfig, HtmlBrowserError>(Err(
-                    HtmlBrowserError::InvalidViewport,
-                ));
-            })
-            .is_err()
-        );
-        assert!(
-            std::panic::catch_unwind(|| {
-                let _: Value = must::<Value, serde_json::Error>(Err(serde_json::Error::io(
-                    std::io::Error::other("boom"),
-                )));
-            })
-            .is_err()
-        );
-        assert!(
-            std::panic::catch_unwind(|| {
-                let _: () = must::<(), std::io::Error>(Err(std::io::Error::other("boom")));
-            })
-            .is_err()
-        );
-    }
-
-    fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
-        match result {
-            Ok(value) => value,
-            Err(error) => fail(format!("unexpected test error: {error}")),
-        }
-    }
-
-    fn fail(message: String) -> ! {
-        std::panic::resume_unwind(Box::new(message))
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;
