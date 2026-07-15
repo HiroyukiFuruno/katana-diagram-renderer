@@ -72,7 +72,7 @@ dependency-leak:
 
 # Run workspace tests
 unit-test: plantuml-install chromium-install
-    {{CARGO}} test --workspace --all-targets --all-features{{TEST_THREAD_ARGS}}
+    {{CARGO}} test --workspace --all-targets --all-features --locked{{TEST_THREAD_ARGS}}
 
 # Run coverage as a required full-check gate
 coverage: plantuml-install chromium-install

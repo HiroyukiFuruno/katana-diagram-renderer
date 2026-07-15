@@ -1,4 +1,6 @@
-use kdr_linter::{KdrLintError, KdrLinter, ViolationReport};
+#[cfg(unix)]
+use kdr_linter::KdrLintError;
+use kdr_linter::{KdrLinter, ViolationReport};
 use std::path::{Path, PathBuf};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

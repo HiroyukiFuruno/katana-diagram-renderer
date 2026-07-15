@@ -113,6 +113,7 @@ fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn s
         fs::read_to_string(root.join(".github/workflows/release-preflight.yml"))?;
 
     assert!(unit_test.contains("{{TEST_THREAD_ARGS}}"));
+    assert!(unit_test.contains("--locked"));
     assert!(coverage.contains("{{TEST_THREAD_ARGS}}"));
     assert!(ci_workflow.contains("TEST_THREADS: \"1\""));
     assert!(ci_workflow.contains("timeout-minutes: 45"));
