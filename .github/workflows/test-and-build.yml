@@ -70,6 +70,7 @@ jobs:
         !contains(github.event.head_commit.message, '(#')
       )
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -155,6 +156,12 @@ jobs:
 
       - name: Install Chromium browser runtime
         run: just chromium-install
+
+      - name: Enable Chromium user namespace sandbox on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "0"
 
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features --locked

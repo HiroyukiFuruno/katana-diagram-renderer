@@ -102,6 +102,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: just VERSION="${{ steps.version.outputs.version }}" release-target-check
 
+      - name: Enable Chromium user namespace sandbox
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "0"
+
       - name: Release check
         if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
         run: just VERSION="${{ steps.version.outputs.version }}" release-check
