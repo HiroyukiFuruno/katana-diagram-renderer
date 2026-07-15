@@ -2,7 +2,7 @@ use super::HtmlBrowserError;
 use std::{path::PathBuf, time::Duration};
 
 const HTML_BROWSER_ENGINE_ENV: &str = "KRR_HTML_BROWSER_ENGINE";
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 180_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HtmlBrowserProcessConfig {
