@@ -1,12 +1,10 @@
-use super::page::ChromiumPage;
+use super::{page::ChromiumPage, rendering_sync::RENDERING_READY_SCRIPT};
 use crate::{HtmlBrowserInput, HtmlBrowserNavigationEvent};
 use headless_chrome::{
     browser::tab::point::Point,
     protocol::cdp::{Emulation, Input},
 };
 use serde_json::Value;
-
-const RENDERING_READY_SCRIPT: &str = "new Promise(resolve => setTimeout(resolve, 0)).then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).then(() => { document.documentElement.getBoundingClientRect(); return true; })";
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
@@ -224,17 +222,6 @@ mod tests {
         assert!(!is_primary_click(Some((1.0, 2.0, 1)), 1));
         assert!(!is_primary_click(Some((1.0, 2.0, 0)), 1));
         assert!(!is_primary_click(None, 0));
-    }
-
-    #[test]
-    fn rendering_sync_waits_for_two_animation_frames() {
-        assert_eq!(
-            RENDERING_READY_SCRIPT
-                .matches("requestAnimationFrame")
-                .count(),
-            2
-        );
-        assert!(RENDERING_READY_SCRIPT.contains("getBoundingClientRect"));
     }
 }
 #[test]

@@ -2,17 +2,24 @@ mod chromium_process;
 mod chromium_startup;
 mod document;
 mod input;
+mod ipc;
 mod main_document;
 mod page;
 mod page_slot;
 mod policy;
+mod rendering_sync;
 mod runtime;
 mod source;
 
 use crate::{
-    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand, HtmlBrowserError, HtmlBrowserRequest,
-    HtmlBrowserResponse,
+    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand, HtmlBrowserRequest, HtmlBrowserResponse,
 };
+use ipc::{
+    chromium_error, error_response, invalid_message_error, loop_response, not_loaded,
+    request_error, try_write_response,
+};
+#[cfg(test)]
+use ipc::{io_error, json_error};
 use page::ChromiumPage;
 use source::BrowserSource;
 use std::io::{self, BufRead, Write};
@@ -44,23 +51,6 @@ fn run_with_io(reader: &mut dyn BufRead, writer: &mut dyn Write) {
         }
     }
     page_slot::clear();
-}
-
-fn loop_response(
-    response: Result<(HtmlBrowserResponse, bool), (String, String)>,
-) -> (HtmlBrowserResponse, bool) {
-    match response {
-        Ok((response, close)) => (response, close),
-        Err((code, message)) => (error_response(code, message), false),
-    }
-}
-
-fn error_response(code: String, message: String) -> HtmlBrowserResponse {
-    HtmlBrowserResponse::Error {
-        protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
-        code,
-        message,
-    }
 }
 
 fn handle_line(line: &str) -> Result<(HtmlBrowserResponse, bool), (String, String)> {
@@ -161,40 +151,6 @@ fn frame_response(
         },
         false,
     ))
-}
-
-fn request_error(error: HtmlBrowserError) -> (String, String) {
-    ("invalid_request".into(), error.to_string())
-}
-fn chromium_error(error: String) -> (String, String) {
-    ("chromium".into(), error)
-}
-fn not_loaded() -> (String, String) {
-    (
-        "not_loaded".into(),
-        "load must precede input or resize".into(),
-    )
-}
-
-fn try_write_response(
-    writer: &mut dyn Write,
-    response: &HtmlBrowserResponse,
-) -> Result<(), String> {
-    let line = serde_json::to_string(response).map_err(json_error)?;
-    writeln!(writer, "{line}").map_err(io_error)?;
-    writer.flush().map_err(io_error)
-}
-
-fn invalid_message_error(error: serde_json::Error) -> (String, String) {
-    ("invalid_message".into(), error.to_string())
-}
-
-fn json_error(error: serde_json::Error) -> String {
-    error.to_string()
-}
-
-fn io_error(error: io::Error) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]
