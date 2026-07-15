@@ -113,7 +113,7 @@ fn chromium_child_applies_surface_focus_before_text_input() -> TestResult {
 fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{document.querySelector('#pixel').style.background='rgb(17,34,51)'})</script>"#,
+        r#"<!doctype html><style>html,body,#marker{margin:0;width:100%;height:100%}#marker{background:rgb(1,2,3)}#action{position:absolute;inset:0;opacity:0}</style><div id="marker"></div><button id="action">go</button><script>document.querySelector('#action').addEventListener('click',()=>{document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/frame-update.html",
         16,
         16,
@@ -131,7 +131,7 @@ fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult
 fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,#pixel{margin:0;width:100%;height:100%}#pixel{background:rgb(1,2,3)}.run #pixel{animation:turn 40ms linear forwards}@keyframes turn{from{background:rgb(1,2,3)}to{background:rgb(17,34,51)}}</style><button id="pixel">go</button><script>document.querySelector('#pixel').addEventListener('click',()=>{Promise.resolve().then(()=>document.body.classList.add('run'))})</script>"#,
+        r#"<!doctype html><style>html,body,#marker{margin:0;width:100%;height:100%}#marker{background:rgb(1,2,3)}#action{position:absolute;inset:0;opacity:0}.run #marker{animation:turn 40ms linear forwards}@keyframes turn{from{background:rgb(1,2,3)}to{background:rgb(17,34,51)}}</style><div id="marker"></div><button id="action">go</button><script>document.querySelector('#action').addEventListener('click',()=>{Promise.resolve().then(()=>document.body.classList.add('run'))})</script>"#,
         "https://example.test/animation.html",
         16,
         16,
@@ -146,7 +146,7 @@ fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestR
 fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(1,2,3)}</style><a id="link" href="next.html">next</a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();event.currentTarget.style.background='rgb(17,34,51)'})</script>"#,
+        r#"<!doctype html><style>html,body,#marker{margin:0;width:100%;height:100%}#marker{background:rgb(1,2,3)}#link{position:absolute;inset:0;opacity:0}</style><div id="marker"></div><a id="link" href="next.html">next</a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/prevent-default.html",
         16,
         16,
