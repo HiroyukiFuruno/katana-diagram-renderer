@@ -6,7 +6,7 @@ use headless_chrome::{
 };
 use serde_json::Value;
 
-const RENDERING_READY_SCRIPT: &str = "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => { document.documentElement.getBoundingClientRect(); return true; })";
+const RENDERING_READY_SCRIPT: &str = "new Promise(resolve => setTimeout(resolve, 0)).then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).then(() => { document.documentElement.getBoundingClientRect(); return true; })";
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
