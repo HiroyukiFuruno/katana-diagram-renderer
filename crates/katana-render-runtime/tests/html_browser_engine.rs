@@ -212,13 +212,7 @@ fn chromium_child_handles_pointer_move_keydown_and_ignored_pointer_up() -> TestR
     session
         .dispatch_input(HtmlBrowserInput::PointerMove { x: 4.0, y: 4.0 })
         .map_err(|error| error.to_string())?;
-    session
-        .dispatch_input(HtmlBrowserInput::PointerUp {
-            x: 4.0,
-            y: 4.0,
-            button: 1,
-        })
-        .map_err(|error| error.to_string())?;
+    dispatch_ignored_right_click(&mut session, 4.0, 4.0)?;
     session
         .dispatch_input(HtmlBrowserInput::KeyDown {
             key: "a".to_string(),
@@ -503,6 +497,18 @@ fn dispatch_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResul
     for input in [
         HtmlBrowserInput::PointerDown { x, y, button: 0 },
         HtmlBrowserInput::PointerUp { x, y, button: 0 },
+    ] {
+        session
+            .dispatch_input(input)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn dispatch_ignored_right_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResult {
+    for input in [
+        HtmlBrowserInput::PointerDown { x, y, button: 1 },
+        HtmlBrowserInput::PointerUp { x, y, button: 1 },
     ] {
         session
             .dispatch_input(input)

@@ -16,6 +16,9 @@ impl ChromiumPage {
             HtmlBrowserInput::PointerDown { x, y, button } => {
                 self.pointer_down = Some((x, y, button));
                 self.move_mouse(x, y)?;
+                if button == 0 {
+                    self.primary_pointer_down(x, y)?;
+                }
             }
             HtmlBrowserInput::PointerUp { x, y, button } => self.pointer_up(x, y, button)?,
             HtmlBrowserInput::Text { text } => {
@@ -57,10 +60,52 @@ impl ChromiumPage {
         if !clicked {
             return Ok(());
         }
+        self.primary_pointer_up(x, y)
+    }
+
+    fn primary_pointer_down(&self, x: f32, y: f32) -> Result<(), String> {
         self.tab
-            .click_point(Point {
+            .call_method(Input::DispatchMouseEvent {
+                Type: Input::DispatchMouseEventTypeOption::MousePressed,
                 x: f64::from(x),
                 y: f64::from(y),
+                modifiers: None,
+                timestamp: None,
+                button: Some(Input::MouseButton::Left),
+                buttons: Some(1),
+                click_count: Some(1),
+                force: None,
+                tangential_pressure: None,
+                tilt_x: None,
+                tilt_y: None,
+                twist: None,
+                delta_x: None,
+                delta_y: None,
+                pointer_Type: None,
+            })
+            .map(|_| ())
+            .map_err(string_error)
+    }
+
+    fn primary_pointer_up(&self, x: f32, y: f32) -> Result<(), String> {
+        self.tab
+            .call_method(Input::DispatchMouseEvent {
+                Type: Input::DispatchMouseEventTypeOption::MouseReleased,
+                x: f64::from(x),
+                y: f64::from(y),
+                modifiers: None,
+                timestamp: None,
+                button: Some(Input::MouseButton::Left),
+                buttons: Some(0),
+                click_count: Some(1),
+                force: None,
+                tangential_pressure: None,
+                tilt_x: None,
+                tilt_y: None,
+                twist: None,
+                delta_x: None,
+                delta_y: None,
+                pointer_Type: None,
             })
             .map(|_| ())
             .map_err(string_error)
