@@ -15,6 +15,7 @@ impl ChromiumPage {
             HtmlBrowserInput::PointerMove { x, y } => self.move_mouse(x, y)?,
             HtmlBrowserInput::PointerDown { x, y, button } => {
                 self.pointer_down = Some((x, y, button));
+                self.tab.activate().map_err(string_error)?;
                 self.move_mouse(x, y)?;
                 if button == 0 {
                     self.primary_pointer_down(x, y)?;
