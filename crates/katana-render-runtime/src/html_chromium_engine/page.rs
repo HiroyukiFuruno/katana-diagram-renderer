@@ -1,6 +1,6 @@
 use super::{
     chromium_process::{ChromiumProcess, launch_chromium},
-    document, policy, runtime, source,
+    document, policy, runtime, source, trace,
 };
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
 use headless_chrome::{Browser, protocol::cdp::Page, types::Bounds};
@@ -23,8 +23,11 @@ impl ChromiumPage {
         source: source::BrowserSource,
         viewport: HtmlBrowserViewport,
     ) -> Result<Self, String> {
+        trace::stage("page:new:chrome-binary");
         let chrome_binary = runtime::chrome_binary_path()?;
+        trace::stage("page:new:launch-chromium");
         let (browser, chromium) = launch_chromium(&chrome_binary, viewport)?;
+        trace::stage("page:new:new-tab");
         let tab = browser.new_tab().map_err(string_error)?;
         let mut page = Self {
             _browser: browser,
@@ -37,8 +40,11 @@ impl ChromiumPage {
             pointer_down: None,
             temporary_document: None,
         };
+        trace::stage("page:new:set-viewport");
         runtime::set_viewport(&page.tab, viewport)?;
+        trace::stage("page:new:load");
         page.load()?;
+        trace::stage("page:new:ready");
         Ok(page)
     }
 
@@ -68,14 +74,17 @@ impl ChromiumPage {
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
         if self.focused {
+            trace::stage("page:screenshot:warmup");
             self.tab
                 .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
                 .map_err(string_error)?;
         }
+        trace::stage("page:screenshot:capture");
         let screenshot = self
             .tab
             .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
             .map_err(string_error)?;
+        trace::stage("page:screenshot:decode");
         let image = image::load_from_memory(&screenshot)
             .map_err(string_error)?
             .to_rgba8();
@@ -92,16 +101,24 @@ impl ChromiumPage {
     }
 
     fn load(&mut self) -> Result<(), String> {
+        trace::stage("page:load:document-url");
         document::remove_temporary_document(&mut self.temporary_document);
         let (url, temporary_document) = document::document_url(&self.source)?;
         self.temporary_document = temporary_document;
         let temporary_document = self.temporary_document.as_deref();
+        trace::stage("page:load:install-policy");
         policy::install_resource_policy(&self.tab, &self.source, temporary_document)?;
+        trace::stage("page:load:navigate");
         self.tab.navigate_to(&url).map_err(string_error)?;
+        trace::stage("page:load:bring-to-front");
         self.tab.bring_to_front().map_err(string_error)?;
+        trace::stage("page:load:focus");
         self.emulate_focus(true)?;
         self.focused = true;
-        self.synchronize_rendering()
+        trace::stage("page:load:synchronize");
+        self.synchronize_rendering()?;
+        trace::stage("page:load:ready");
+        Ok(())
     }
 }
 

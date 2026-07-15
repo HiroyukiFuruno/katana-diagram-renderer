@@ -1,4 +1,4 @@
-use super::{page::ChromiumPage, rendering_sync::RENDERING_READY_SCRIPT};
+use super::{page::ChromiumPage, rendering_sync::RENDERING_READY_SCRIPT, trace};
 use crate::{HtmlBrowserInput, HtmlBrowserNavigationEvent};
 use headless_chrome::{
     browser::tab::point::Point,
@@ -8,6 +8,7 @@ use serde_json::Value;
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
+        trace::stage("page:input:start");
         match input {
             HtmlBrowserInput::Focus { focused } => self.focus(focused)?,
             HtmlBrowserInput::PointerMove { x, y } => self.move_mouse(x, y)?,
@@ -30,8 +31,10 @@ impl ChromiumPage {
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
         if self.focused {
+            trace::stage("page:input:synchronize");
             self.synchronize_rendering()?;
         }
+        trace::stage("page:input:ready");
         Ok(())
     }
 
@@ -155,10 +158,13 @@ impl ChromiumPage {
     }
 
     pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
+        trace::stage("page:rendering-sync:evaluate");
         self.tab
             .evaluate(RENDERING_READY_SCRIPT, true)
             .map(|_| ())
-            .map_err(string_error)
+            .map_err(string_error)?;
+        trace::stage("page:rendering-sync:ready");
+        Ok(())
     }
 }
 

@@ -10,6 +10,7 @@ mod policy;
 mod rendering_sync;
 mod runtime;
 mod source;
+mod trace;
 
 use crate::{
     HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand, HtmlBrowserRequest, HtmlBrowserResponse,

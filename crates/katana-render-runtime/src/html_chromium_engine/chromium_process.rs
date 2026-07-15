@@ -2,6 +2,7 @@ use super::chromium_startup::{
     CHROMIUM_STARTUP_TIMEOUT, append_chromium_output, chromium_arguments, chromium_launch_error,
     chromium_profile_directory, wait_for_debug_ws_url,
 };
+use super::trace;
 use crate::{HtmlBrowserViewport, system::ProcessService};
 use headless_chrome::Browser;
 use std::{
@@ -31,6 +32,7 @@ impl ChromiumProcess {
         viewport: HtmlBrowserViewport,
         startup_timeout: std::time::Duration,
     ) -> Result<(Self, String), String> {
+        trace::stage("chromium-process:launch:start");
         let profile_directory = chromium_profile_directory();
         let mut command = ProcessService::create_command(chrome_binary);
         command
@@ -38,7 +40,9 @@ impl ChromiumProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        trace::stage("chromium-process:spawn");
         spawn_chromium(&mut command, &profile_directory).and_then(|child| {
+            trace::stage("chromium-process:connect-started");
             Self::connect_to_started_chromium(
                 Self {
                     child,
@@ -54,7 +58,9 @@ impl ChromiumProcess {
         startup_timeout: std::time::Duration,
     ) -> Result<(Self, String), String> {
         let stderr = chromium.take_stderr()?;
+        trace::stage("chromium-process:wait-devtools");
         let debug_ws_url = wait_for_debug_ws_url(&mut chromium.child, stderr, startup_timeout)?;
+        trace::stage("chromium-process:devtools-ready");
         Ok((chromium, debug_ws_url))
     }
 
@@ -126,11 +132,14 @@ pub(super) fn launch_chromium(
     chrome_binary: &Path,
     viewport: HtmlBrowserViewport,
 ) -> Result<(Browser, ChromiumProcess), String> {
+    trace::stage("chromium:launch");
     let (chromium, debug_ws_url) = match ChromiumProcess::launch(chrome_binary, viewport) {
         Ok((chromium, debug_ws_url)) => (chromium, debug_ws_url),
         Err(error) => return Err(error),
     };
+    trace::stage("chromium:connect-browser");
     let browser = connect_browser(debug_ws_url)?;
+    trace::stage("chromium:browser-connected");
     Ok((browser, chromium))
 }
 
