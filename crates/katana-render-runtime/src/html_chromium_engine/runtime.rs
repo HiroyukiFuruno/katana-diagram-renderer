@@ -7,11 +7,10 @@ use std::{
 };
 
 const CHROMIUM_BINARY_ENV: &str = "KRR_CHROME_BIN";
-const RENDERING_ARGS: [&str; 4] = [
+const RENDERING_ARGS: [&str; 3] = [
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
-    "--run-all-compositor-stages-before-draw",
 ];
 
 #[cfg(test)]
@@ -171,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn rendering_args_keep_compositor_frames_available() {
+    fn rendering_args_keep_browser_frames_available() {
         let args = rendering_args();
 
         assert_eq!(
@@ -180,7 +179,6 @@ mod tests {
                 OsStr::new("--disable-background-timer-throttling"),
                 OsStr::new("--disable-backgrounding-occluded-windows"),
                 OsStr::new("--disable-renderer-backgrounding"),
-                OsStr::new("--run-all-compositor-stages-before-draw"),
             ]
         );
     }
