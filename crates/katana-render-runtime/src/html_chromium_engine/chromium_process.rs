@@ -149,14 +149,17 @@ fn string_error(error: impl ToString) -> String {
 mod tests {
     use super::*;
     use std::{
-        path::PathBuf,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            mpsc,
-        },
+        sync::mpsc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(unix)]
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    #[cfg(unix)]
     static CHROMIUM_SCRIPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]

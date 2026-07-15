@@ -3,6 +3,7 @@ use crate::{
     HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserEngineErrorCode, HtmlBrowserPixelFormat,
     HtmlBrowserResponse,
 };
+#[cfg(unix)]
 use std::path::PathBuf;
 
 type TestResult<T = ()> = Result<T, String>;

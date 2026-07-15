@@ -144,7 +144,7 @@ fn missing_stdout_error() -> HtmlBrowserError {
 mod process_lifecycle;
 #[cfg(test)]
 use process_lifecycle::{child_crashed_from_status, process_terminate_error};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::process::ExitStatus;
 
 #[cfg(test)]

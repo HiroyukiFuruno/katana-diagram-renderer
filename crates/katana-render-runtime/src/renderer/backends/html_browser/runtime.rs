@@ -31,7 +31,9 @@ impl HtmlRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::HTML_BROWSER_PROTOCOL_VERSION;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;

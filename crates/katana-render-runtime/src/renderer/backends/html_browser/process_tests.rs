@@ -1,14 +1,17 @@
 use super::*;
+use std::{
+    io::{self, Cursor, Read},
+    sync::mpsc,
+    time::Duration,
+};
+
+#[cfg(unix)]
 use crate::{
     HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserCommand, HtmlBrowserProcessConfig,
     HtmlBrowserResponse,
 };
-use std::{
-    io::{self, Cursor, Read},
-    path::PathBuf,
-    sync::mpsc,
-    time::Duration,
-};
+#[cfg(unix)]
+use std::path::PathBuf;
 
 #[cfg(unix)]
 #[test]

@@ -1,9 +1,12 @@
 use katana_render_runtime::{
-    DiagramKind, DrawioRenderer, HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserInput,
-    HtmlBrowserProcessConfig, HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport,
-    HtmlRenderInput, HtmlRenderer, HtmlRuntime, MermaidRenderer, RenderConfig, RenderContext,
-    RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy, Renderer,
-    RendererProfile, RuntimeVersion,
+    DiagramKind, DrawioRenderer, HtmlRenderInput, HtmlRenderer, MermaidRenderer, RenderConfig,
+    RenderContext, RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy,
+    Renderer, RendererProfile, RuntimeVersion,
+};
+#[cfg(unix)]
+use katana_render_runtime::{
+    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserInput, HtmlBrowserProcessConfig,
+    HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport, HtmlRuntime,
 };
 use std::path::PathBuf;
 
