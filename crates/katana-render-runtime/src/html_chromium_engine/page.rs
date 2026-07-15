@@ -3,6 +3,7 @@ use super::{
     document, policy, runtime, source, trace,
 };
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use headless_chrome::{Browser, protocol::cdp::Page, types::Bounds};
 use std::{path::PathBuf, sync::Arc};
 
@@ -74,10 +75,7 @@ impl ChromiumPage {
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
         trace::stage("page:screenshot:capture");
-        let screenshot = self
-            .tab
-            .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
-            .map_err(string_error)?;
+        let screenshot = capture_viewport_png(&self.tab)?;
         trace::stage("page:screenshot:decode");
         let image = image::load_from_memory(&screenshot)
             .map_err(string_error)?
@@ -114,6 +112,21 @@ impl ChromiumPage {
         trace::stage("page:load:ready");
         Ok(())
     }
+}
+
+fn capture_viewport_png(tab: &headless_chrome::Tab) -> Result<Vec<u8>, String> {
+    let data = tab
+        .call_method(Page::CaptureScreenshot {
+            format: Some(Page::CaptureScreenshotFormatOption::Png),
+            quality: None,
+            clip: None,
+            from_surface: Some(true),
+            capture_beyond_viewport: Some(false),
+            optimize_for_speed: Some(true),
+        })
+        .map_err(string_error)?
+        .data;
+    BASE64.decode(data).map_err(string_error)
 }
 
 fn validate_frame_dimensions(
