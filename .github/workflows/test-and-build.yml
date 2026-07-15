@@ -61,6 +61,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   KRR_CHROMIUM_NO_SANDBOX: "1"
+  TEST_THREADS: "1"
 
 jobs:
   test:
@@ -165,7 +166,8 @@ jobs:
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "0"
 
       - name: Run tests
-        run: cargo test --workspace --all-targets --all-features --locked
+        timeout-minutes: 45
+        run: just unit-test
 
       - name: Run PlantUML smoke check
         if: matrix.os != 'windows-latest'

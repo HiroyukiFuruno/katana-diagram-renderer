@@ -7,8 +7,9 @@ use katana_render_runtime::{
 use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Command, Stdio},
-    sync::{Mutex, MutexGuard},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{Mutex, MutexGuard, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 #[cfg(unix)]
@@ -19,6 +20,11 @@ use std::{
 use url::Url;
 
 type TestResult<T = ()> = Result<T, String>;
+type ChildResponseReader = (
+    thread::JoinHandle<()>,
+    mpsc::Receiver<std::io::Result<String>>,
+);
+const CHILD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 static HTML_BROWSER_ENGINE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static CHROMIUM_SESSION_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(unix)]
@@ -764,36 +770,104 @@ fn child_response_for_input_with_chromium_override(
     input: &[u8],
     chromium_binary: Option<PathBuf>,
 ) -> TestResult<HtmlBrowserResponse> {
+    let mut child = spawn_browser_child(chromium_binary)?;
+    write_child_input(&mut child, input)?;
+    let (reader, receiver) = spawn_child_response_reader(&mut child)?;
+    let response = match child_response_line(&mut child, receiver) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = reader.join();
+            return Err(error);
+        }
+    };
+    let status = wait_for_child_exit(&mut child, CHILD_RESPONSE_TIMEOUT);
+    let _ = reader.join();
+    let status = status?;
+    if !status.success() {
+        return Err(format!("browser child exited unsuccessfully: {status}"));
+    }
+    serde_json::from_str(response.trim_end()).map_err(|error| error.to_string())
+}
+
+fn spawn_browser_child(chromium_binary: Option<PathBuf>) -> TestResult<Child> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine"));
     if let Some(path) = chromium_binary {
         command.env("KRR_CHROME_BIN", path);
     } else {
         command.env_remove("KRR_CHROME_BIN");
     }
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+fn write_child_input(child: &mut Child, input: &[u8]) -> TestResult {
     let mut stdin = child
         .stdin
         .take()
         .ok_or_else(|| "browser child stdin was not piped".to_string())?;
     stdin.write_all(input).map_err(|error| error.to_string())?;
-    drop(stdin);
+    Ok(())
+}
+
+fn spawn_child_response_reader(child: &mut Child) -> TestResult<ChildResponseReader> {
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "browser child stdout was not piped".to_string())?;
-    let mut response = String::new();
-    BufReader::new(stdout)
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    let status = child.wait().map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err(format!("browser child exited unsuccessfully: {status}"));
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut response = String::new();
+        let result = BufReader::new(stdout)
+            .read_line(&mut response)
+            .map(|_| response);
+        let _ = sender.send(result);
+    });
+    Ok((reader, receiver))
+}
+
+fn child_response_line(
+    child: &mut Child,
+    receiver: mpsc::Receiver<std::io::Result<String>>,
+) -> TestResult<String> {
+    match receiver.recv_timeout(CHILD_RESPONSE_TIMEOUT) {
+        Ok(response) => response.map_err(|error| error.to_string()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            terminate_child(child);
+            Err(format!(
+                "browser child did not write a response within {}ms",
+                CHILD_RESPONSE_TIMEOUT.as_millis()
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            terminate_child(child);
+            Err("browser child response reader stopped".to_string())
+        }
     }
-    serde_json::from_str(response.trim_end()).map_err(|error| error.to_string())
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> TestResult<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            terminate_child(child);
+            return Err(format!(
+                "browser child did not exit within {}ms",
+                timeout.as_millis()
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

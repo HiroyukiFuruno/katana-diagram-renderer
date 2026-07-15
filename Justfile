@@ -5,6 +5,8 @@ RTK := env_var_or_default("RTK", `command -v rtk 2> /dev/null || true`)
 RTK_CMD := if RTK == "" { "" } else { RTK + " " }
 JOBS := env_var_or_default("JOBS", "2")
 FIXTURE_JOBS := env_var_or_default("FIXTURE_JOBS", JOBS)
+TEST_THREADS := env_var_or_default("TEST_THREADS", "")
+TEST_THREAD_ARGS := if TEST_THREADS == "" { "" } else { " -- --test-threads=" + TEST_THREADS }
 RUNTIME_UPDATE_LOG_DIR := env_var_or_default("RUNTIME_UPDATE_LOG_DIR", "tmp/runtime-update-logs")
 export RUSTFLAGS := env_var_or_default("RUSTFLAGS", "-D warnings")
 CARGO := env_var_or_default("CARGO", RTK_CMD + "cargo")
@@ -70,11 +72,11 @@ dependency-leak:
 
 # Run workspace tests
 unit-test: plantuml-install chromium-install
-    {{CARGO}} test --workspace --all-targets --all-features
+    {{CARGO}} test --workspace --all-targets --all-features{{TEST_THREAD_ARGS}}
 
 # Run coverage as a required full-check gate
 coverage: plantuml-install chromium-install
-    {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}
+    {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}{{TEST_THREAD_ARGS}}
 
 # Verify pinned runtime asset checksums
 runtime-asset-check:

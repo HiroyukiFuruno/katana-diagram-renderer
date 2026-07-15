@@ -103,6 +103,26 @@ fn test_gates_install_required_runtimes_before_executing_tests()
 }
 
 #[test]
+fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let justfile = fs::read_to_string(root.join("Justfile"))?;
+    let unit_test = recipe_body(&justfile, "unit-test")?;
+    let coverage = recipe_body(&justfile, "coverage")?;
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/test-and-build.yml"))?;
+    let preflight_workflow =
+        fs::read_to_string(root.join(".github/workflows/release-preflight.yml"))?;
+
+    assert!(unit_test.contains("{{TEST_THREAD_ARGS}}"));
+    assert!(coverage.contains("{{TEST_THREAD_ARGS}}"));
+    assert!(ci_workflow.contains("TEST_THREADS: \"1\""));
+    assert!(ci_workflow.contains("timeout-minutes: 45"));
+    assert!(ci_workflow.contains("run: just unit-test"));
+    assert!(preflight_workflow.contains("TEST_THREADS: \"1\""));
+    assert!(preflight_workflow.contains("timeout-minutes: 75"));
+    Ok(())
+}
+
+#[test]
 fn release_verify_installs_and_checks_chromium_bundle() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
     let justfile = fs::read_to_string(root.join("Justfile"))?;
