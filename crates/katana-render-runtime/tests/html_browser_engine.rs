@@ -146,7 +146,7 @@ fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestR
 fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,#link{margin:0;width:100%;height:100%}#link{display:block;background:rgb(1,2,3);color:transparent}</style><a id="link" href="next.html">next</a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();event.currentTarget.style.background='rgb(17,34,51)'})</script>"#,
+        r#"<!doctype html><style>html,body,#link,#surface{margin:0;width:100%;height:100%}#link,#surface{display:block}#link{color:transparent}#surface{background:rgb(1,2,3)}</style><a id="link" href="next.html"><span id="surface"></span></a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();document.querySelector('#surface').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/prevent-default.html",
         16,
         16,
