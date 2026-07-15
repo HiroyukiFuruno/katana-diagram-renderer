@@ -73,12 +73,6 @@ impl ChromiumPage {
     }
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
-        if self.focused {
-            trace::stage("page:screenshot:warmup");
-            self.tab
-                .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
-                .map_err(string_error)?;
-        }
         trace::stage("page:screenshot:capture");
         let screenshot = self
             .tab
