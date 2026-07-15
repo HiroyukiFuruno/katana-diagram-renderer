@@ -146,6 +146,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y graphviz
 
+      - name: Install Graphviz for PlantUML on macOS
+        if: matrix.os == 'macos-latest'
+        run: brew install graphviz
+
       - name: Install PlantUML runtime
         run: just plantuml-install
 
