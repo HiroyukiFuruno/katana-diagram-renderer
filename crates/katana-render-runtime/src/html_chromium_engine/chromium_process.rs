@@ -10,8 +10,8 @@ use std::{
     time::Duration,
 };
 
-const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-const BROWSER_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const BROWSER_DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(super) struct ChromiumProcess {
     child: Child,
@@ -211,7 +211,8 @@ mod tests {
     #[test]
     fn browser_connection_timeouts_cover_slow_ci_chromium() {
         assert!(BROWSER_IDLE_TIMEOUT > CHROMIUM_STARTUP_TIMEOUT);
-        assert!(BROWSER_DEFAULT_TIMEOUT >= std::time::Duration::from_secs(60));
+        assert!(BROWSER_IDLE_TIMEOUT > BROWSER_DEFAULT_TIMEOUT);
+        assert!(BROWSER_DEFAULT_TIMEOUT >= std::time::Duration::from_secs(120));
     }
 
     #[test]

@@ -25,11 +25,17 @@ pub(super) fn chromium_arguments(
     let mut arguments = vec![
         OsString::from("--remote-debugging-port=0"),
         OsString::from("--no-first-run"),
-        OsString::from("--headless"),
+        OsString::from("--no-default-browser-check"),
+        OsString::from("--headless=new"),
         OsString::from("--disable-gpu"),
         OsString::from("--disable-background-networking"),
         OsString::from("--disable-default-apps"),
+        OsString::from("--disable-dev-shm-usage"),
+        OsString::from("--disable-extensions"),
         OsString::from("--disable-popup-blocking"),
+        OsString::from("--disable-sync"),
+        OsString::from("--metrics-recording-only"),
+        OsString::from("--mute-audio"),
         OsString::from(format!("--user-data-dir={}", profile_directory.display())),
         OsString::from(format!(
             "--window-size={},{}",
@@ -191,8 +197,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(arguments.contains(&"--remote-debugging-port=0".to_string()));
-        assert!(arguments.contains(&"--headless".to_string()));
+        assert!(arguments.contains(&"--headless=new".to_string()));
         assert!(arguments.contains(&"--disable-gpu".to_string()));
+        assert!(arguments.contains(&"--disable-dev-shm-usage".to_string()));
         assert!(arguments.contains(&"--window-size=16,8".to_string()));
         assert!(!arguments.iter().any(|argument| argument == "--no-sandbox"));
     }
