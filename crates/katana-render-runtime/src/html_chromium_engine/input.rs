@@ -6,6 +6,8 @@ use headless_chrome::{
 };
 use serde_json::Value;
 
+const RENDERING_READY_SCRIPT: &str = "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => { document.documentElement.getBoundingClientRect(); return true; })";
+
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
         match input {
@@ -110,10 +112,7 @@ impl ChromiumPage {
 
     pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
         self.tab
-            .evaluate(
-                "new Promise(resolve => setTimeout(resolve, 0)).then(() => new Promise(resolve => setTimeout(resolve, 0))).then(() => { document.documentElement.getBoundingClientRect(); return true; })",
-                true,
-            )
+            .evaluate(RENDERING_READY_SCRIPT, true)
             .map(|_| ())
             .map_err(string_error)
     }
@@ -179,6 +178,17 @@ mod tests {
         assert!(!is_primary_click(Some((1.0, 2.0, 1)), 1));
         assert!(!is_primary_click(Some((1.0, 2.0, 0)), 1));
         assert!(!is_primary_click(None, 0));
+    }
+
+    #[test]
+    fn rendering_sync_waits_for_two_animation_frames() {
+        assert_eq!(
+            RENDERING_READY_SCRIPT
+                .matches("requestAnimationFrame")
+                .count(),
+            2
+        );
+        assert!(RENDERING_READY_SCRIPT.contains("getBoundingClientRect"));
     }
 }
 #[test]
