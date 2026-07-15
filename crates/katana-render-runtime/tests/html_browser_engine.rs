@@ -155,7 +155,7 @@ fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> T
     assert_frame_contains_rgb(latest_frame(&session)?, [1, 2, 3])?;
     dispatch_click(&mut session, 8.0, 8.0)?;
     assert!(session.take_navigation().is_none());
-    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    wait_for_frame_rgb(&mut session, [17, 34, 51])?;
     session.close().map_err(|error| error.to_string())
 }
 
