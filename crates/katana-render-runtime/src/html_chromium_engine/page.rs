@@ -97,10 +97,7 @@ impl ChromiumPage {
         self.temporary_document = temporary_document;
         let temporary_document = self.temporary_document.as_deref();
         policy::install_resource_policy(&self.tab, &self.source, temporary_document)?;
-        self.tab
-            .navigate_to(&url)
-            .and_then(|tab| tab.wait_until_navigated())
-            .map_err(string_error)?;
+        self.tab.navigate_to(&url).map_err(string_error)?;
         self.tab.bring_to_front().map_err(string_error)?;
         self.emulate_focus(true)?;
         self.focused = true;

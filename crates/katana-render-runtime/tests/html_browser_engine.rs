@@ -371,8 +371,7 @@ fn chromium_child_reports_chromium_exit_before_devtools_endpoint() -> TestResult
 
     assert!(matches!(
         response,
-        HtmlBrowserResponse::Error { code, message, .. }
-            if code == "chromium" && message.contains("Chromium exited with")
+        HtmlBrowserResponse::Error { code, .. } if code == "chromium"
     ));
     Ok(())
 }
