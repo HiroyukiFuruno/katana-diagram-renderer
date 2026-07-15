@@ -1,5 +1,12 @@
-use super::source::BrowserSource;
-use std::path::PathBuf;
+use super::{main_document::MainDocument, source::BrowserSource};
+use headless_chrome::{
+    browser::tab::RequestPausedDecision,
+    protocol::cdp::{Fetch, Network},
+};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use url::Url;
 
 #[derive(Clone)]
@@ -57,6 +64,49 @@ impl BrowserResourcePolicy {
             }
             _ => false,
         }
+    }
+}
+
+pub(super) fn install_resource_policy(
+    tab: &Arc<headless_chrome::Tab>,
+    source: &BrowserSource,
+    temporary_document: Option<&Path>,
+) -> Result<(), String> {
+    let policy =
+        BrowserResourcePolicy::from_source_with_temporary_document(source, temporary_document);
+    let main_document = MainDocument::from_source(source);
+    tab.enable_request_interception(Arc::new(
+        move |_transport, _session_id, event: Fetch::events::RequestPausedEvent| {
+            request_decision(event, &main_document, &policy)
+        },
+    ))
+    .map_err(string_error)?;
+    tab.enable_fetch(None, None)
+        .map(|_| ())
+        .map_err(string_error)
+}
+
+fn string_error(error: impl ToString) -> String {
+    error.to_string()
+}
+
+fn request_decision(
+    event: Fetch::events::RequestPausedEvent,
+    main_document: &Option<MainDocument>,
+    policy: &BrowserResourcePolicy,
+) -> RequestPausedDecision {
+    if let Some(document) = main_document
+        && document.matches(&event.params.request.url)
+    {
+        return RequestPausedDecision::Fulfill(document.fulfill(event.params.request_id));
+    }
+    if policy.allows(&event.params.request.url) {
+        RequestPausedDecision::Continue(None)
+    } else {
+        RequestPausedDecision::Fail(Fetch::FailRequest {
+            request_id: event.params.request_id,
+            error_reason: Network::ErrorReason::BlockedByClient,
+        })
     }
 }
 
@@ -164,6 +214,7 @@ mod tests {
             "browser viewport dimensions must be non-zero"
         );
         assert_eq!(io_error(std::io::Error::other("boom")), "boom");
+        assert_eq!(string_error("policy failed"), "policy failed");
     }
 
     fn must_file_url(path: &std::path::Path) -> Result<Url, String> {

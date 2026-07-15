@@ -24,6 +24,12 @@ pub(super) fn document_url(source: &BrowserSource) -> Result<(String, Option<Pat
     ))
 }
 
+pub(super) fn remove_temporary_document(document: &mut Option<PathBuf>) {
+    if let Some(path) = document.take() {
+        let _ = fs::remove_file(path);
+    }
+}
+
 pub(super) fn browser_document(source: &BrowserSource) -> String {
     let head = format!(
         "<base href=\"{}\"><script>document.addEventListener('click', event => {{ const link = event.target.closest('a[href]'); if (link && !event.defaultPrevented) {{ event.preventDefault(); window.__katanaNavigation = new URL(link.href, document.baseURI).href; }} }})</script>",

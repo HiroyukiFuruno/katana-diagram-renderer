@@ -25,7 +25,10 @@ impl ChromiumPage {
             HtmlBrowserInput::KeyUp { .. } => {}
             HtmlBrowserInput::Scroll { delta_x, delta_y } => self.scroll(delta_x, delta_y)?,
         }
-        self.synchronize_rendering()
+        if self.focused {
+            self.synchronize_rendering()?;
+        }
+        Ok(())
     }
 
     pub(super) fn take_navigation(&self) -> Result<Option<HtmlBrowserNavigationEvent>, String> {
@@ -85,7 +88,7 @@ impl ChromiumPage {
             .map_err(string_error)
     }
 
-    fn focus(&self, focused: bool) -> Result<(), String> {
+    fn focus(&mut self, focused: bool) -> Result<(), String> {
         let script = if focused {
             "window.focus(); const target = document.activeElement === document.body ? document.querySelector('[autofocus]') : null; if (target && target.focus) target.focus(); true;"
         } else {
@@ -93,10 +96,9 @@ impl ChromiumPage {
         };
         self.tab.activate().map_err(string_error)?;
         self.emulate_focus(focused)?;
-        self.tab
-            .evaluate(script, false)
-            .map(|_| ())
-            .map_err(string_error)
+        self.tab.evaluate(script, false).map_err(string_error)?;
+        self.focused = focused;
+        Ok(())
     }
 
     pub(super) fn emulate_focus(&self, focused: bool) -> Result<(), String> {

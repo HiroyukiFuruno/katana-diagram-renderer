@@ -1,5 +1,10 @@
+use crate::HtmlBrowserViewport;
+use headless_chrome::protocol::cdp::Emulation;
 use serde::Deserialize;
-use std::{ffi::OsStr, path::PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 const CHROMIUM_BINARY_ENV: &str = "KRR_CHROME_BIN";
 const RENDERING_ARGS: [&str; 4] = [
@@ -17,6 +22,10 @@ pub(super) fn chrome_binary_path() -> Result<PathBuf, String> {
         return executable_file(path, "KRR_CHROME_BIN");
     }
     let executable = std::env::current_exe().map_err(string_error)?;
+    chrome_binary_path_adjacent_to(&executable)
+}
+
+pub(super) fn chrome_binary_path_adjacent_to(executable: &Path) -> Result<PathBuf, String> {
     let directory = executable
         .parent()
         .ok_or("KRR browser helper has no parent directory".to_string())?;
@@ -32,6 +41,30 @@ pub(super) fn chrome_binary_path() -> Result<PathBuf, String> {
 
 pub(super) fn rendering_args() -> Vec<&'static OsStr> {
     RENDERING_ARGS.map(OsStr::new).to_vec()
+}
+
+pub(super) fn set_viewport(
+    tab: &headless_chrome::Tab,
+    viewport: HtmlBrowserViewport,
+) -> Result<(), String> {
+    tab.call_method(Emulation::SetDeviceMetricsOverride {
+        width: viewport.width,
+        height: viewport.height,
+        device_scale_factor: f64::from(viewport.device_scale_factor),
+        mobile: false,
+        scale: None,
+        screen_width: None,
+        screen_height: None,
+        position_x: None,
+        position_y: None,
+        dont_set_visible_size: None,
+        screen_orientation: None,
+        viewport: None,
+        display_feature: None,
+        device_posture: None,
+    })
+    .map(|_| ())
+    .map_err(string_error)
 }
 
 #[derive(Deserialize)]
@@ -107,7 +140,7 @@ fn invalid_manifest(error: serde_json::Error) -> String {
     format!("invalid KRR Chromium manifest: {error}")
 }
 
-fn string_error(error: std::io::Error) -> String {
+fn string_error(error: impl ToString) -> String {
     error.to_string()
 }
 

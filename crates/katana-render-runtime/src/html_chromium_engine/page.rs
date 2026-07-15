@@ -1,12 +1,7 @@
-use super::{document, main_document, policy, runtime, source};
+use super::{document, policy, runtime, source};
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
-use headless_chrome::{
-    Browser, LaunchOptionsBuilder,
-    browser::tab::RequestPausedDecision,
-    protocol::cdp::{Emulation, Fetch, Network, Page},
-    types::Bounds,
-};
-use std::{fs, path::PathBuf, sync::Arc};
+use headless_chrome::{Browser, LaunchOptionsBuilder, protocol::cdp::Page, types::Bounds};
+use std::{path::PathBuf, sync::Arc};
 
 pub(super) struct ChromiumPage {
     pub(super) tab: Arc<headless_chrome::Tab>,
@@ -14,6 +9,7 @@ pub(super) struct ChromiumPage {
     pub(super) source: source::BrowserSource,
     pub(super) viewport: HtmlBrowserViewport,
     pub(super) generation: u64,
+    pub(super) focused: bool,
     pub(super) pointer_down: Option<(f32, f32, u8)>,
     temporary_document: Option<PathBuf>,
 }
@@ -38,10 +34,11 @@ impl ChromiumPage {
             source,
             viewport,
             generation: 0,
+            focused: true,
             pointer_down: None,
             temporary_document: None,
         };
-        page.set_viewport(viewport)?;
+        runtime::set_viewport(&page.tab, viewport)?;
         page.load()?;
         Ok(page)
     }
@@ -65,12 +62,17 @@ impl ChromiumPage {
                 height: Some(f64::from(viewport.height)),
             })
             .map_err(string_error)?;
-        self.set_viewport(viewport)?;
+        runtime::set_viewport(&self.tab, viewport)?;
         self.viewport = viewport;
         Ok(())
     }
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
+        if self.focused {
+            self.tab
+                .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
+                .map_err(string_error)?;
+        }
         let screenshot = self
             .tab
             .capture_screenshot(Page::CaptureScreenshotFormatOption::Png, None, None, true)
@@ -80,97 +82,30 @@ impl ChromiumPage {
             .to_rgba8();
         validate_frame_dimensions(image.width(), image.height(), self.viewport)?;
         self.generation += 1;
-        let pixels = image.into_raw();
         HtmlBrowserFrame::new(
             self.generation,
             self.source.source.origin.clone(),
             self.viewport,
             HtmlBrowserPixelFormat::Rgba8,
-            pixels,
+            image.into_raw(),
         )
         .map_err(string_error)
     }
 
     fn load(&mut self) -> Result<(), String> {
-        self.remove_temporary_document();
+        document::remove_temporary_document(&mut self.temporary_document);
         let (url, temporary_document) = document::document_url(&self.source)?;
         self.temporary_document = temporary_document;
-        self.install_resource_policy(self.temporary_document.as_deref())?;
+        let temporary_document = self.temporary_document.as_deref();
+        policy::install_resource_policy(&self.tab, &self.source, temporary_document)?;
         self.tab
             .navigate_to(&url)
             .and_then(|tab| tab.wait_until_navigated())
             .map_err(string_error)?;
         self.tab.bring_to_front().map_err(string_error)?;
         self.emulate_focus(true)?;
+        self.focused = true;
         self.synchronize_rendering()
-    }
-
-    fn set_viewport(&self, viewport: HtmlBrowserViewport) -> Result<(), String> {
-        self.tab
-            .call_method(Emulation::SetDeviceMetricsOverride {
-                width: viewport.width,
-                height: viewport.height,
-                device_scale_factor: f64::from(viewport.device_scale_factor),
-                mobile: false,
-                scale: None,
-                screen_width: None,
-                screen_height: None,
-                position_x: None,
-                position_y: None,
-                dont_set_visible_size: None,
-                screen_orientation: None,
-                viewport: None,
-                display_feature: None,
-                device_posture: None,
-            })
-            .map_err(string_error)?;
-        Ok(())
-    }
-
-    fn install_resource_policy(
-        &self,
-        temporary_document: Option<&std::path::Path>,
-    ) -> Result<(), String> {
-        let policy = policy::BrowserResourcePolicy::from_source_with_temporary_document(
-            &self.source,
-            temporary_document,
-        );
-        let main_document = main_document::MainDocument::from_source(&self.source);
-        self.tab
-            .enable_request_interception(Arc::new(
-                move |_transport, _session_id, event: Fetch::events::RequestPausedEvent| {
-                    request_decision(event, &main_document, &policy)
-                },
-            ))
-            .map_err(string_error)?;
-        self.tab.enable_fetch(None, None).map_err(string_error)?;
-        Ok(())
-    }
-
-    fn remove_temporary_document(&mut self) {
-        if let Some(path) = self.temporary_document.take() {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-fn request_decision(
-    event: Fetch::events::RequestPausedEvent,
-    main_document: &Option<main_document::MainDocument>,
-    policy: &policy::BrowserResourcePolicy,
-) -> RequestPausedDecision {
-    if let Some(document) = main_document
-        && document.matches(&event.params.request.url)
-    {
-        return RequestPausedDecision::Fulfill(document.fulfill(event.params.request_id));
-    }
-    if policy.allows(&event.params.request.url) {
-        RequestPausedDecision::Continue(None)
-    } else {
-        RequestPausedDecision::Fail(Fetch::FailRequest {
-            request_id: event.params.request_id,
-            error_reason: Network::ErrorReason::BlockedByClient,
-        })
     }
 }
 
@@ -188,13 +123,13 @@ fn validate_frame_dimensions(
     ))
 }
 
-fn string_error(error: impl ToString) -> String {
+pub(super) fn string_error(error: impl ToString) -> String {
     error.to_string()
 }
 
 impl Drop for ChromiumPage {
     fn drop(&mut self) {
-        self.remove_temporary_document();
+        document::remove_temporary_document(&mut self.temporary_document);
     }
 }
 
