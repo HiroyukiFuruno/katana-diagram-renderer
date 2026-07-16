@@ -3,6 +3,9 @@ use crate::HtmlBrowserViewport;
 use std::{ffi::OsString, path::Path};
 
 const CHROMIUM_NO_SANDBOX_ENV: &str = "KRR_CHROMIUM_NO_SANDBOX";
+#[cfg(target_os = "linux")]
+const BASE_CHROMIUM_ARGUMENT_COUNT: usize = 17;
+#[cfg(not(target_os = "linux"))]
 const BASE_CHROMIUM_ARGUMENT_COUNT: usize = 16;
 
 pub(super) fn chromium_arguments(
@@ -31,8 +34,7 @@ fn base_chromium_arguments(
     arguments.push(OsString::from("--no-first-run"));
     arguments.push(OsString::from("--no-default-browser-check"));
     arguments.push(OsString::from("--headless=new"));
-    arguments.push(OsString::from("--use-gl=swiftshader"));
-    arguments.push(OsString::from("--enable-unsafe-swiftshader"));
+    push_swiftshader_arguments(&mut arguments);
     arguments.push(OsString::from("--disable-background-networking"));
     arguments.push(OsString::from("--disable-default-apps"));
     arguments.push(OsString::from("--disable-dev-shm-usage"));
@@ -44,6 +46,19 @@ fn base_chromium_arguments(
     arguments.push(OsString::from(user_data_dir));
     arguments.push(OsString::from(window_size));
     arguments
+}
+
+#[cfg(target_os = "linux")]
+fn push_swiftshader_arguments(arguments: &mut Vec<OsString>) {
+    arguments.push(OsString::from("--use-gl=angle"));
+    arguments.push(OsString::from("--use-angle=swiftshader"));
+    arguments.push(OsString::from("--enable-unsafe-swiftshader"));
+}
+
+#[cfg(not(target_os = "linux"))]
+fn push_swiftshader_arguments(arguments: &mut Vec<OsString>) {
+    arguments.push(OsString::from("--use-gl=swiftshader"));
+    arguments.push(OsString::from("--enable-unsafe-swiftshader"));
 }
 
 fn sandbox_disabled_by_environment() -> bool {
@@ -68,13 +83,36 @@ mod tests {
         let viewport = test_viewport(16, 8, 1.0);
         let arguments = chromium_arguments(&profile, viewport);
 
+        assert_base_browser_arguments(&arguments);
+        assert_browser_sandbox_arguments(&arguments);
+    }
+
+    fn assert_base_browser_arguments(arguments: &[OsString]) {
         assert!(arguments.contains(&OsString::from("--remote-debugging-port=0")));
         assert!(arguments.contains(&OsString::from("--headless=new")));
-        assert!(arguments.contains(&OsString::from("--use-gl=swiftshader")));
-        assert!(arguments.contains(&OsString::from("--enable-unsafe-swiftshader")));
+        assert_swiftshader_arguments(arguments);
         assert!(!arguments.contains(&OsString::from("--disable-gpu")));
         assert!(arguments.contains(&OsString::from("--disable-dev-shm-usage")));
         assert!(arguments.contains(&OsString::from("--window-size=16,8")));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_swiftshader_arguments(arguments: &[OsString]) {
+        assert!(arguments.contains(&OsString::from("--use-gl=angle")));
+        assert!(arguments.contains(&OsString::from("--use-angle=swiftshader")));
+        assert!(arguments.contains(&OsString::from("--enable-unsafe-swiftshader")));
+        assert!(!arguments.contains(&OsString::from("--use-gl=swiftshader")));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn assert_swiftshader_arguments(arguments: &[OsString]) {
+        assert!(arguments.contains(&OsString::from("--use-gl=swiftshader")));
+        assert!(arguments.contains(&OsString::from("--enable-unsafe-swiftshader")));
+        assert!(!arguments.contains(&OsString::from("--use-gl=angle")));
+        assert!(!arguments.contains(&OsString::from("--use-angle=swiftshader")));
+    }
+
+    fn assert_browser_sandbox_arguments(arguments: &[OsString]) {
         assert!(!arguments.contains(&OsString::from("--no-sandbox")));
     }
 
