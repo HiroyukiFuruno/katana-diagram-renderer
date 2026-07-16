@@ -147,9 +147,14 @@ fn assert_ci_workflow_bounds_browser_tests(ci_workflow: &str) {
     assert!(ci_workflow.contains("TEST_THREADS: \"1\""));
     assert!(ci_workflow.contains("timeout-minutes: 45"));
     assert!(ci_workflow.contains("run: just unit-test"));
-    assert!(ci_workflow.contains("save-if: ${{ matrix.os != 'ubuntu-latest' }}"));
+    assert!(
+        ci_workflow
+            .contains("name: Cache Rust build outputs\n        if: matrix.os != 'ubuntu-latest'")
+    );
+    assert!(ci_workflow.contains("name: Free Ubuntu build space before coverage"));
     assert!(ci_workflow.contains("name: Free Ubuntu build space after coverage"));
     assert!(ci_workflow.contains("cargo llvm-cov clean --workspace"));
+    assert!(!ci_workflow.contains("continue-on-error: true"));
 }
 
 fn assert_preflight_workflow_bounds_browser_tests(preflight_workflow: &str) {
