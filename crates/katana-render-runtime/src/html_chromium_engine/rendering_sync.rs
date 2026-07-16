@@ -1,6 +1,23 @@
 pub(super) const RENDERING_READY_SCRIPT: &str = r#"
 new Promise(resolve => setTimeout(resolve, 0))
   .then(() => {
+    const DOCUMENT_READY_TIMEOUT_MS = 2000;
+    if (document.readyState !== 'loading') {
+      return undefined;
+    }
+    return new Promise(resolve => {
+      let resolved = false;
+      const finish = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+      document.addEventListener('DOMContentLoaded', finish, { once: true });
+      setTimeout(finish, DOCUMENT_READY_TIMEOUT_MS);
+    });
+  })
+  .then(() => {
     const RESOURCE_READY_TIMEOUT_MS = 2000;
     const waitForResourceEvent = subscribe => new Promise(resolve => {
       let resolved = false;
@@ -80,6 +97,13 @@ mod tests {
         );
         assert!(RENDERING_READY_SCRIPT.contains("setTimeout(finish, 100)"));
         assert!(RENDERING_READY_SCRIPT.contains("getBoundingClientRect"));
+    }
+
+    #[test]
+    fn rendering_sync_waits_for_document_scripts_before_resource_paint() {
+        assert!(RENDERING_READY_SCRIPT.contains("document.readyState !== 'loading'"));
+        assert!(RENDERING_READY_SCRIPT.contains("DOMContentLoaded"));
+        assert!(RENDERING_READY_SCRIPT.contains("DOCUMENT_READY_TIMEOUT_MS = 2000"));
     }
 
     #[test]
