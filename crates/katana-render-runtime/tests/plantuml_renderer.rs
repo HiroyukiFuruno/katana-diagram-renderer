@@ -104,6 +104,10 @@ fn plantuml_default_cache_path_falls_back_without_home_environment()
     let _kdr_cache = EnvOverride::unset("KDR_PLANTUML_CACHE_DIR");
     let _home = EnvOverride::unset("HOME");
     let _user_profile = EnvOverride::unset("USERPROFILE");
+    #[cfg(target_os = "windows")]
+    let _local_app_data = EnvOverride::unset("LOCALAPPDATA");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _xdg_cache_home = EnvOverride::unset("XDG_CACHE_HOME");
 
     let path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
 
