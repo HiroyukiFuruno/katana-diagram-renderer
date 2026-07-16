@@ -9,6 +9,7 @@ mod page_slot;
 mod policy;
 mod rendering_sync;
 mod runtime;
+mod screenshot;
 mod source;
 mod trace;
 

@@ -1,10 +1,11 @@
 use super::{
     chromium_process::{ChromiumProcess, launch_chromium},
-    document, policy, runtime, source, trace,
+    document, policy, runtime,
+    screenshot::{capture_viewport_png, validate_frame_dimensions},
+    source, trace,
 };
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use headless_chrome::{Browser, protocol::cdp::Page, types::Bounds};
+use headless_chrome::{Browser, types::Bounds};
 use std::{path::PathBuf, sync::Arc};
 
 pub(super) struct ChromiumPage {
@@ -75,7 +76,7 @@ impl ChromiumPage {
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
         trace::stage("page:screenshot:capture");
-        let screenshot = capture_viewport_png(&self.tab)?;
+        let screenshot = capture_viewport_png(&self.tab, self.viewport)?;
         trace::stage("page:screenshot:decode");
         let image = image::load_from_memory(&screenshot)
             .map_err(string_error)?
@@ -114,35 +115,6 @@ impl ChromiumPage {
     }
 }
 
-fn capture_viewport_png(tab: &headless_chrome::Tab) -> Result<Vec<u8>, String> {
-    let data = tab
-        .call_method(Page::CaptureScreenshot {
-            format: Some(Page::CaptureScreenshotFormatOption::Png),
-            quality: None,
-            clip: None,
-            from_surface: Some(true),
-            capture_beyond_viewport: Some(false),
-            optimize_for_speed: Some(true),
-        })
-        .map_err(string_error)?
-        .data;
-    BASE64.decode(data).map_err(string_error)
-}
-
-fn validate_frame_dimensions(
-    image_width: u32,
-    image_height: u32,
-    viewport: HtmlBrowserViewport,
-) -> Result<(), String> {
-    if image_width == viewport.width && image_height == viewport.height {
-        return Ok(());
-    }
-    Err(format!(
-        "Chromium frame dimensions {image_width}x{image_height} do not match viewport {}x{}",
-        viewport.width, viewport.height
-    ))
-}
-
 pub(super) fn string_error(error: impl ToString) -> String {
     error.to_string()
 }
@@ -156,26 +128,6 @@ impl Drop for ChromiumPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_frame_dimensions_accepts_exact_viewport_size() {
-        let viewport = must(HtmlBrowserViewport::new(2, 3, 1.0));
-
-        assert_eq!(validate_frame_dimensions(2, 3, viewport), Ok(()));
-    }
-
-    #[test]
-    fn validate_frame_dimensions_rejects_mismatched_image_size() {
-        let viewport = must(HtmlBrowserViewport::new(2, 3, 1.0));
-        let error = must(
-            validate_frame_dimensions(4, 5, viewport)
-                .err()
-                .ok_or("mismatched image size was accepted"),
-        );
-
-        assert!(error.contains("4x5"));
-        assert!(validate_frame_dimensions(2, 5, viewport).is_err());
-    }
 
     #[test]
     fn string_error_preserves_page_error_messages() {
@@ -203,6 +155,19 @@ mod tests {
                 );
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn must_ok_branch_covers_test_value_types() {
+        assert_eq!(must::<String, &str>(Ok("ok".to_string())), "ok");
+        assert_eq!(
+            must(HtmlBrowserViewport::new(2, 3, 1.0)),
+            HtmlBrowserViewport {
+                width: 2,
+                height: 3,
+                device_scale_factor: 1.0,
+            }
         );
     }
 
