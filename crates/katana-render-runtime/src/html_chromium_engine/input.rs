@@ -1,4 +1,4 @@
-use super::{page::ChromiumPage, rendering_sync::RENDERING_READY_SCRIPT, trace};
+use super::{page::ChromiumPage, trace};
 use crate::{HtmlBrowserInput, HtmlBrowserNavigationEvent};
 use headless_chrome::{
     browser::tab::point::Point,
@@ -155,16 +155,6 @@ impl ChromiumPage {
             .call_method(Emulation::SetFocusEmulationEnabled { enabled: focused })
             .map(|_| ())
             .map_err(string_error)
-    }
-
-    pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
-        trace::stage("page:rendering-sync:evaluate");
-        self.tab
-            .evaluate(RENDERING_READY_SCRIPT, true)
-            .map(|_| ())
-            .map_err(string_error)?;
-        trace::stage("page:rendering-sync:ready");
-        Ok(())
     }
 }
 

@@ -1,8 +1,13 @@
-pub(super) const RENDERING_READY_SCRIPT: &str = r#"
+use super::{
+    page::{ChromiumPage, string_error},
+    trace,
+};
+
+pub(super) const LOADED_RENDERING_READY_SCRIPT: &str = r#"
 new Promise(resolve => setTimeout(resolve, 0))
   .then(() => {
     const DOCUMENT_READY_TIMEOUT_MS = 2000;
-    if (document.readyState !== 'loading') {
+    if (document.readyState === 'complete') {
       return undefined;
     }
     return new Promise(resolve => {
@@ -13,7 +18,7 @@ new Promise(resolve => setTimeout(resolve, 0))
           resolve();
         }
       };
-      document.addEventListener('DOMContentLoaded', finish, { once: true });
+      window.addEventListener('load', finish, { once: true });
       setTimeout(finish, DOCUMENT_READY_TIMEOUT_MS);
     });
   })
@@ -83,6 +88,47 @@ new Promise(resolve => setTimeout(resolve, 0))
   })
 "#;
 
+pub(super) const RENDERING_READY_SCRIPT: &str = r#"
+new Promise(resolve => {
+  let resolved = false;
+  const finish = () => {
+    if (!resolved) {
+      resolved = true;
+      resolve();
+    }
+  };
+  requestAnimationFrame(() => requestAnimationFrame(finish));
+  setTimeout(finish, 100);
+})
+  .then(() => {
+    document.documentElement.getBoundingClientRect();
+    return true;
+  })
+"#;
+
+impl ChromiumPage {
+    pub(super) fn synchronize_rendering(&self) -> Result<(), String> {
+        trace::stage("page:rendering-sync:evaluate");
+        evaluate_rendering_sync(self, RENDERING_READY_SCRIPT)?;
+        trace::stage("page:rendering-sync:ready");
+        Ok(())
+    }
+
+    pub(super) fn synchronize_loaded_rendering(&self) -> Result<(), String> {
+        trace::stage("page:rendering-load-sync:evaluate");
+        evaluate_rendering_sync(self, LOADED_RENDERING_READY_SCRIPT)?;
+        trace::stage("page:rendering-load-sync:ready");
+        Ok(())
+    }
+}
+
+fn evaluate_rendering_sync(page: &ChromiumPage, script: &str) -> Result<(), String> {
+    page.tab
+        .evaluate(script, true)
+        .map(|_| ())
+        .map_err(string_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,20 +146,29 @@ mod tests {
     }
 
     #[test]
+    fn rendering_sync_capture_script_uses_only_paint_barrier() {
+        assert!(!RENDERING_READY_SCRIPT.contains("DOCUMENT_READY_TIMEOUT_MS"));
+        assert!(!RENDERING_READY_SCRIPT.contains("RESOURCE_READY_TIMEOUT_MS"));
+        assert!(!RENDERING_READY_SCRIPT.contains("window.addEventListener('load'"));
+    }
+
+    #[test]
     fn rendering_sync_waits_for_document_scripts_before_resource_paint() {
-        assert!(RENDERING_READY_SCRIPT.contains("document.readyState !== 'loading'"));
-        assert!(RENDERING_READY_SCRIPT.contains("DOMContentLoaded"));
-        assert!(RENDERING_READY_SCRIPT.contains("DOCUMENT_READY_TIMEOUT_MS = 2000"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("document.readyState === 'complete'"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("window.addEventListener('load'"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("DOCUMENT_READY_TIMEOUT_MS = 2000"));
     }
 
     #[test]
     fn rendering_sync_waits_for_stylesheet_and_image_resources() {
-        assert!(RENDERING_READY_SCRIPT.contains("waitForResourceEvent"));
-        assert!(RENDERING_READY_SCRIPT.contains("RESOURCE_READY_TIMEOUT_MS = 2000"));
-        assert!(RENDERING_READY_SCRIPT.contains("setTimeout(finish, RESOURCE_READY_TIMEOUT_MS)"));
-        assert!(RENDERING_READY_SCRIPT.contains("link[rel~=\"stylesheet\"]"));
-        assert!(RENDERING_READY_SCRIPT.contains("cssRules"));
-        assert!(RENDERING_READY_SCRIPT.contains("document.images"));
-        assert!(RENDERING_READY_SCRIPT.contains("image.decode"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("waitForResourceEvent"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("RESOURCE_READY_TIMEOUT_MS = 2000"));
+        assert!(
+            LOADED_RENDERING_READY_SCRIPT.contains("setTimeout(finish, RESOURCE_READY_TIMEOUT_MS)")
+        );
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("link[rel~=\"stylesheet\"]"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("cssRules"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("document.images"));
+        assert!(LOADED_RENDERING_READY_SCRIPT.contains("image.decode"));
     }
 }

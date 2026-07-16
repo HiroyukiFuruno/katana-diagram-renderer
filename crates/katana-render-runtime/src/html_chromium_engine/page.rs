@@ -70,6 +70,8 @@ impl ChromiumPage {
     }
 
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
+        trace::stage("page:screenshot:synchronize");
+        self.synchronize_rendering()?;
         trace::stage("page:screenshot:capture");
         let screenshot = capture_viewport_png(&self.tab, self.viewport)?;
         trace::stage("page:screenshot:decode");
@@ -104,7 +106,7 @@ impl ChromiumPage {
         self.emulate_focus(true)?;
         self.focused = true;
         trace::stage("page:load:synchronize");
-        self.synchronize_rendering()?;
+        self.synchronize_loaded_rendering()?;
         trace::stage("page:load:ready");
         Ok(())
     }
