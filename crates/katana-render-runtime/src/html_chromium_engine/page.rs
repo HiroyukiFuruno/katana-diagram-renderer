@@ -31,6 +31,8 @@ impl ChromiumPage {
         let (browser, chromium) = launch_chromium(&chrome_binary, viewport)?;
         trace::stage("page:new:new-tab");
         let tab = browser.new_tab().map_err(string_error)?;
+        trace::stage("page:new:set-bounds");
+        set_view_bounds(&tab, viewport)?;
         let mut page = Self {
             _browser: browser,
             _chromium: chromium,
@@ -61,14 +63,7 @@ impl ChromiumPage {
     }
 
     pub(super) fn resize(&mut self, viewport: HtmlBrowserViewport) -> Result<(), String> {
-        self.tab
-            .set_bounds(Bounds::Normal {
-                left: None,
-                top: None,
-                width: Some(f64::from(viewport.width)),
-                height: Some(f64::from(viewport.height)),
-            })
-            .map_err(string_error)?;
+        set_view_bounds(&self.tab, viewport)?;
         runtime::set_viewport(&self.tab, viewport)?;
         self.viewport = viewport;
         Ok(())
@@ -117,6 +112,20 @@ impl ChromiumPage {
 
 pub(super) fn string_error(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn set_view_bounds(
+    tab: &headless_chrome::Tab,
+    viewport: HtmlBrowserViewport,
+) -> Result<(), String> {
+    tab.set_bounds(Bounds::Normal {
+        left: None,
+        top: None,
+        width: Some(f64::from(viewport.width)),
+        height: Some(f64::from(viewport.height)),
+    })
+    .map(|_| ())
+    .map_err(string_error)
 }
 
 impl Drop for ChromiumPage {

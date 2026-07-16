@@ -1,8 +1,26 @@
 use super::trace;
 use crate::HtmlBrowserViewport;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use headless_chrome::protocol::cdp::Page;
+use headless_chrome::{
+    browser::tab::EventListener,
+    protocol::cdp::{Page, types::Event},
+};
 use image::RgbaImage;
+use std::{
+    sync::{Arc, Weak, mpsc},
+    time::Duration,
+};
+
+const SCREENCAST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+type ScreencastListener = dyn EventListener<Event> + Send + Sync;
+type ScreencastListenerHandle = Weak<ScreencastListener>;
+type ScreencastReceiver = mpsc::Receiver<ScreencastFrameCapture>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreencastFrameCapture {
+    data: String,
+    session_id: u32,
+}
 
 pub(super) fn capture_viewport_png(
     tab: &headless_chrome::Tab,
@@ -10,19 +28,70 @@ pub(super) fn capture_viewport_png(
 ) -> Result<Vec<u8>, String> {
     trace::stage("page:screenshot:activate");
     activate_capture_surface(tab)?;
-    trace::stage("page:screenshot:cdp-capture");
-    let data = tab
-        .call_method(Page::CaptureScreenshot {
-            format: Some(Page::CaptureScreenshotFormatOption::Png),
-            quality: None,
-            clip: None,
-            from_surface: Some(true),
-            capture_beyond_viewport: None,
-            optimize_for_speed: None,
-        })
-        .map_err(string_error)?
-        .data;
-    BASE64.decode(data).map_err(string_error)
+    let (receiver, listener) = install_screencast_listener(tab)?;
+    start_screencast(tab)?;
+    let frame = receive_screencast_frame(&receiver);
+    let frame = finish_screencast(tab, &listener, frame)?;
+    trace::stage("page:screenshot:screencast-decode");
+    decode_screencast_frame(frame)
+}
+
+fn install_screencast_listener(
+    tab: &headless_chrome::Tab,
+) -> Result<(ScreencastReceiver, ScreencastListenerHandle), String> {
+    trace::stage("page:screenshot:screencast-listen");
+    let (sender, receiver) = mpsc::channel();
+    let listener = tab
+        .add_event_listener(Arc::new(move |event: &Event| {
+            if let Event::PageScreencastFrame(frame) = event {
+                let _ = sender.send(ScreencastFrameCapture {
+                    data: frame.params.data.clone(),
+                    session_id: frame.params.session_id,
+                });
+            }
+        }))
+        .map_err(string_error)?;
+    Ok((receiver, listener))
+}
+
+fn start_screencast(tab: &headless_chrome::Tab) -> Result<(), String> {
+    trace::stage("page:screenshot:screencast-start");
+    tab.start_screencast(
+        Some(Page::StartScreencastFormatOption::Png),
+        None,
+        None,
+        None,
+        Some(1),
+    )
+    .map_err(string_error)
+}
+
+fn receive_screencast_frame(
+    receiver: &mpsc::Receiver<ScreencastFrameCapture>,
+) -> Result<ScreencastFrameCapture, String> {
+    trace::stage("page:screenshot:screencast-frame");
+    receiver
+        .recv_timeout(SCREENCAST_FRAME_TIMEOUT)
+        .map_err(screencast_timeout_error)
+}
+
+fn finish_screencast(
+    tab: &headless_chrome::Tab,
+    listener: &ScreencastListenerHandle,
+    frame: Result<ScreencastFrameCapture, String>,
+) -> Result<ScreencastFrameCapture, String> {
+    let ack_result = frame
+        .as_ref()
+        .map_or(Ok(()), |frame| tab.ack_screencast(frame.session_id))
+        .map_err(string_error);
+    trace::stage("page:screenshot:screencast-stop");
+    let stop_result = tab.stop_screencast().map_err(string_error);
+    let remove_result = tab.remove_event_listener(listener).map_err(string_error);
+    stop_result?;
+    remove_result?;
+    let frame = frame?;
+    ack_result?;
+    Ok(frame)
 }
 
 fn activate_capture_surface(tab: &headless_chrome::Tab) -> Result<(), String> {
@@ -63,6 +132,19 @@ pub(super) fn crop_frame_to_viewport(
 
 fn string_error(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn decode_screencast_frame(frame: ScreencastFrameCapture) -> Result<Vec<u8>, String> {
+    BASE64.decode(frame.data).map_err(string_error)
+}
+
+fn screencast_timeout_error(error: mpsc::RecvTimeoutError) -> String {
+    match error {
+        mpsc::RecvTimeoutError::Timeout => "Chromium screencast frame timed out".to_string(),
+        mpsc::RecvTimeoutError::Disconnected => {
+            "Chromium screencast frame channel disconnected".to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +206,43 @@ mod tests {
 
         assert!(error.contains("2x3"));
         assert!(error.contains("4x5"));
+    }
+
+    #[test]
+    fn decode_screencast_frame_decodes_base64_png() {
+        assert_eq!(
+            must(decode_screencast_frame(ScreencastFrameCapture {
+                data: "AQID".to_string(),
+                session_id: 7,
+            })),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn decode_screencast_frame_rejects_invalid_base64() {
+        let error = must(
+            decode_screencast_frame(ScreencastFrameCapture {
+                data: "not base64".to_string(),
+                session_id: 7,
+            })
+            .err()
+            .ok_or("invalid screencast frame was accepted"),
+        );
+
+        assert!(error.contains("Invalid"));
+    }
+
+    #[test]
+    fn screencast_timeout_error_preserves_channel_state() {
+        assert_eq!(
+            screencast_timeout_error(mpsc::RecvTimeoutError::Timeout),
+            "Chromium screencast frame timed out"
+        );
+        assert_eq!(
+            screencast_timeout_error(mpsc::RecvTimeoutError::Disconnected),
+            "Chromium screencast frame channel disconnected"
+        );
     }
 
     #[test]
