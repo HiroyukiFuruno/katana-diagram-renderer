@@ -215,3 +215,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
         run: just coverage
+
+      - name: Free Ubuntu build space after coverage
+        if: matrix.os == 'ubuntu-latest' && always()
+        run: |
+          cargo llvm-cov clean --workspace || true
+          rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental tmp/chromium-cache

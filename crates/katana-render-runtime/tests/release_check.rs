@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{
     fs,
@@ -131,16 +131,30 @@ fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn s
     let preflight_workflow =
         fs::read_to_string(root.join(".github/workflows/release-preflight.yml"))?;
 
+    assert_test_recipes_are_serialized(unit_test, coverage);
+    assert_ci_workflow_bounds_browser_tests(&ci_workflow);
+    assert_preflight_workflow_bounds_browser_tests(&preflight_workflow);
+    Ok(())
+}
+
+fn assert_test_recipes_are_serialized(unit_test: &str, coverage: &str) {
     assert!(unit_test.contains("{{TEST_THREAD_ARGS}}"));
     assert!(unit_test.contains("--locked"));
     assert!(coverage.contains("{{TEST_THREAD_ARGS}}"));
+}
+
+fn assert_ci_workflow_bounds_browser_tests(ci_workflow: &str) {
     assert!(ci_workflow.contains("TEST_THREADS: \"1\""));
     assert!(ci_workflow.contains("timeout-minutes: 45"));
     assert!(ci_workflow.contains("run: just unit-test"));
     assert!(ci_workflow.contains("save-if: ${{ matrix.os != 'ubuntu-latest' }}"));
+    assert!(ci_workflow.contains("name: Free Ubuntu build space after coverage"));
+    assert!(ci_workflow.contains("cargo llvm-cov clean --workspace"));
+}
+
+fn assert_preflight_workflow_bounds_browser_tests(preflight_workflow: &str) {
     assert!(preflight_workflow.contains("TEST_THREADS: \"1\""));
     assert!(preflight_workflow.contains("timeout-minutes: 75"));
-    Ok(())
 }
 
 #[test]
@@ -238,7 +252,7 @@ fn archive_check(
     root: &Path,
     fixture: &Path,
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-    Command::new("bash")
+    Command::new(bash_executable())
         .arg(bash_path(
             &root.join("scripts/release/check-openspec-release-archive.sh"),
         ))
@@ -250,6 +264,32 @@ fn archive_check(
 
 fn bash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(windows)]
+fn bash_executable() -> PathBuf {
+    existing_path_from_env("GIT_BASH")
+        .or_else(|| git_bash_from_program_files("ProgramFiles"))
+        .or_else(|| git_bash_from_program_files("ProgramFiles(x86)"))
+        .unwrap_or_else(|| PathBuf::from("bash"))
+}
+
+#[cfg(not(windows))]
+fn bash_executable() -> PathBuf {
+    PathBuf::from("bash")
+}
+
+#[cfg(windows)]
+fn git_bash_from_program_files(name: &str) -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os(name)?);
+    let bash = root.join("Git").join("bin").join("bash.exe");
+    bash.exists().then_some(bash)
+}
+
+#[cfg(windows)]
+fn existing_path_from_env(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os(name)?);
+    path.exists().then_some(path)
 }
 
 fn assert_archive_success(output: &std::process::Output) {

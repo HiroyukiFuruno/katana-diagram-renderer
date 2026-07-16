@@ -165,6 +165,6 @@ fn jni_error_message(error: jni::errors::Error) -> String {
     error.to_string()
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
