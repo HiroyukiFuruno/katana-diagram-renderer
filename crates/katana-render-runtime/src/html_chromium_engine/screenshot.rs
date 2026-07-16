@@ -2,26 +2,23 @@ use super::trace;
 use crate::HtmlBrowserViewport;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use headless_chrome::protocol::cdp::Page;
-
-const VIEWPORT_OFFSET_EXPRESSION: &str = "JSON.stringify((()=>{const v=window.visualViewport;return {x:v?v.pageLeft:window.scrollX,y:v?v.pageTop:window.scrollY};})())";
+use image::RgbaImage;
 
 pub(super) fn capture_viewport_png(
     tab: &headless_chrome::Tab,
-    viewport: HtmlBrowserViewport,
+    _viewport: HtmlBrowserViewport,
 ) -> Result<Vec<u8>, String> {
     trace::stage("page:screenshot:activate");
     activate_capture_surface(tab)?;
-    trace::stage("page:screenshot:offset");
-    let offset = current_viewport_offset(tab)?;
     trace::stage("page:screenshot:cdp-capture");
     let data = tab
         .call_method(Page::CaptureScreenshot {
             format: Some(Page::CaptureScreenshotFormatOption::Png),
             quality: None,
-            clip: Some(viewport_capture_clip(viewport, offset)),
+            clip: None,
             from_surface: Some(true),
-            capture_beyond_viewport: Some(false),
-            optimize_for_speed: Some(true),
+            capture_beyond_viewport: None,
+            optimize_for_speed: None,
         })
         .map_err(string_error)?
         .data;
@@ -31,42 +28,6 @@ pub(super) fn capture_viewport_png(
 fn activate_capture_surface(tab: &headless_chrome::Tab) -> Result<(), String> {
     tab.activate().map_err(string_error)?;
     tab.bring_to_front().map(|_| ()).map_err(string_error)
-}
-
-fn current_viewport_offset(tab: &headless_chrome::Tab) -> Result<ViewportOffset, String> {
-    let value = tab
-        .evaluate(VIEWPORT_OFFSET_EXPRESSION, false)
-        .map_err(string_error)?
-        .value;
-    viewport_offset_from_value(value)
-}
-
-fn viewport_offset_from_value(value: Option<serde_json::Value>) -> Result<ViewportOffset, String> {
-    let value = value.ok_or_else(missing_viewport_offset)?;
-    let json = value.as_str().ok_or_else(|| {
-        format!("Chromium viewport offset value was not a JSON string: {value:?}")
-    })?;
-    serde_json::from_str::<ViewportOffset>(json).map_err(string_error)
-}
-
-fn missing_viewport_offset() -> String {
-    "Chromium did not return viewport offset".to_string()
-}
-
-#[derive(Debug, PartialEq, serde::Deserialize)]
-struct ViewportOffset {
-    x: f64,
-    y: f64,
-}
-
-fn viewport_capture_clip(viewport: HtmlBrowserViewport, offset: ViewportOffset) -> Page::Viewport {
-    Page::Viewport {
-        x: offset.x,
-        y: offset.y,
-        width: f64::from(viewport.width),
-        height: f64::from(viewport.height),
-        scale: 1.0,
-    }
 }
 
 pub(super) fn validate_frame_dimensions(
@@ -81,6 +42,23 @@ pub(super) fn validate_frame_dimensions(
         "Chromium frame dimensions {image_width}x{image_height} do not match viewport {}x{}",
         viewport.width, viewport.height
     ))
+}
+
+pub(super) fn crop_frame_to_viewport(
+    image: RgbaImage,
+    viewport: HtmlBrowserViewport,
+) -> Result<RgbaImage, String> {
+    let (image_width, image_height) = image.dimensions();
+    if image_width < viewport.width || image_height < viewport.height {
+        return validate_frame_dimensions(image_width, image_height, viewport).map(|()| image);
+    }
+    if image_width == viewport.width && image_height == viewport.height {
+        return Ok(image);
+    }
+    let cropped =
+        image::imageops::crop_imm(&image, 0, 0, viewport.width, viewport.height).to_image();
+    validate_frame_dimensions(cropped.width(), cropped.height(), viewport)?;
+    Ok(cropped)
 }
 
 fn string_error(error: impl ToString) -> String {
@@ -112,57 +90,40 @@ mod tests {
     }
 
     #[test]
-    fn viewport_capture_clip_matches_viewport_css_pixels() {
+    fn crop_frame_to_viewport_accepts_exact_viewport_size() {
         let viewport = must(HtmlBrowserViewport::new(2, 3, 1.0));
-        let clip = viewport_capture_clip(viewport, ViewportOffset { x: 4.0, y: 5.0 });
+        let image = RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]));
+        let cropped = must(crop_frame_to_viewport(image, viewport));
 
-        assert_eq!(clip.x, 4.0);
-        assert_eq!(clip.y, 5.0);
-        assert_eq!(clip.width, 2.0);
-        assert_eq!(clip.height, 3.0);
-        assert_eq!(clip.scale, 1.0);
+        assert_eq!(cropped.dimensions(), (2, 3));
+        assert_eq!(cropped.get_pixel(0, 0).0, [1, 2, 3, 255]);
     }
 
     #[test]
-    fn viewport_offset_from_value_parses_json_string() {
-        let offset = must(viewport_offset_from_value(Some(serde_json::json!(
-            r#"{"x":4.5,"y":8.25}"#
-        ))));
+    fn crop_frame_to_viewport_crops_larger_browser_view() {
+        let viewport = must(HtmlBrowserViewport::new(2, 3, 1.0));
+        let mut image = RgbaImage::from_pixel(4, 5, image::Rgba([9, 9, 9, 255]));
+        image.put_pixel(1, 2, image::Rgba([17, 34, 51, 255]));
+        image.put_pixel(3, 4, image::Rgba([68, 85, 102, 255]));
+        let cropped = must(crop_frame_to_viewport(image, viewport));
 
-        assert_eq!(offset, ViewportOffset { x: 4.5, y: 8.25 });
+        assert_eq!(cropped.dimensions(), (2, 3));
+        assert_eq!(cropped.get_pixel(1, 2).0, [17, 34, 51, 255]);
+        assert!(!cropped.pixels().any(|pixel| pixel.0 == [68, 85, 102, 255]));
     }
 
     #[test]
-    fn viewport_offset_from_value_rejects_missing_value() {
+    fn crop_frame_to_viewport_rejects_smaller_browser_view() {
+        let viewport = must(HtmlBrowserViewport::new(4, 5, 1.0));
+        let image = RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]));
         let error = must(
-            viewport_offset_from_value(None)
+            crop_frame_to_viewport(image, viewport)
                 .err()
-                .ok_or("missing offset value was accepted"),
+                .ok_or("undersized browser view was accepted"),
         );
 
-        assert_eq!(error, "Chromium did not return viewport offset");
-    }
-
-    #[test]
-    fn viewport_offset_from_value_rejects_non_string_value() {
-        let error = must(
-            viewport_offset_from_value(Some(serde_json::json!({ "x": 1.0 })))
-                .err()
-                .ok_or("non-string offset value was accepted"),
-        );
-
-        assert!(error.contains("not a JSON string"));
-    }
-
-    #[test]
-    fn viewport_offset_from_value_rejects_invalid_json_string() {
-        let error = must(
-            viewport_offset_from_value(Some(serde_json::json!("{")))
-                .err()
-                .ok_or("invalid offset value was accepted"),
-        );
-
-        assert!(error.contains("EOF"));
+        assert!(error.contains("2x3"));
+        assert!(error.contains("4x5"));
     }
 
     #[test]

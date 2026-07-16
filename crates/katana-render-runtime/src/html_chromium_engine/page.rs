@@ -1,7 +1,7 @@
 use super::{
     chromium_process::{ChromiumProcess, launch_chromium},
     document, policy, runtime,
-    screenshot::{capture_viewport_png, validate_frame_dimensions},
+    screenshot::{capture_viewport_png, crop_frame_to_viewport},
     source, trace,
 };
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
@@ -81,7 +81,7 @@ impl ChromiumPage {
         let image = image::load_from_memory(&screenshot)
             .map_err(string_error)?
             .to_rgba8();
-        validate_frame_dimensions(image.width(), image.height(), self.viewport)?;
+        let image = crop_frame_to_viewport(image, self.viewport)?;
         self.generation += 1;
         HtmlBrowserFrame::new(
             self.generation,
