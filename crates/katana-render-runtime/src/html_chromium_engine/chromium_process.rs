@@ -1,5 +1,6 @@
+use super::chromium_args::chromium_arguments;
 use super::chromium_startup::{
-    CHROMIUM_STARTUP_TIMEOUT, append_chromium_output, chromium_arguments, chromium_launch_error,
+    CHROMIUM_STARTUP_TIMEOUT, append_chromium_output, chromium_launch_error,
     chromium_profile_directory, wait_for_debug_ws_url,
 };
 use super::trace;

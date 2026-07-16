@@ -256,6 +256,25 @@ fn chromium_child_evaluates_timer_driven_javascript_before_the_initial_frame() -
 }
 
 #[test]
+fn chromium_child_honors_no_sandbox_override_without_disabling_rendering() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let source = HtmlBrowserSource::new(
+        "<!doctype html><style>html,body{margin:0;background:rgb(17,34,51)}</style>",
+        "https://example.test/no-sandbox.html",
+    )
+    .map_err(|error| error.to_string())?;
+    let response = child_response_for_source_load_with_chromium_override_and_no_sandbox(
+        source,
+        Some(test_chromium_binary()?),
+    )?;
+
+    let HtmlBrowserResponse::Frame { frame, .. } = response else {
+        return Err(format!("unexpected browser child response: {response:?}"));
+    };
+    assert_frame_contains_rgb(&frame, [17, 34, 51])
+}
+
+#[test]
 fn chromium_child_blocks_local_resources_outside_the_document_directory() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
@@ -735,7 +754,7 @@ fn child_response_for_line(line: &str) -> TestResult<HtmlBrowserResponse> {
 }
 
 fn child_response_for_input(input: &[u8]) -> TestResult<HtmlBrowserResponse> {
-    child_response_for_input_with_chromium_override(input, None)
+    child_response_for_input_with_chromium_override(input, None, false)
 }
 
 fn child_response_for_load_with_chromium_override(
@@ -753,6 +772,21 @@ fn child_response_for_source_load_with_chromium_override(
     source: HtmlBrowserSource,
     chromium_binary: Option<PathBuf>,
 ) -> TestResult<HtmlBrowserResponse> {
+    child_response_for_source_load_with_options(source, chromium_binary, false)
+}
+
+fn child_response_for_source_load_with_chromium_override_and_no_sandbox(
+    source: HtmlBrowserSource,
+    chromium_binary: Option<PathBuf>,
+) -> TestResult<HtmlBrowserResponse> {
+    child_response_for_source_load_with_options(source, chromium_binary, true)
+}
+
+fn child_response_for_source_load_with_options(
+    source: HtmlBrowserSource,
+    chromium_binary: Option<PathBuf>,
+    no_sandbox: bool,
+) -> TestResult<HtmlBrowserResponse> {
     let request = serde_json::to_string(&HtmlBrowserRequest {
         protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
         command: HtmlBrowserCommand::Load {
@@ -764,14 +798,16 @@ fn child_response_for_source_load_with_chromium_override(
     child_response_for_input_with_chromium_override(
         format!("{request}\n").as_bytes(),
         chromium_binary,
+        no_sandbox,
     )
 }
 
 fn child_response_for_input_with_chromium_override(
     input: &[u8],
     chromium_binary: Option<PathBuf>,
+    no_sandbox: bool,
 ) -> TestResult<HtmlBrowserResponse> {
-    let mut child = spawn_browser_child(chromium_binary)?;
+    let mut child = spawn_browser_child(chromium_binary, no_sandbox)?;
     write_child_input(&mut child, input)?;
     let (reader, receiver) = spawn_child_response_reader(&mut child)?;
     let response = match child_response_line(&mut child, receiver) {
@@ -790,12 +826,17 @@ fn child_response_for_input_with_chromium_override(
     serde_json::from_str(response.trim_end()).map_err(|error| error.to_string())
 }
 
-fn spawn_browser_child(chromium_binary: Option<PathBuf>) -> TestResult<Child> {
+fn spawn_browser_child(chromium_binary: Option<PathBuf>, no_sandbox: bool) -> TestResult<Child> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krr-html-chromium-engine"));
     if let Some(path) = chromium_binary {
         command.env("KRR_CHROME_BIN", path);
     } else {
         command.env_remove("KRR_CHROME_BIN");
+    }
+    if no_sandbox {
+        command.env("KRR_CHROMIUM_NO_SANDBOX", "1");
+    } else {
+        command.env_remove("KRR_CHROMIUM_NO_SANDBOX");
     }
     command
         .stdin(Stdio::piped())

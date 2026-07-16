@@ -1,3 +1,4 @@
+mod chromium_args;
 mod chromium_process;
 mod chromium_startup;
 mod document;

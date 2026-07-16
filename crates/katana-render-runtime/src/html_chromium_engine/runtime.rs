@@ -38,8 +38,8 @@ pub(super) fn chrome_binary_path_adjacent_to(executable: &Path) -> Result<PathBu
     )
 }
 
-pub(super) fn rendering_args() -> Vec<&'static OsStr> {
-    RENDERING_ARGS.map(OsStr::new).to_vec()
+pub(super) fn rendering_args() -> [&'static OsStr; 3] {
+    RENDERING_ARGS.map(OsStr::new)
 }
 
 pub(super) fn set_viewport(
