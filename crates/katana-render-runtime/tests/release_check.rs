@@ -47,7 +47,7 @@ fn release_openspec_archive_allows_current_change_and_rejects_prior_change()
     fs::create_dir_all(changes.join("v0-4-0-current-release"))?;
 
     let current = archive_check(root, &fixture)?;
-    assert!(current.status.success());
+    assert_archive_success(&current);
 
     fs::create_dir_all(changes.join("v0-3-9-prior-release"))?;
     let prior = archive_check(root, &fixture)?;
@@ -137,6 +137,7 @@ fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn s
     assert!(ci_workflow.contains("TEST_THREADS: \"1\""));
     assert!(ci_workflow.contains("timeout-minutes: 45"));
     assert!(ci_workflow.contains("run: just unit-test"));
+    assert!(ci_workflow.contains("save-if: ${{ matrix.os != 'ubuntu-latest' }}"));
     assert!(preflight_workflow.contains("TEST_THREADS: \"1\""));
     assert!(preflight_workflow.contains("timeout-minutes: 75"));
     Ok(())
@@ -238,9 +239,25 @@ fn archive_check(
     fixture: &Path,
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
     Command::new("bash")
-        .arg(root.join("scripts/release/check-openspec-release-archive.sh"))
+        .arg(bash_path(
+            &root.join("scripts/release/check-openspec-release-archive.sh"),
+        ))
         .arg("v0.4.0")
         .current_dir(fixture)
         .output()
         .map_err(Into::into)
+}
+
+fn bash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn assert_archive_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "archive check failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
