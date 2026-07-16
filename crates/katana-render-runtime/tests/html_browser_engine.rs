@@ -404,7 +404,7 @@ fn chromium_child_reports_chromium_exit_before_devtools_endpoint() -> TestResult
 #[cfg(unix)]
 #[test]
 fn chromium_child_reports_chromium_startup_timeout() -> TestResult {
-    let fake_chromium = fake_chromium_script("sleep 11")?;
+    let fake_chromium = fake_chromium_script("sleep 35")?;
     let response = child_response_for_load_with_chromium_override(Some(fake_chromium.clone()))?;
     let _ = std::fs::remove_file(&fake_chromium);
 

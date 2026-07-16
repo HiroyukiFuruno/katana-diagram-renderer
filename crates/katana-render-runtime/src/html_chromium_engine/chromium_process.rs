@@ -223,6 +223,7 @@ mod tests {
 
     #[test]
     fn browser_connection_timeouts_cover_slow_ci_chromium() {
+        assert!(CHROMIUM_STARTUP_TIMEOUT >= std::time::Duration::from_secs(30));
         assert!(BROWSER_IDLE_TIMEOUT > CHROMIUM_STARTUP_TIMEOUT);
         assert!(BROWSER_IDLE_TIMEOUT > BROWSER_DEFAULT_TIMEOUT);
         assert!(BROWSER_DEFAULT_TIMEOUT >= std::time::Duration::from_secs(120));

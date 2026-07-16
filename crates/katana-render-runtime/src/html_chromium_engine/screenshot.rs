@@ -80,18 +80,31 @@ fn finish_screencast(
     listener: &ScreencastListenerHandle,
     frame: Result<ScreencastFrameCapture, String>,
 ) -> Result<ScreencastFrameCapture, String> {
+    trace::stage("page:screenshot:screencast-remove-listener");
+    let remove_result = tab.remove_event_listener(listener).map_err(string_error);
+    trace::stage("page:screenshot:screencast-stop");
+    let stop_result = stop_screencast(tab);
+    trace::stage("page:screenshot:screencast-ack");
     let ack_result = frame
         .as_ref()
         .map_or(Ok(()), |frame| tab.ack_screencast(frame.session_id))
         .map_err(string_error);
-    trace::stage("page:screenshot:screencast-stop");
-    let stop_result = tab.stop_screencast().map_err(string_error);
-    let remove_result = tab.remove_event_listener(listener).map_err(string_error);
     stop_result?;
     remove_result?;
     let frame = frame?;
     ack_result?;
     Ok(frame)
+}
+
+#[cfg(target_os = "macos")]
+fn stop_screencast(_tab: &headless_chrome::Tab) -> Result<(), String> {
+    /* WHY: macOS Chrome can hang indefinitely on repeated StopScreencast replies. */
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop_screencast(tab: &headless_chrome::Tab) -> Result<(), String> {
+    tab.stop_screencast().map_err(string_error)
 }
 
 fn activate_capture_surface(tab: &headless_chrome::Tab) -> Result<(), String> {

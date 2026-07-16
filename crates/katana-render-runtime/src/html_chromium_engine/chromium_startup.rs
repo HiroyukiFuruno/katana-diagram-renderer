@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const CHROMIUM_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const CHROMIUM_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const CHROMIUM_STDERR_LIMIT: usize = 16 * 1024;
 const DEVTOOLS_LISTENING_PREFIX: &str = "DevTools listening on ";
 static CHROMIUM_PROFILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
