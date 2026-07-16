@@ -237,7 +237,8 @@ fn archive_check(
     root: &Path,
     fixture: &Path,
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-    Command::new(root.join("scripts/release/check-openspec-release-archive.sh"))
+    Command::new("bash")
+        .arg(root.join("scripts/release/check-openspec-release-archive.sh"))
         .arg("v0.4.0")
         .current_dir(fixture)
         .output()

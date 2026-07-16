@@ -106,7 +106,7 @@ impl ChromiumPage {
         self.emulate_focus(true)?;
         self.focused = true;
         trace::stage("page:load:synchronize");
-        self.synchronize_loaded_rendering()?;
+        self.synchronize_loaded_rendering(&url)?;
         trace::stage("page:load:ready");
         Ok(())
     }
