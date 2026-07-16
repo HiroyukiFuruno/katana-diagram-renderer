@@ -103,6 +103,25 @@ fn test_gates_install_required_runtimes_before_executing_tests()
 }
 
 #[test]
+fn release_preflight_installs_graphviz_before_release_check()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let workflow = fs::read_to_string(root.join(".github/workflows/release-preflight.yml"))?;
+    let graphviz = workflow
+        .find("name: Install Graphviz for PlantUML")
+        .ok_or("Graphviz install step is missing")?;
+    let release_check = workflow
+        .find("name: Release check")
+        .ok_or("release check step is missing")?;
+
+    assert!(
+        graphviz < release_check,
+        "Graphviz must be installed before release-check runs PlantUML tests"
+    );
+    Ok(())
+}
+
+#[test]
 fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
     let justfile = fs::read_to_string(root.join("Justfile"))?;
