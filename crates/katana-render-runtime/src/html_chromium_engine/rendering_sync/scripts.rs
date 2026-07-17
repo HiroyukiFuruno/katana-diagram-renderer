@@ -123,7 +123,8 @@ pub(super) const LOADED_RENDERING_READY_SCRIPT: &str = r#"
 "#;
 
 pub(super) const RENDERING_READY_SCRIPT: &str = r#"
-new Promise(resolve => {
+new Promise(resolve => setTimeout(resolve, 0))
+  .then(() => new Promise(resolve => {
   let resolved = false;
   const finish = () => {
     if (!resolved) {
@@ -133,7 +134,7 @@ new Promise(resolve => {
   };
   requestAnimationFrame(() => requestAnimationFrame(finish));
   setTimeout(finish, 100);
-})
+  }))
   .then(() => {
     document.documentElement.getBoundingClientRect();
     return true;

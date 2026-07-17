@@ -13,6 +13,7 @@ fn rendering_sync_waits_for_two_animation_frames_with_timeout_fallback() {
             .count(),
         2
     );
+    assert!(RENDERING_READY_SCRIPT.contains("setTimeout(resolve, 0)"));
     assert!(RENDERING_READY_SCRIPT.contains("setTimeout(finish, 100)"));
     assert!(RENDERING_READY_SCRIPT.contains("getBoundingClientRect"));
 }
