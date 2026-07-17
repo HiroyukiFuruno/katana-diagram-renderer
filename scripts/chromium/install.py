@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import stat
 import sys
 import urllib.request
@@ -31,8 +32,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--helper-bin", type=Path)
     parser.add_argument("--install-root", type=Path)
     parser.add_argument("--cache-dir", default=Path("tmp/chromium-cache"), type=Path)
+    parser.add_argument("--platform")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--manifest-only", action="store_true")
+    parser.add_argument("--fresh", action="store_true")
     return parser.parse_args()
 
 
@@ -50,13 +53,21 @@ def current_platform_key() -> str:
     raise RuntimeError(f"unsupported Chromium platform: {system}/{machine}")
 
 
-def load_artifact(manifest_path: Path) -> ChromiumArtifact:
+def load_artifact(manifest_path: Path, platform_key: str | None = None) -> ChromiumArtifact:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    platform_key = current_platform_key()
+    selected_platform = platform_key or current_platform_key()
     for artifact in payload.get("artifacts", []):
-        if artifact.get("platform") == platform_key:
+        if artifact.get("platform") == selected_platform:
             return validate_artifact(artifact)
-    raise RuntimeError(f"Chromium manifest has no artifact for {platform_key}")
+    raise RuntimeError(f"Chromium manifest has no artifact for {selected_platform}")
+
+
+def require_current_platform(platform_key: str) -> None:
+    current = current_platform_key()
+    if platform_key != current:
+        raise RuntimeError(
+            f"Chromium platform {platform_key} does not match the runner platform {current}"
+        )
 
 
 def validate_artifact(payload: dict[str, object]) -> ChromiumArtifact:
@@ -90,14 +101,26 @@ def install_root(args: argparse.Namespace) -> Path:
     return args.helper_bin.parent / "chromium"
 
 
-def install_chromium(artifact: ChromiumArtifact, root: Path, cache_dir: Path) -> Path:
+def install_chromium(
+    artifact: ChromiumArtifact,
+    root: Path,
+    cache_dir: Path,
+    *,
+    fresh: bool = False,
+) -> Path:
     platform_dir = root / artifact.platform
     executable = platform_dir / artifact.executable
     marker = platform_dir / ".krr-chromium-sha256"
-    if executable.is_file() and marker.exists() and marker.read_text(encoding="utf-8").strip() == artifact.sha256:
+    if (
+        not fresh
+        and executable.is_file()
+        and marker.exists()
+        and marker.read_text(encoding="utf-8").strip() == artifact.sha256
+    ):
         print(f"Chromium already installed: {executable}")
         return executable
     archive = download_archive(artifact, cache_dir)
+    remove_existing_install(platform_dir)
     extract_archive(archive, platform_dir)
     if not executable.is_file():
         raise RuntimeError(f"Chromium executable was not extracted: {executable}")
@@ -105,6 +128,13 @@ def install_chromium(artifact: ChromiumArtifact, root: Path, cache_dir: Path) ->
     marker.write_text(f"{artifact.sha256}\n", encoding="utf-8")
     print(f"Chromium installed: {executable}")
     return executable
+
+
+def remove_existing_install(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
 
 
 def download_archive(artifact: ChromiumArtifact, cache_dir: Path) -> Path:
@@ -182,7 +212,9 @@ def check_installed(artifact: ChromiumArtifact, root: Path) -> Path:
 def main() -> int:
     try:
         args = parse_args()
-        artifact = load_artifact(args.manifest)
+        platform_key = args.platform or current_platform_key()
+        require_current_platform(platform_key)
+        artifact = load_artifact(args.manifest, platform_key)
         print(f"Chromium manifest check passed: {artifact.platform} {artifact.sha256}")
         if args.manifest_only:
             return 0
@@ -190,7 +222,7 @@ def main() -> int:
         if args.check_only:
             check_installed(artifact, root)
         else:
-            install_chromium(artifact, root, args.cache_dir)
+            install_chromium(artifact, root, args.cache_dir, fresh=args.fresh)
         return 0
     except Exception as error:
         print(error, file=sys.stderr)

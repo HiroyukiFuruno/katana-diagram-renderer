@@ -27,14 +27,13 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_exactly_one_semver_step() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_allows_only_v0_4_0() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    for version in ["0.3.9", "0.4.0", "1.0.0"] {
-        assert!(release_target_check(root, version)?);
-    }
-    for version in ["0.3.10", "0.4.1", "0.5.0", "2.0.0"] {
+    assert!(release_target_check(root, "0.4.0")?);
+    for version in ["0.3.9", "0.3.10", "0.4.1", "0.5.0", "1.0.0", "2.0.0"] {
         assert!(!release_target_check(root, version)?);
     }
+    assert!(!release_target_check_after(root, "0.4.0", "0.3.9")?);
     Ok(())
 }
 
@@ -65,6 +64,13 @@ fn coverage_gate_includes_integration_test_targets() -> Result<(), Box<dyn std::
     let recipe = recipe_body(&justfile, "coverage")?;
 
     assert!(recipe.contains("--all-targets"));
+    let clean = recipe
+        .find("llvm-cov clean --workspace")
+        .ok_or("coverage profile clean is missing")?;
+    let collect = recipe
+        .find("llvm-cov --workspace")
+        .ok_or("coverage collection is missing")?;
+    assert!(clean < collect);
     Ok(())
 }
 
@@ -131,6 +137,7 @@ fn ci_browser_tests_are_serialized_and_timeout_bounded() -> Result<(), Box<dyn s
     let preflight_workflow =
         fs::read_to_string(root.join(".github/workflows/release-preflight.yml"))?;
 
+    assert!(justfile.contains("TEST_THREADS := env_var_or_default(\"TEST_THREADS\", \"1\")"));
     assert_test_recipes_are_serialized(unit_test, coverage);
     assert_ci_workflow_bounds_browser_tests(&ci_workflow);
     assert_preflight_workflow_bounds_browser_tests(&preflight_workflow);
@@ -154,7 +161,21 @@ fn assert_ci_workflow_bounds_browser_tests(ci_workflow: &str) {
     assert!(ci_workflow.contains("name: Free Ubuntu build space before coverage"));
     assert!(ci_workflow.contains("name: Free Ubuntu build space after coverage"));
     assert!(ci_workflow.contains("cargo llvm-cov clean --workspace"));
+    assert_ci_runtime_asset_matrix(ci_workflow);
     assert!(!ci_workflow.contains("continue-on-error: true"));
+}
+
+fn assert_ci_runtime_asset_matrix(ci_workflow: &str) {
+    for contract in [
+        "os: ubuntu-latest\n            platform: linux64",
+        "os: macos-15\n            platform: mac-arm64",
+        "os: macos-15-intel\n            platform: mac-x64",
+        "os: windows-latest\n            platform: win64",
+        "name: Package Chromium release runtime",
+        "just chromium-runtime-package",
+    ] {
+        assert!(ci_workflow.contains(contract), "CI is missing {contract}");
+    }
 }
 
 fn assert_preflight_workflow_bounds_browser_tests(preflight_workflow: &str) {
@@ -170,7 +191,82 @@ fn release_verify_installs_and_checks_chromium_bundle() -> Result<(), Box<dyn st
 
     assert!(recipe.contains("chromium-install"));
     assert!(recipe.contains("chromium-asset-check"));
+    assert!(recipe.contains("chromium-runtime-package"));
+    assert!(
+        justfile.contains("--cache-dir \"{{CHROMIUM_CACHE_DIR}}\" --fresh"),
+        "release runtime packaging must freshly extract the verified Chromium archive"
+    );
     Ok(())
+}
+
+#[test]
+fn release_workflow_publishes_every_chromium_runtime_without_overwrite()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let workflow = fs::read_to_string(root.join(".github/workflows/release.yml"))?;
+    let uploader = fs::read_to_string(root.join("scripts/release/upload-runtime-assets.sh"))?;
+
+    assert_runtime_asset_matrix(&workflow);
+    assert_runtime_release_order(&workflow)?;
+    assert_immutable_runtime_uploader(&uploader);
+    Ok(())
+}
+
+fn assert_runtime_asset_matrix(workflow: &str) {
+    let immutable_checkout = "github.event.pull_request.merge_commit_sha || github.sha";
+    for contract in [
+        "os: ubuntu-latest\n            platform: linux64",
+        "os: macos-15\n            platform: mac-arm64",
+        "os: macos-15-intel\n            platform: mac-x64",
+        "os: windows-latest\n            platform: win64",
+        "python3 scripts/chromium/package_runtime.py",
+        "--fresh",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "needs: [release-context, runtime-assets]",
+        "bash scripts/release/upload-runtime-assets.sh",
+        immutable_checkout,
+        "gh release create \"${TAG}\" --verify-tag --draft --generate-notes",
+    ] {
+        assert!(
+            workflow.contains(contract),
+            "release workflow is missing {contract}"
+        );
+    }
+    assert_eq!(workflow.matches(immutable_checkout).count(), 3);
+    assert!(!workflow.contains("github.event.pull_request.base.ref || github.ref"));
+}
+
+fn assert_runtime_release_order(workflow: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let package = workflow
+        .find("name: Package and verify Chromium browser runtime")
+        .ok_or("runtime package step is missing")?;
+    let artifact = workflow
+        .find("name: Upload verified runtime archive")
+        .ok_or("runtime artifact step is missing")?;
+    let release = workflow
+        .find("name: Create GitHub Release")
+        .ok_or("GitHub Release step is missing")?;
+    let runtime_upload = workflow
+        .find("name: Upload immutable Chromium runtime assets")
+        .ok_or("runtime Release upload step is missing")?;
+    let publish_release = workflow
+        .find("name: Publish complete GitHub Release")
+        .ok_or("complete GitHub Release publish step is missing")?;
+    let crates = workflow
+        .find("name: Publish crates.io")
+        .ok_or("crates.io publish step is missing")?;
+    assert!(package < artifact);
+    assert!(release < runtime_upload);
+    assert!(runtime_upload < publish_release);
+    assert!(publish_release < crates);
+    Ok(())
+}
+
+fn assert_immutable_runtime_uploader(uploader: &str) {
+    assert!(uploader.contains("sha256sum --check"));
+    assert!(uploader.contains("cmp -s"));
+    assert!(!uploader.contains("--clobber"));
 }
 
 #[test]
@@ -209,6 +305,57 @@ fn html_interactive_runtime_excludes_static_dom_bridge_api()
     Ok(())
 }
 
+#[test]
+fn html_interactive_runtime_preserves_raw_html_and_browser_navigation_semantics()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let engine = root.join("crates/katana-render-runtime/src/html_chromium_engine");
+    let document = fs::read_to_string(engine.join("document.rs"))?;
+    let input = fs::read_to_string(engine.join("input.rs"))?;
+    let main_document = fs::read_to_string(engine.join("main_document.rs"))?;
+    let navigation = fs::read_to_string(engine.join("navigation.rs"))?;
+    let policy = fs::read_to_string(engine.join("policy.rs"))?;
+    let popup_guard = fs::read_to_string(engine.join("popup_guard.rs"))?;
+
+    assert_no_host_html_or_navigation_rewriting(&document, &navigation);
+    assert_raw_main_document_policy(&main_document, &policy, &navigation);
+    assert_popup_guard_contract(&input, &navigation, &popup_guard);
+    Ok(())
+}
+
+fn assert_no_host_html_or_navigation_rewriting(document: &str, navigation: &str) {
+    for forbidden in [
+        "AddScriptToEvaluateOnNewDocument",
+        "inject_head",
+        "temporary_document",
+        "closest('a[href]')",
+        "__katanaTakeNavigation",
+    ] {
+        assert!(
+            !document.contains(forbidden) && !navigation.contains(forbidden),
+            "interactive HTML must not restore host document/navigation rewriting: {forbidden}"
+        );
+    }
+}
+
+fn assert_raw_main_document_policy(main_document: &str, policy: &str, navigation: &str) {
+    assert!(main_document.contains("body: source.source.raw_html.clone()"));
+    assert!(main_document.contains("self.pending.swap(false"));
+    assert!(policy.contains("Network::ResourceType::Document"));
+    assert!(policy.contains("navigation.is_root_frame"));
+    assert!(navigation.contains("PageFrameRequestedNavigation"));
+}
+
+fn assert_popup_guard_contract(input: &str, navigation: &str, popup_guard: &str) {
+    assert!(navigation.contains("PageWindowOpen"));
+    assert!(!input.contains("get_tabs()"));
+    assert!(popup_guard.contains("call_method_on_browser(Target::SetAutoAttach"));
+    assert!(popup_guard.contains("wait_for_debugger_on_start: true"));
+    assert!(popup_guard.contains("flatten: Some(true)"));
+    assert!(popup_guard.contains("let close_target = Target::CloseTarget"));
+    assert!(popup_guard.contains("call_method_on_browser(close_target)"));
+}
+
 fn workspace_root() -> Result<&'static Path, Box<dyn std::error::Error>> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -229,13 +376,21 @@ fn release_target_check(
     root: &Path,
     target_version: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    release_target_check_after(root, target_version, "0.3.8")
+}
+
+fn release_target_check_after(
+    root: &Path,
+    target_version: &str,
+    latest_version: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let output = Command::new("python3")
         .args([
             "scripts/release/verify-release-target.py",
             "--target-version",
             target_version,
             "--latest-version",
-            "0.3.8",
+            latest_version,
         ])
         .current_dir(root)
         .output()?;

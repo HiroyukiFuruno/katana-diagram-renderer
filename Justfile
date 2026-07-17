@@ -5,7 +5,7 @@ RTK := env_var_or_default("RTK", `command -v rtk 2> /dev/null || true`)
 RTK_CMD := if RTK == "" { "" } else { RTK + " " }
 JOBS := env_var_or_default("JOBS", "2")
 FIXTURE_JOBS := env_var_or_default("FIXTURE_JOBS", JOBS)
-TEST_THREADS := env_var_or_default("TEST_THREADS", "")
+TEST_THREADS := env_var_or_default("TEST_THREADS", "1")
 TEST_THREAD_ARGS := if TEST_THREADS == "" { "" } else { " -- --test-threads=" + TEST_THREADS }
 RUNTIME_UPDATE_LOG_DIR := env_var_or_default("RUNTIME_UPDATE_LOG_DIR", "tmp/runtime-update-logs")
 export RUSTFLAGS := env_var_or_default("RUSTFLAGS", "-D warnings")
@@ -36,6 +36,8 @@ PLANTUML_CACHE_JAR := PLANTUML_CACHE_DIR + "/" + PLANTUML_JAR_VERSION + "/plantu
 CHROMIUM_MANIFEST := "crates/katana-render-runtime/vendor/chromium/" + CHROMIUM_VERSION + "/manifest.json"
 CHROMIUM_CACHE_DIR := env_var_or_default("KRR_CHROMIUM_CACHE_DIR", REPO_ROOT + "/tmp/chromium-cache")
 HTML_CHROMIUM_ENGINE_BIN := env_var_or_default("KRR_HTML_CHROMIUM_ENGINE_BIN", REPO_ROOT + "/target/debug/krr-html-chromium-engine")
+HTML_CHROMIUM_RELEASE_ENGINE_BIN := env_var_or_default("KRR_HTML_CHROMIUM_RELEASE_ENGINE_BIN", REPO_ROOT + "/target/release/krr-html-chromium-engine" + if os_family() == "windows" { ".exe" } else { "" })
+CHROMIUM_RELEASE_ASSET_DIR := env_var_or_default("KRR_CHROMIUM_RELEASE_ASSET_DIR", REPO_ROOT + "/tmp/chromium-release-assets")
 DRAWIO_RESOURCE_DIR := "crates/katana-render-runtime/src/markdown/drawio_renderer/js_runtime/resources"
 DRAWIO_RESOURCE_MANIFEST := DRAWIO_RESOURCE_DIR + "/drawio-resource-manifest.json"
 
@@ -76,6 +78,7 @@ unit-test: plantuml-install chromium-install
 
 # Run coverage as a required full-check gate
 coverage: plantuml-install chromium-install
+    {{CARGO}} llvm-cov clean --workspace
     {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}{{TEST_THREAD_ARGS}}
 
 # Verify pinned runtime asset checksums
@@ -141,10 +144,19 @@ runtime-asset-script-test:
 # Run Python tests for the Chromium release asset helper
 chromium-asset-script-test:
     python3 scripts/chromium/install_test.py
+    python3 scripts/chromium/package_runtime_test.py
+
+# Run release publication helper tests without contacting GitHub
+release-script-test:
+    python3 scripts/release/upload_runtime_assets_test.py
 
 # Build the Chromium helper binary used by browser sessions
 chromium-helper-build:
     {{CARGO}} build -p katana-render-runtime --bin krr-html-chromium-engine
+
+# Build the optimized Chromium helper distributed in runtime release archives
+chromium-release-helper-build:
+    {{CARGO}} build --locked --release -p katana-render-runtime --bin krr-html-chromium-engine
 
 # Download, verify, extract, and place the pinned Chromium bundle next to the helper binary
 chromium-install helper=HTML_CHROMIUM_ENGINE_BIN: chromium-helper-build
@@ -154,8 +166,13 @@ chromium-install helper=HTML_CHROMIUM_ENGINE_BIN: chromium-helper-build
 chromium-asset-check helper=HTML_CHROMIUM_ENGINE_BIN:
     python3 scripts/chromium/install.py --manifest "{{CHROMIUM_MANIFEST}}" --helper-bin "{{helper}}" --cache-dir "{{CHROMIUM_CACHE_DIR}}" --check-only
 
+# Build, install, package, and verify the current platform runtime release archive
+chromium-runtime-package helper=HTML_CHROMIUM_RELEASE_ENGINE_BIN output=CHROMIUM_RELEASE_ASSET_DIR: chromium-release-helper-build
+    python3 scripts/chromium/install.py --manifest "{{CHROMIUM_MANIFEST}}" --helper-bin "{{helper}}" --cache-dir "{{CHROMIUM_CACHE_DIR}}" --fresh
+    python3 scripts/chromium/package_runtime.py --version "{{TAG}}" --manifest "{{CHROMIUM_MANIFEST}}" --helper-bin "{{helper}}" --krr-license LICENSE --output-dir "{{output}}"
+
 # Run the local quality gate
-check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check plantuml-runtime-package-check chromium-asset-script-test
+check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check plantuml-runtime-package-check chromium-asset-script-test release-script-test
     @echo "checks passed"
 
 # Sweep old build artifacts locally (older than 7 days)
@@ -183,7 +200,7 @@ release-target-check:
     bash scripts/release/assert-crates-not-published.sh "{{VERSION}}"
 
 # Verify package metadata and dry-run the first publishable crate
-release-verify: release-target-check chromium-install chromium-asset-check
+release-verify: release-target-check chromium-install chromium-asset-check chromium-runtime-package
     bash scripts/release/verify-version.sh "{{VERSION}}"
     bash scripts/release/verify-internal-dependencies.sh "{{VERSION}}"
     {{CARGO}} package -p katana-render-runtime --locked --allow-dirty

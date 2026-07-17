@@ -75,7 +75,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux64
+          - os: macos-15
+            platform: mac-arm64
+          - os: macos-15-intel
+            platform: mac-x64
+          - os: windows-latest
+            platform: win64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Prepare Windows Git checkout
@@ -152,7 +160,7 @@ jobs:
           sudo apt-get install -y graphviz
 
       - name: Install Graphviz for PlantUML on macOS
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos-')
         run: brew install graphviz
 
       - name: Install PlantUML runtime
@@ -226,4 +234,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && always()
         run: |
           cargo llvm-cov clean --workspace || true
-          rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental tmp/chromium-cache
+          rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental
+
+      - name: Package Chromium release runtime
+        shell: bash
+        run: |
+          just chromium-runtime-package
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          extension="$([[ '${{ matrix.platform }}' == 'win64' ]] && echo zip || echo tar.gz)"
+          test -f "tmp/chromium-release-assets/krr-html-browser-runtime-v${version}-${{ matrix.platform }}.${extension}.sha256"

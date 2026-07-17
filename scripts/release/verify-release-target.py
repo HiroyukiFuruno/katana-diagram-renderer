@@ -12,6 +12,9 @@ import sys
 from dataclasses import dataclass
 from urllib import error, request
 
+REQUIRED_LATEST_RELEASE = "v0.3.8"
+REQUIRED_TARGET_RELEASE = "v0.4.0"
+
 
 @dataclass(frozen=True, order=True)
 class StableVersion:
@@ -88,16 +91,6 @@ def latest_remote_tag(remote: str) -> StableVersion | None:
     return max(versions) if versions else None
 
 
-def expected_targets(latest: StableVersion | None) -> tuple[StableVersion, ...]:
-    if latest is None:
-        return (StableVersion(0, 1, 0),)
-    return (
-        StableVersion(latest.major, latest.minor, latest.patch + 1),
-        StableVersion(latest.major, latest.minor + 1, 0),
-        StableVersion(latest.major + 1, 0, 0),
-    )
-
-
 def main() -> int:
     args = parse_args()
     target = StableVersion.parse(args.target_version)
@@ -106,12 +99,13 @@ def main() -> int:
         if args.latest_version
         else latest_github_release(args.repo) or latest_remote_tag(args.remote)
     )
-    expected = expected_targets(latest)
-    if target not in expected:
+    required_latest = StableVersion.parse(REQUIRED_LATEST_RELEASE)
+    required_target = StableVersion.parse(REQUIRED_TARGET_RELEASE)
+    if latest != required_latest or target != required_target:
         latest_text = "no remote release" if latest is None else latest.tag()
-        expected_text = " or ".join(it.tag() for it in expected)
         print(
-            f"Release target sanity check failed: expected {expected_text} after {latest_text}, "
+            f"Release target sanity check failed: expected {required_target.tag()} after "
+            f"{required_latest.tag()}, resolved {latest_text} and "
             f"got {target.tag()}.",
             file=sys.stderr,
         )

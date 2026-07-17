@@ -18,6 +18,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         install_and_check(root)
+        fresh_install_replaces_tampered_bundle(root)
         rejects_checksum_mismatch(root)
         rejects_unsafe_archive_member(root)
     print("chromium install helper tests passed")
@@ -38,6 +39,29 @@ def install_and_check(root: Path) -> None:
         raise AssertionError(f"Chromium executable was not installed: {installed}")
     run_check(manifest, helper_bin, root / "cache")
     run_manifest_check(manifest)
+
+
+def fresh_install_replaces_tampered_bundle(root: Path) -> None:
+    archive = root / "fresh-chrome.zip"
+    executable = "chrome-test/chrome"
+    write_zip(archive, executable)
+    manifest = write_manifest(root / "fresh", archive, executable)
+    helper_bin = root / "fresh-helper" / "krr-html-chromium-engine"
+    helper_bin.parent.mkdir(parents=True)
+    cache_dir = root / "fresh-cache"
+    run_install(manifest, helper_bin, cache_dir)
+
+    platform_root = helper_bin.parent / "chromium" / chromium_install.current_platform_key()
+    installed = platform_root / executable
+    installed.write_bytes(b"tampered chrome")
+    stale = platform_root / "stale-file"
+    stale.write_bytes(b"stale")
+    run_install(manifest, helper_bin, cache_dir, fresh=True)
+
+    if installed.read_bytes() != b"test chrome":
+        raise AssertionError("fresh install retained a tampered Chromium executable")
+    if stale.exists():
+        raise AssertionError("fresh install retained a stale Chromium file")
 
 
 def rejects_checksum_mismatch(root: Path) -> None:
@@ -100,6 +124,7 @@ def write_unsafe_zip(path: Path, executable: str) -> None:
 
 
 def write_manifest(root: Path, archive: Path, executable: str, sha256: str | None = None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     manifest = root / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -123,15 +148,18 @@ def write_manifest(root: Path, archive: Path, executable: str, sha256: str | Non
     return manifest
 
 
-def run_install(manifest: Path, helper_bin: Path, cache_dir: Path) -> None:
-    run_helper(
+def run_install(manifest: Path, helper_bin: Path, cache_dir: Path, *, fresh: bool = False) -> None:
+    arguments = [
         "--manifest",
         str(manifest),
         "--helper-bin",
         str(helper_bin),
         "--cache-dir",
         str(cache_dir),
-    )
+    ]
+    if fresh:
+        arguments.append("--fresh")
+    run_helper(*arguments)
 
 
 def run_check(manifest: Path, helper_bin: Path, cache_dir: Path) -> None:
