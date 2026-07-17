@@ -1,12 +1,17 @@
 use super::{
-    chromium_process::{ChromiumProcess, launch_chromium},
-    document, policy, runtime,
+    chromium_process::ChromiumProcess,
+    document,
+    navigation::NavigationMonitor,
+    page_startup::open_browser_page,
+    policy,
+    popup_guard::PopupGuard,
+    runtime,
     screenshot::{capture_viewport_png, crop_frame_to_viewport},
     source, trace,
 };
 use crate::{HtmlBrowserFrame, HtmlBrowserPixelFormat, HtmlBrowserViewport};
 use headless_chrome::{Browser, types::Bounds};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 pub(super) struct ChromiumPage {
     pub(super) tab: Arc<headless_chrome::Tab>,
@@ -17,7 +22,8 @@ pub(super) struct ChromiumPage {
     pub(super) generation: u64,
     pub(super) focused: bool,
     pub(super) pointer_down: Option<(f32, f32, u8)>,
-    temporary_document: Option<PathBuf>,
+    pub(super) navigation: NavigationMonitor,
+    pub(super) popup_guard: PopupGuard,
 }
 
 impl ChromiumPage {
@@ -25,24 +31,18 @@ impl ChromiumPage {
         source: source::BrowserSource,
         viewport: HtmlBrowserViewport,
     ) -> Result<Self, String> {
-        trace::stage("page:new:chrome-binary");
-        let chrome_binary = runtime::chrome_binary_path()?;
-        trace::stage("page:new:launch-chromium");
-        let (browser, chromium) = launch_chromium(&chrome_binary, viewport)?;
-        trace::stage("page:new:new-tab");
-        let tab = browser.new_tab().map_err(string_error)?;
-        trace::stage("page:new:set-bounds");
-        set_view_bounds(&tab, viewport)?;
+        let parts = open_browser_page(viewport)?;
         let mut page = Self {
-            _browser: browser,
-            _chromium: chromium,
-            tab,
+            _browser: parts.browser,
+            _chromium: parts.chromium,
+            tab: parts.tab,
             source,
             viewport,
             generation: 0,
             focused: true,
             pointer_down: None,
-            temporary_document: None,
+            navigation: parts.navigation,
+            popup_guard: parts.popup_guard,
         };
         trace::stage("page:new:set-viewport");
         runtime::set_viewport(&page.tab, viewport)?;
@@ -72,12 +72,8 @@ impl ChromiumPage {
     pub(super) fn screenshot(&mut self) -> Result<HtmlBrowserFrame, String> {
         trace::stage("page:screenshot:synchronize");
         self.synchronize_rendering()?;
-        trace::stage("page:screenshot:capture");
-        let screenshot = capture_viewport_png(&self.tab, self.viewport)?;
-        trace::stage("page:screenshot:decode");
-        let image = image::load_from_memory(&screenshot)
-            .map_err(string_error)?
-            .to_rgba8();
+        let image = self.capture_image()?;
+        let image = self.grow_capture_surface_if_needed(image)?;
         let image = crop_frame_to_viewport(image, self.viewport)?;
         self.generation += 1;
         HtmlBrowserFrame::new(
@@ -90,14 +86,35 @@ impl ChromiumPage {
         .map_err(string_error)
     }
 
+    fn capture_image(&self) -> Result<image::RgbaImage, String> {
+        trace::stage("page:screenshot:capture");
+        let screenshot = capture_viewport_png(&self.tab, self.viewport)?;
+        trace::stage("page:screenshot:decode");
+        image::load_from_memory(&screenshot)
+            .map_err(string_error)
+            .map(|image| image.to_rgba8())
+    }
+
+    fn grow_capture_surface_if_needed(
+        &mut self,
+        image: image::RgbaImage,
+    ) -> Result<image::RgbaImage, String> {
+        let dimensions = image.dimensions();
+        if surface_contains_viewport(dimensions, self.viewport) {
+            return Ok(image);
+        }
+        trace::stage("page:screenshot:grow-surface");
+        grow_view_bounds(&self.tab, dimensions, self.viewport)?;
+        runtime::set_viewport(&self.tab, self.viewport)?;
+        self.synchronize_rendering()?;
+        self.capture_image()
+    }
+
     fn load(&mut self) -> Result<(), String> {
         trace::stage("page:load:document-url");
-        document::remove_temporary_document(&mut self.temporary_document);
-        let (url, temporary_document) = document::document_url(&self.source)?;
-        self.temporary_document = temporary_document;
-        let temporary_document = self.temporary_document.as_deref();
+        let url = document::document_url(&self.source)?;
         trace::stage("page:load:install-policy");
-        policy::install_resource_policy(&self.tab, &self.source, temporary_document)?;
+        policy::install_resource_policy(&self.tab, &self.source, &self.navigation)?;
         trace::stage("page:load:navigate");
         self.tab.navigate_to(&url).map_err(string_error)?;
         trace::stage("page:load:bring-to-front");
@@ -130,10 +147,32 @@ fn set_view_bounds(
     .map_err(string_error)
 }
 
-impl Drop for ChromiumPage {
-    fn drop(&mut self) {
-        document::remove_temporary_document(&mut self.temporary_document);
-    }
+fn grow_view_bounds(
+    tab: &headless_chrome::Tab,
+    surface: (u32, u32),
+    viewport: HtmlBrowserViewport,
+) -> Result<(), String> {
+    let bounds = tab.get_bounds().map_err(string_error)?;
+    let missing = missing_surface_extent(surface, viewport);
+    tab.set_bounds(Bounds::Normal {
+        left: None,
+        top: None,
+        width: Some(bounds.width + f64::from(missing.0)),
+        height: Some(bounds.height + f64::from(missing.1)),
+    })
+    .map(|_| ())
+    .map_err(string_error)
+}
+
+fn surface_contains_viewport(surface: (u32, u32), viewport: HtmlBrowserViewport) -> bool {
+    surface.0 >= viewport.width && surface.1 >= viewport.height
+}
+
+fn missing_surface_extent(surface: (u32, u32), viewport: HtmlBrowserViewport) -> (u32, u32) {
+    (
+        viewport.width.saturating_sub(surface.0),
+        viewport.height.saturating_sub(surface.1),
+    )
 }
 
 #[cfg(test)]
@@ -143,6 +182,16 @@ mod tests {
     #[test]
     fn string_error_preserves_page_error_messages() {
         assert_eq!(string_error("page failed"), "page failed");
+    }
+
+    #[test]
+    fn surface_growth_uses_only_the_measured_dimension_deficit() {
+        let viewport = must(HtmlBrowserViewport::new(960, 720, 1.0));
+
+        assert!(!surface_contains_viewport((960, 577), viewport));
+        assert_eq!(missing_surface_extent((960, 577), viewport), (0, 143));
+        assert!(surface_contains_viewport((1_024, 768), viewport));
+        assert_eq!(missing_surface_extent((1_024, 768), viewport), (0, 0));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use katana_render_runtime::{
-    DiagramKind, DrawioRenderer, HtmlRenderInput, HtmlRenderer, MermaidRenderer, RenderConfig,
-    RenderContext, RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy,
-    Renderer, RendererProfile, RuntimeVersion,
+    DiagramKind, DrawioRenderer, HtmlBrowserError, HtmlBrowserFrame, HtmlBrowserInput,
+    HtmlBrowserNavigation, HtmlBrowserProcessConfig, HtmlBrowserSession, HtmlRenderInput,
+    HtmlRenderer, MermaidRenderer, RenderConfig, RenderContext, RenderDiagnostics, RenderError,
+    RenderInput, RenderOutput, RenderPolicy, Renderer, RendererProfile, RuntimeVersion,
 };
 #[cfg(unix)]
 use katana_render_runtime::{
-    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserInput, HtmlBrowserProcessConfig,
-    HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport, HtmlRuntime,
+    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport,
+    HtmlRuntime,
 };
 use std::path::PathBuf;
 
@@ -55,6 +56,20 @@ fn renderer_rejects_mismatched_diagram_kind_without_fallback()
     assert!(matches!(error, RenderError::UnsupportedKind));
     Ok(())
 }
+
+#[test]
+fn html_browser_contract_can_cross_the_kdv_worker_boundary() {
+    assert_send::<HtmlBrowserSession>();
+    assert_send::<HtmlBrowserInput>();
+    assert_send::<HtmlBrowserNavigation>();
+    assert_send::<HtmlBrowserError>();
+    assert_send_sync::<HtmlBrowserFrame>();
+    assert_send_sync::<HtmlBrowserProcessConfig>();
+}
+
+fn assert_send<T: Send>() {}
+
+fn assert_send_sync<T: Send + Sync>() {}
 
 #[test]
 fn render_input_keeps_katana_adapter_relevant_fields() -> Result<(), Box<dyn std::error::Error>> {

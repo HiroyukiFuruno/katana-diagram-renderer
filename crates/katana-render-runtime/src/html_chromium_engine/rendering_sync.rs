@@ -33,6 +33,9 @@ impl ChromiumPage {
 fn evaluate_loaded_rendering_sync(page: &ChromiumPage, expected_url: &str) -> Result<(), String> {
     let script = loaded_rendering_ready_script(expected_url);
     let mut evaluate = || {
+        if page.navigation.has_confirmed() {
+            return Ok(true);
+        }
         page.tab
             .evaluate(&script, true)
             .map(|result| is_ready_value(result.value))

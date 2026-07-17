@@ -5,9 +5,12 @@ mod document;
 mod input;
 mod ipc;
 mod main_document;
+mod navigation;
 mod page;
 mod page_slot;
+mod page_startup;
 mod policy;
+mod popup_guard;
 mod rendering_sync;
 mod runtime;
 mod screenshot;
@@ -26,6 +29,9 @@ use ipc::{io_error, json_error};
 use page::ChromiumPage;
 use source::BrowserSource;
 use std::io::{self, BufRead, Write};
+
+type CommandResponse = (HtmlBrowserResponse, bool);
+type CommandError = (String, String);
 
 pub struct HtmlChromiumEngine;
 
@@ -101,7 +107,7 @@ fn load(
         None => *borrowed = Some(ChromiumPage::new(source, viewport).map_err(chromium_error)?),
     }
     let page = borrowed.as_mut().ok_or_else(not_loaded)?;
-    frame_response(page)
+    page_response(page)
 }
 
 fn refresh_frame(
@@ -109,7 +115,7 @@ fn refresh_frame(
 ) -> Result<(HtmlBrowserResponse, bool), (String, String)> {
     let mut borrowed = slot.borrow_mut();
     let page = borrowed.as_mut().ok_or_else(not_loaded)?;
-    frame_response(page)
+    page_response(page)
 }
 
 fn resize(
@@ -120,7 +126,7 @@ fn resize(
     let mut borrowed = slot.borrow_mut();
     let page = borrowed.as_mut().ok_or_else(not_loaded)?;
     page.resize(viewport).map_err(chromium_error)?;
-    frame_response(page)
+    page_response(page)
 }
 
 fn dispatch_input(
@@ -131,29 +137,43 @@ fn dispatch_input(
     let mut borrowed = slot.borrow_mut();
     let page = borrowed.as_mut().ok_or_else(not_loaded)?;
     page.input(input).map_err(chromium_error)?;
-    if let Some(navigation) = page.take_navigation().map_err(chromium_error)? {
-        return Ok((
-            HtmlBrowserResponse::Navigation {
-                protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
-                navigation,
-            },
-            false,
-        ));
-    }
-    frame_response(page)
+    page_response(page)
 }
 
-fn frame_response(
-    page: &mut ChromiumPage,
-) -> Result<(HtmlBrowserResponse, bool), (String, String)> {
+fn page_response(page: &mut ChromiumPage) -> Result<(HtmlBrowserResponse, bool), (String, String)> {
+    if let Some(response) = take_navigation_response(page)? {
+        return Ok(response);
+    }
     let frame = page.screenshot().map_err(chromium_error)?;
-    Ok((
+    Ok(take_navigation_response(page)?.unwrap_or_else(|| frame_response(frame)))
+}
+
+fn frame_response(frame: crate::HtmlBrowserFrame) -> CommandResponse {
+    (
         HtmlBrowserResponse::Frame {
             protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
             frame,
         },
         false,
-    ))
+    )
+}
+
+fn take_navigation_response(
+    page: &mut ChromiumPage,
+) -> Result<Option<CommandResponse>, CommandError> {
+    page.take_navigation()
+        .map_err(chromium_error)
+        .map(|navigation| {
+            navigation.map(|navigation| {
+                (
+                    HtmlBrowserResponse::Navigation {
+                        protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
+                        navigation,
+                    },
+                    false,
+                )
+            })
+        })
 }
 
 #[cfg(test)]

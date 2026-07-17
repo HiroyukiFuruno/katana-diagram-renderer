@@ -1,6 +1,6 @@
 use katana_render_runtime::{
-    HtmlBrowserFrame, HtmlBrowserProcessConfig, HtmlBrowserSession, HtmlBrowserSource,
-    HtmlBrowserViewport,
+    HtmlBrowserFrame, HtmlBrowserInput, HtmlBrowserProcessConfig, HtmlBrowserSession,
+    HtmlBrowserSource, HtmlBrowserViewport,
 };
 use std::{
     io::{Read, Write},
@@ -29,6 +29,33 @@ fn chromium_child_allows_http_same_origin_and_blocks_redirected_iframe_cross_ori
     let raw_html = browser_page_with_cross_origin_targets(&blocked_frame);
 
     assert_browser_policy_frame(&allowed, &raw_html)
+}
+
+#[test]
+fn chromium_child_stops_cross_origin_popup_before_its_main_request() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let reached = Arc::new(AtomicBool::new(false));
+    let handler_reached = Arc::clone(&reached);
+    let popup = TestHttpServer::start(move |path| {
+        if path == "/popup.html" {
+            handler_reached.store(true, Ordering::SeqCst);
+        }
+        HttpResponse::html("<!doctype html><p>popup</p>")
+    })?;
+    let popup_url = format!("{}/popup.html", popup.origin());
+    let raw_html = format!(
+        r#"<!doctype html><style>html,body,a{{margin:0;width:100%;height:100%;display:block}}</style><a href="{popup_url}" target="_blank">popup</a>"#
+    );
+    let mut session = start_session(&raw_html, "https://example.test/popup-source.html")?;
+
+    dispatch_click(&mut session, 16.0, 16.0)?;
+
+    let navigation = session
+        .take_navigation()
+        .ok_or_else(|| "cross-origin popup did not return navigation".to_string())?;
+    assert_eq!(navigation.url.as_str(), popup_url);
+    assert!(!reached.load(Ordering::SeqCst));
+    session.close().map_err(|error| error.to_string())
 }
 
 fn blocked_resource_server() -> TestResult<TestHttpServer> {
@@ -76,6 +103,19 @@ fn start_session(raw_html: &str, origin: impl Into<String>) -> TestResult<HtmlBr
     let source = HtmlBrowserSource::new(raw_html, origin).map_err(|error| error.to_string())?;
     let config = browser_process_config()?;
     HtmlBrowserSession::start(source, viewport()?, &config).map_err(|error| error.to_string())
+}
+
+fn dispatch_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResult {
+    for input in [
+        HtmlBrowserInput::PointerMove { x, y },
+        HtmlBrowserInput::PointerDown { x, y, button: 0 },
+        HtmlBrowserInput::PointerUp { x, y, button: 0 },
+    ] {
+        session
+            .dispatch_input(input)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn chromium_session_guard() -> TestResult<MutexGuard<'static, ()>> {

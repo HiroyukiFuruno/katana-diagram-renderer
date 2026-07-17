@@ -132,16 +132,16 @@ pub(super) fn chromium_is_running_status(
 pub(super) fn launch_chromium(
     chrome_binary: &Path,
     viewport: HtmlBrowserViewport,
-) -> Result<(Browser, ChromiumProcess), String> {
+) -> Result<(Browser, ChromiumProcess, String), String> {
     trace::stage("chromium:launch");
     let (chromium, debug_ws_url) = match ChromiumProcess::launch(chrome_binary, viewport) {
         Ok((chromium, debug_ws_url)) => (chromium, debug_ws_url),
         Err(error) => return Err(error),
     };
     trace::stage("chromium:connect-browser");
-    let browser = connect_browser(debug_ws_url)?;
+    let browser = connect_browser(debug_ws_url.clone())?;
     trace::stage("chromium:browser-connected");
-    Ok((browser, chromium))
+    Ok((browser, chromium, debug_ws_url))
 }
 
 fn connect_browser(debug_ws_url: String) -> Result<Browser, String> {

@@ -1252,6 +1252,7 @@ dependencies = [
 name = "katana-render-runtime"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "base64",
  "headless_chrome",
  "html5ever",
@@ -1267,6 +1268,7 @@ dependencies = [
  "thiserror",
  "tiny-skia",
  "tracing",
+ "tungstenite",
  "ureq",
  "url",
  "v8",

@@ -1,19 +1,15 @@
-use super::{main_document::MainDocument, source::BrowserSource};
+use super::{main_document::MainDocument, navigation::NavigationMonitor, source::BrowserSource};
 use headless_chrome::{
     browser::tab::RequestPausedDecision,
     protocol::cdp::{Fetch, Network},
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 use url::Url;
 
 #[derive(Clone)]
 pub(super) struct BrowserResourcePolicy {
     source_origin: Url,
     local_root: Option<PathBuf>,
-    temporary_document: Option<PathBuf>,
 }
 
 impl BrowserResourcePolicy {
@@ -26,17 +22,7 @@ impl BrowserResourcePolicy {
         Self {
             source_origin,
             local_root,
-            temporary_document: None,
         }
-    }
-
-    pub(super) fn from_source_with_temporary_document(
-        source: &BrowserSource,
-        temporary_document: Option<&std::path::Path>,
-    ) -> Self {
-        let mut policy = Self::from_source(source);
-        policy.temporary_document = temporary_document.map(std::path::Path::to_path_buf);
-        policy
     }
 
     pub(super) fn allows(&self, request_url: &str) -> bool {
@@ -45,19 +31,13 @@ impl BrowserResourcePolicy {
         };
         match request_url.scheme() {
             "data" => true,
-            "file" => {
-                self.local_root.as_ref().is_some_and(|root| {
-                    request_url
-                        .to_file_path()
-                        .ok()
-                        .and_then(|path| path.canonicalize().ok())
-                        .is_some_and(|path| path.starts_with(root))
-                }) || request_url.to_file_path().ok().is_some_and(|path| {
-                    self.temporary_document
-                        .as_ref()
-                        .is_some_and(|document| path == *document)
-                })
-            }
+            "file" => self.local_root.as_ref().is_some_and(|root| {
+                request_url
+                    .to_file_path()
+                    .ok()
+                    .and_then(|path| path.canonicalize().ok())
+                    .is_some_and(|path| path.starts_with(root))
+            }),
             "http" | "https" => {
                 matches!(self.source_origin.scheme(), "http" | "https")
                     && request_url.origin() == self.source_origin.origin()
@@ -70,14 +50,14 @@ impl BrowserResourcePolicy {
 pub(super) fn install_resource_policy(
     tab: &Arc<headless_chrome::Tab>,
     source: &BrowserSource,
-    temporary_document: Option<&Path>,
+    navigation: &NavigationMonitor,
 ) -> Result<(), String> {
-    let policy =
-        BrowserResourcePolicy::from_source_with_temporary_document(source, temporary_document);
+    let policy = BrowserResourcePolicy::from_source(source);
     let main_document = MainDocument::from_source(source);
+    let navigation = navigation.clone();
     tab.enable_request_interception(Arc::new(
         move |_transport, _session_id, event: Fetch::events::RequestPausedEvent| {
-            request_decision(event, &main_document, &policy)
+            request_decision(event, &main_document, &policy, &navigation)
         },
     ))
     .map_err(string_error)?;
@@ -94,20 +74,31 @@ fn request_decision(
     event: Fetch::events::RequestPausedEvent,
     main_document: &Option<MainDocument>,
     policy: &BrowserResourcePolicy,
+    navigation: &NavigationMonitor,
 ) -> RequestPausedDecision {
-    if let Some(document) = main_document
-        && document.matches(&event.params.request.url)
+    if event.params.resource_Type == Network::ResourceType::Document
+        && navigation.is_root_frame(&event.params.frame_id)
     {
-        return RequestPausedDecision::Fulfill(document.fulfill(event.params.request_id));
+        if let Some(fulfill) = main_document.as_ref().and_then(|document| {
+            document.fulfill_once(event.params.request_id.clone(), &event.params.request.url)
+        }) {
+            return RequestPausedDecision::Fulfill(fulfill);
+        }
+        navigation.confirm(&event.params.request.url);
+        return blocked_request(event.params.request_id);
     }
     if policy.allows(&event.params.request.url) {
         RequestPausedDecision::Continue(None)
     } else {
-        RequestPausedDecision::Fail(Fetch::FailRequest {
-            request_id: event.params.request_id,
-            error_reason: Network::ErrorReason::BlockedByClient,
-        })
+        blocked_request(event.params.request_id)
     }
+}
+
+fn blocked_request(request_id: Fetch::RequestId) -> RequestPausedDecision {
+    RequestPausedDecision::Fail(Fetch::FailRequest {
+        request_id,
+        error_reason: Network::ErrorReason::BlockedByClient,
+    })
 }
 
 #[cfg(test)]
@@ -154,49 +145,6 @@ mod tests {
         assert!(child_allowed);
         assert!(!outside_allowed);
         Ok(())
-    }
-
-    #[test]
-    fn file_sources_allow_only_the_explicit_temporary_document_outside_the_local_root()
-    -> Result<(), String> {
-        let (directory, temporary_document, other_file) = temporary_document_fixture_paths();
-        std::fs::create_dir_all(&directory).map_err(io_error)?;
-        std::fs::write(&temporary_document, b"<!doctype html>").map_err(io_error)?;
-        std::fs::write(&other_file, b"<!doctype html>").map_err(io_error)?;
-        let origin = must_file_url(&directory.join("index.html"))?;
-        let temporary_url = must_file_url(&temporary_document)?;
-        let other_url = must_file_url(&other_file)?;
-        let source = browser_source("<p>ok</p>", origin.to_string())?;
-        let policy = BrowserResourcePolicy::from_source_with_temporary_document(
-            &source,
-            Some(&temporary_document),
-        );
-
-        let temporary_allowed = policy.allows(temporary_url.as_str());
-        let other_allowed = policy.allows(other_url.as_str());
-        let _ = std::fs::remove_file(&temporary_document);
-        let _ = std::fs::remove_file(&other_file);
-        let _ = std::fs::remove_dir(&directory);
-
-        assert!(temporary_allowed);
-        assert!(!other_allowed);
-        Ok(())
-    }
-
-    fn temporary_document_fixture_paths() -> (PathBuf, PathBuf, PathBuf) {
-        let directory = std::env::temp_dir().join(format!(
-            "krr-policy-temporary-document-root-{}",
-            std::process::id()
-        ));
-        let temporary_document = std::env::temp_dir().join(format!(
-            "krr-policy-temporary-document-{}.html",
-            std::process::id()
-        ));
-        let other_file = std::env::temp_dir().join(format!(
-            "krr-policy-temporary-document-other-{}.html",
-            std::process::id()
-        ));
-        (directory, temporary_document, other_file)
     }
 
     #[test]

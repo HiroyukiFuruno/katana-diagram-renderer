@@ -4,7 +4,6 @@ use headless_chrome::{
     browser::tab::point::Point,
     protocol::cdp::{Emulation, Input},
 };
-use serde_json::Value;
 
 impl ChromiumPage {
     pub(super) fn input(&mut self, input: HtmlBrowserInput) -> Result<(), String> {
@@ -38,13 +37,14 @@ impl ChromiumPage {
         Ok(())
     }
 
-    pub(super) fn take_navigation(&self) -> Result<Option<HtmlBrowserNavigationEvent>, String> {
-        let value = self
-            .tab
-            .evaluate("window.__katanaNavigation || null", false)
-            .map_err(string_error)?
-            .value;
-        navigation_from_value(value)
+    pub(super) fn take_navigation(&mut self) -> Result<Option<HtmlBrowserNavigationEvent>, String> {
+        let wait_for_popup = self.navigation.has_pending_popup();
+        let closed = self
+            .popup_guard
+            .close_new_targets(wait_for_popup)
+            .map_err(string_error)?;
+        self.navigation.confirm_closed_popups(closed);
+        self.navigation.take()
     }
 
     fn move_mouse(&self, x: f32, y: f32) -> Result<(), String> {
@@ -162,18 +162,6 @@ fn string_error(error: impl ToString) -> String {
     error.to_string()
 }
 
-fn navigation_from_value(
-    value: Option<Value>,
-) -> Result<Option<HtmlBrowserNavigationEvent>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let url = serde_json::from_value::<Option<String>>(value).map_err(string_error)?;
-    url.map(HtmlBrowserNavigationEvent::new)
-        .transpose()
-        .map_err(|error| error.to_string())
-}
-
 fn is_primary_click(pointer_down: Option<(f32, f32, u8)>, button: u8) -> bool {
     let Some((_, _, down_button)) = pointer_down else {
         return false;
@@ -191,25 +179,6 @@ mod tests {
     #[test]
     fn string_error_preserves_display_message() {
         assert_eq!(string_error("input failed"), "input failed");
-    }
-
-    #[test]
-    fn navigation_from_value_accepts_missing_null_and_valid_urls() {
-        assert!(matches!(navigation_from_value(None), Ok(None)));
-        assert!(matches!(
-            navigation_from_value(Some(serde_json::Value::Null)),
-            Ok(None)
-        ));
-        assert!(matches!(
-            navigation_from_value(Some(serde_json::json!("https://example.test/next"))),
-            Ok(Some(event)) if event.url.as_str() == "https://example.test/next"
-        ));
-    }
-
-    #[test]
-    fn navigation_from_value_rejects_invalid_values_and_urls() {
-        assert!(navigation_from_value(Some(serde_json::json!({ "url": "bad" }))).is_err());
-        assert!(navigation_from_value(Some(serde_json::json!("not a url"))).is_err());
     }
 
     #[test]

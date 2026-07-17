@@ -47,6 +47,34 @@ fn chromium_child_evaluates_inline_css_and_javascript_into_rgba_pixels() -> Test
 }
 
 #[test]
+fn chromium_child_returns_the_exact_desktop_viewport_dimensions() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body{margin:0;background:rgb(17,34,51)}</style>"#,
+        "https://example.test/desktop-viewport.html",
+        960,
+        720,
+    )?;
+
+    let frame = latest_frame(&session)?;
+    assert_eq!((frame.viewport.width, frame.viewport.height), (960, 720));
+    assert_eq!(frame.pixels.len(), 960 * 720 * 4);
+    assert_frame_contains_rgb(frame, [17, 34, 51])?;
+
+    session
+        .resize(viewport(1_280, 800)?)
+        .map_err(|error| error.to_string())?;
+    let resized = latest_frame(&session)?;
+    assert_eq!(
+        (resized.viewport.width, resized.viewport.height),
+        (1_280, 800)
+    );
+    assert_eq!(resized.pixels.len(), 1_280 * 800 * 4);
+    assert_frame_contains_rgb(resized, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
 fn chromium_child_resolves_local_css_javascript_and_image_from_source_origin() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
@@ -64,11 +92,28 @@ fn chromium_child_resolves_local_css_javascript_and_image_from_source_origin() -
 }
 
 #[test]
+fn chromium_child_preserves_raw_html_parser_mode_at_file_origin() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut origin =
+        Url::parse(&html_browser_fixture_origin()?).map_err(|error| error.to_string())?;
+    origin.set_fragment(Some("raw-html-section"));
+    let mut session = start_session(
+        r#"<!-- <head> must not be treated as markup by the host --><style>html,body,#marker{margin:0;width:100%;height:100%;background:rgb(1,2,3)}</style><div id="marker"></div><script>if(document.compatMode==='BackCompat')document.querySelector('#marker').style.background='rgb(17,34,51)'</script>"#,
+        origin.to_string(),
+        16,
+        16,
+    )?;
+
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
 fn chromium_child_returns_link_navigation_to_the_source_host() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let origin = html_browser_fixture_origin()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block}</style><a href="next.html">next</a>"#,
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block}</style><a href="next.html#details">next</a><script>window.addEventListener('click',()=>window.__katanaNavigation='https://evil.test/')</script>"#,
         origin,
         32,
         32,
@@ -76,7 +121,127 @@ fn chromium_child_returns_link_navigation_to_the_source_host() -> TestResult {
 
     dispatch_click(&mut session, 16.0, 16.0)?;
     let navigation = take_navigation(&mut session)?;
-    assert!(navigation.url.as_str().ends_with("/next.html"));
+    assert!(navigation.url.as_str().ends_with("/next.html#details"));
+    session
+        .dispatch_input(HtmlBrowserInput::PointerMove { x: 1.0, y: 1.0 })
+        .map_err(|error| error.to_string())?;
+    assert!(session.take_navigation().is_none());
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_evaluates_javascript_links_without_host_navigation() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(1,2,3);color:transparent}</style><a href="javascript:document.querySelector('a').style.background='rgb(17,34,51)';void 0">action</a>"#,
+        "https://example.test/javascript-link.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+
+    assert!(session.take_navigation().is_none());
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_returns_timer_navigation_without_an_input_event() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body{margin:0;background:rgb(17,34,51)}</style><script>setTimeout(()=>window.location.href='timer-target.html#ready',250)</script>"#,
+        "https://example.test/timer-source.html",
+        16,
+        16,
+    )?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let navigation = loop {
+        if let Some(navigation) = session.take_navigation() {
+            break navigation;
+        }
+        if Instant::now() >= deadline {
+            return Err("timer navigation was not returned".to_string());
+        }
+        session.refresh_frame().map_err(|error| error.to_string())?;
+    };
+
+    assert_eq!(
+        navigation.url.as_str(),
+        "https://example.test/timer-target.html#ready"
+    );
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_returns_new_tab_link_navigation_to_the_source_host() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block}</style><a href="new-tab.html#details" target="_blank">new tab</a>"#,
+        "https://example.test/new-tab-source.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+
+    let navigation = take_navigation(&mut session)?;
+    assert_eq!(
+        navigation.url.as_str(),
+        "https://example.test/new-tab.html#details"
+    );
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_honors_prevent_default_for_new_tab_links() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(1,2,3);color:transparent}</style><a href="blocked.html" target="_blank">blocked</a><script>window.addEventListener('click',event=>{event.preventDefault();document.querySelector('a').style.background='rgb(17,34,51)'})</script>"#,
+        "https://example.test/new-tab-prevented.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+
+    assert!(session.take_navigation().is_none());
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_ignores_blank_popup_targets_without_host_navigation() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r#"<!doctype html><style>html,body,a{margin:0;width:100%;height:100%;display:block;background:rgb(17,34,51);color:transparent}</style><a href="about:blank" target="_blank">blank</a>"#,
+        "https://example.test/blank-popup-source.html",
+        16,
+        16,
+    )?;
+
+    dispatch_click(&mut session, 8.0, 8.0)?;
+
+    assert!(session.take_navigation().is_none());
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_child_keeps_same_document_anchor_navigation_inside_the_browser() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        r##"<!doctype html><style>html,body{margin:0}a{display:block;width:160px;height:80px;background:#f00}.space{height:400px}#target{height:100px;background:rgb(1,2,3)}#target[data-changed=yes]{background:rgb(17,34,51)}</style><a href="#target">Jump</a><div class="space"></div><div id="target"></div><script>window.addEventListener('hashchange',()=>document.querySelector('#target').dataset.changed='yes')</script>"##,
+        "https://example.test/anchors.html",
+        200,
+        100,
+    )?;
+
+    dispatch_click(&mut session, 20.0, 20.0)?;
+
+    assert!(session.take_navigation().is_none());
+    assert_frame_contains_rgb(latest_frame(&session)?, [17, 34, 51])?;
     session.close().map_err(|error| error.to_string())
 }
 
@@ -126,17 +291,45 @@ fn chromium_child_applies_surface_focus_before_text_input() -> TestResult {
 fn browser_session_exposes_initial_and_action_frame_updates_once() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,#marker{margin:0;width:100%;height:100%}#marker{background:rgb(1,2,3)}#action{position:absolute;inset:0;appearance:none;border:0;background:transparent;color:transparent;padding:0}</style><div id="marker"></div><button id="action">go</button><script>document.querySelector('#action').addEventListener('click',()=>{document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
+        r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%}#stable,#marker{width:100%;height:50%}#stable{background:rgb(68,85,102)}#marker{background:rgb(1,2,3)}#action{position:absolute;inset:0;appearance:none;border:0;background:transparent;color:transparent;padding:0}</style><div id="stable"></div><div id="marker"></div><button id="action">go</button><script>document.querySelector('#action').addEventListener('click',()=>{document.querySelector('#marker').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/frame-update.html",
         16,
         16,
     )?;
 
-    assert_frame_contains_rgb(take_frame_update(&mut session)?, [1, 2, 3])?;
+    assert_frame_contains_rgb(take_frame_update(&mut session)?, [68, 85, 102])?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [1, 2, 3])?;
     assert!(session.take_frame_update().is_none());
     dispatch_click(&mut session, 8.0, 8.0)?;
     assert_frame_contains_rgb(take_frame_update(&mut session)?, [17, 34, 51])?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [68, 85, 102])?;
     assert!(session.take_frame_update().is_none());
+    session.close().map_err(|error| error.to_string())
+}
+
+#[test]
+fn chromium_screencast_action_frame_preserves_unchanged_page_content() -> TestResult {
+    let _browser_guard = chromium_session_guard()?;
+    let mut session = start_session(
+        include_str!("../examples/fixtures/html_browser_preview.html"),
+        "https://example.test/preview.html",
+        960,
+        720,
+    )?;
+
+    assert_frame_pixel_rgb(latest_frame(&session)?, 80, 80, [24, 32, 42])?;
+    dispatch_hover_click(&mut session, 250.0, 296.0)?;
+    assert_frame_contains_rgb(latest_frame(&session)?, [18, 81, 58])?;
+    assert_frame_pixel_rgb(latest_frame(&session)?, 80, 80, [24, 32, 42])?;
+    dispatch_hover_click(&mut session, 175.0, 360.0)?;
+    assert_frame_pixel_rgb(latest_frame(&session)?, 80, 80, [24, 32, 42])?;
+    dispatch_hover_click(&mut session, 175.0, 438.0)?;
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "ok".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+    assert_frame_pixel_rgb(latest_frame(&session)?, 80, 80, [24, 32, 42])?;
     session.close().map_err(|error| error.to_string())
 }
 
@@ -159,7 +352,7 @@ fn chromium_child_refreshes_microtask_and_css_animation_frame_updates() -> TestR
 fn chromium_child_honors_prevent_default_without_kdv_navigation_semantics() -> TestResult {
     let _browser_guard = chromium_session_guard()?;
     let mut session = start_session(
-        r#"<!doctype html><style>html,body,#link,#surface{margin:0;width:100%;height:100%}#link,#surface{display:block}#link{color:transparent}#surface{background:rgb(1,2,3)}</style><a id="link" href="next.html"><span id="surface"></span></a><script>document.querySelector('#link').addEventListener('click',event=>{event.preventDefault();document.querySelector('#surface').style.background='rgb(17,34,51)'})</script>"#,
+        r#"<!doctype html><style>html,body,#link,#surface{margin:0;width:100%;height:100%}#link,#surface{display:block}#link{color:transparent}#surface{background:rgb(1,2,3)}</style><a id="link" href="next.html"><span id="surface"></span></a><script>window.addEventListener('click',event=>{event.preventDefault();document.querySelector('#surface').style.background='rgb(17,34,51)'})</script>"#,
         "https://example.test/prevent-default.html",
         16,
         16,
@@ -583,6 +776,13 @@ fn dispatch_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResul
     Ok(())
 }
 
+fn dispatch_hover_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::PointerMove { x, y })
+        .map_err(|error| error.to_string())?;
+    dispatch_click(session, x, y)
+}
+
 fn dispatch_ignored_right_click(session: &mut HtmlBrowserSession, x: f32, y: f32) -> TestResult {
     for input in [
         HtmlBrowserInput::PointerDown { x, y, button: 1 },
@@ -645,6 +845,31 @@ fn assert_frame_excludes_rgb(frame: &HtmlBrowserFrame, rgb: [u8; 3]) -> TestResu
         ))
     } else {
         Ok(())
+    }
+}
+
+fn assert_frame_pixel_rgb(
+    frame: &HtmlBrowserFrame,
+    x: u32,
+    y: u32,
+    expected: [u8; 3],
+) -> TestResult {
+    if x >= frame.viewport.width || y >= frame.viewport.height {
+        return Err(format!("pixel ({x},{y}) is outside the frame viewport"));
+    }
+    let index = ((y * frame.viewport.width + x) * 4) as usize;
+    let actual = [
+        frame.pixels[index],
+        frame.pixels[index + 1],
+        frame.pixels[index + 2],
+    ];
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "pixel ({x},{y}) was rgb({},{},{}) instead of rgb({},{},{})",
+            actual[0], actual[1], actual[2], expected[0], expected[1], expected[2]
+        ))
     }
 }
 
