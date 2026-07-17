@@ -23,5 +23,18 @@
 #### Scenario: local link が別の HTML document を指す
 
 - **WHEN** browser page の local link が user action により navigation を要求する
-- **THEN** KRR は normalized target を navigation event として返す
+- **THEN** KRR は Chromium が発行した top-level `Document` request を確認し、fragment を保持した normalized target を navigation event として返す
 - **THEN** KatanA は target を取得し、raw HTML と完全な document URL origin を KDV 経由で KRR session に渡す
+
+#### Scenario: browser 内で完結または取消された link action
+
+- **WHEN** page listener が `preventDefault()` する、または link が `javascript:` URL / same-document hash を指す
+- **THEN** Chromium は page listener、script、hash/default action を通常どおり評価する
+- **THEN** KRR は click target または `href` を host で解釈せず、top-level `Document` request が発生しない限り navigation event を返さない
+
+#### Scenario: input 以外から main-document navigation が発生する
+
+- **WHEN** timer/script が current page の main-document navigation を要求する、または user action が new tab/window target を生成する
+- **THEN** KRR は input response だけに依存せず、frame/lifecycle response でも confirmed navigation event を返す
+- **THEN** new tab/window は Chromium の `Page.windowOpen` event と browser-level debugger pause で停止した新規 page target が対応した場合だけ、その URL を event 化する
+- **THEN** KRR は新規 target の main request または script 実行より前に target を閉じ、停止 target を実 browser page として継続させない
