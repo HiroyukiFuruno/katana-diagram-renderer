@@ -24,12 +24,25 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_only_v0_4_0() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_allows_only_v0_4_1() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.0")?);
-    for version in ["0.3.9", "0.3.10", "0.4.1", "0.5.0", "1.0.0", "2.0.0"] {
+    assert!(release_target_check(root, "0.4.1")?);
+    for version in ["0.3.9", "0.4.0", "0.4.2", "0.5.0", "1.0.0", "2.0.0"] {
         assert!(!release_target_check(root, version)?);
     }
+    Ok(())
+}
+
+#[test]
+fn archive_gate_release_recipe_runs_the_script_contract_test()
+-> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let recipe = recipe_body(&justfile, "release-openspec-archive")?;
+
+    assert!(recipe.contains("bash scripts/release/check-openspec-release-archive.sh --self-test"));
+    assert!(
+        recipe.contains("bash scripts/release/check-openspec-release-archive.sh \"{{VERSION}}\"")
+    );
     Ok(())
 }
 
@@ -205,7 +218,7 @@ fn release_target_check(
             "--target-version",
             target_version,
             "--latest-version",
-            "0.3.8",
+            "0.4.0",
         ])
         .current_dir(root)
         .output()?;

@@ -172,6 +172,7 @@ release-verify: release-target-check
 
 # Verify completed OpenSpec changes are archived before release PRs
 release-openspec-archive:
+    bash scripts/release/check-openspec-release-archive.sh --self-test
     bash scripts/release/check-openspec-release-archive.sh "{{VERSION}}"
 
 # Verify release branch readiness before merging

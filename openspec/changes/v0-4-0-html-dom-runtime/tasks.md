@@ -34,13 +34,15 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   `http/https` document origins without giving KRR main-document acquisition.
 - [x] 1.6 Make every production line reachable through behavioral tests and pass
   `rtk just coverage` with `100% / 0 uncovered` without exclusions or ignores.
+- [/] 1.7 Release KRR `0.4.1` with deterministic bundled-font SVG rasterization.
+  Local quality and release gates are complete; publication verification remains.
 
 ### 2. KDV Adapter
 
 - [x] 2.1 Replace the rejected external-browser session worker with a KRR
   in-process session adapter that transports raw source, frame, input, resize,
   typed error, and navigation without parsing HTML.
-- [/] 2.2 Add adapter contract tests for ordered input/frame/navigation lifecycle
+- [x] 2.2 Add adapter contract tests for ordered input/frame/navigation lifecycle
   against KRR and pass KDV strict coverage and release checks.
 - [ ] 2.3 After KRR `0.4.0` publication, resolve only crates.io `^0.4.0`, release
   KDV `0.3.0`, and prove the published artifact before KatanA registry use.
@@ -60,7 +62,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 
 ### 4. Release Order And User Review
 
-- [ ] 4.1 Pass all KRR quality/release gates, publish and verify KRR `0.4.0`.
+- [x] 4.1 Pass all KRR quality/release gates, publish and verify KRR `0.4.0`.
 - [ ] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
 - [ ] 4.3 Resolve KDV `0.3.0` from crates.io in KatanA and rerun the complete
   native acceptance matrix for release target `v0.22.33` only.
