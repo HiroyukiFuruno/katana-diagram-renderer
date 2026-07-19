@@ -1,10 +1,12 @@
 use super::{
-    RasterTarget, SvgRasterizeOps, effective_scale, parse_light_dark_function, rasterizer_options,
+    RasterTarget, SvgRasterizeOps, bundled_font_db, effective_scale, parse_light_dark_function,
+    rasterizer_options, rasterizer_options_with_font_db,
 };
 use crate::markdown::color_preset::DiagramColorPreset;
 use crate::markdown::mermaid_renderer::MermaidRenderOps;
 use crate::markdown::runtime_assets::RuntimeAsset;
 use crate::markdown::{DiagramBlock, DiagramKind, DiagramResult};
+use resvg::usvg;
 
 #[test]
 fn rasterize_svg_returns_pixels_for_simple_svg() {
@@ -14,6 +16,24 @@ fn rasterize_svg_returns_pixels_for_simple_svg() {
     assert!(image.as_ref().is_ok_and(|it| it.width == 10));
     assert!(image.as_ref().is_ok_and(|it| it.height == 10));
     assert!(image.as_ref().is_ok_and(|it| !it.rgba.is_empty()));
+}
+
+#[test]
+fn rasterize_svg_renders_text_with_the_bundled_font() -> Result<(), String> {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="32"><rect width="96" height="32" fill="#fff"/><text x="4" y="24" font-family="Noto Sans, sans-serif" font-size="20" fill="#14532d">KRR</text></svg>"##;
+    let options = rasterizer_options_with_font_db(bundled_font_db());
+    let tree = usvg::Tree::from_str(svg, &options).map_err(|error| error.to_string())?;
+    let image = RasterTarget::new(tree.size(), 1.0)
+        .render(&tree)
+        .map_err(|error| error.to_string())?;
+
+    assert!(
+        image
+            .data()
+            .chunks_exact(4)
+            .any(|pixel| pixel != [255, 255, 255, 255])
+    );
+    Ok(())
 }
 
 #[test]

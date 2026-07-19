@@ -41,7 +41,7 @@ impl HtmlLayoutRenderer {
     fn paint_text_line(&mut self, line: &str, x: f32, baseline_y: f32, style: &CssStyle) {
         let y = baseline_y - self.scroll_y;
         self.svg.push_str(&format!(
-            r#"<text x="{x}" y="{y}" font-family="sans-serif" font-size="{}" fill="{}"{}{}>{}</text>"#,
+            r#"<text x="{x}" y="{y}" font-family="Noto Sans, sans-serif" font-size="{}" fill="{}"{}{}>{}</text>"#,
             style.font_size,
             escape_xml(&style.color),
             font_weight(style),

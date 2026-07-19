@@ -71,6 +71,9 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 
 - KRR: `rtk just check`, strict `rtk just coverage`, the interactive preview
   example, and `release-target-check` / `release-verify` for `0.4.0` passed.
+  The raster path embeds Noto Sans with its SIL OFL 1.1 license, and a test
+  rasterizes text with only that bundled font database so text frames cannot
+  depend on a host or CI system font.
 - KDV: adapter contract integration, adapter 100% coverage, `rtk just check`,
   `rtk just coverage`, and regenerated native Storybook acceptance artifacts
   passed with the
