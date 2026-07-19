@@ -1,5 +1,5 @@
 use super::dom_state::{HtmlDomBridgeState, node_id};
-use super::types::DomValue;
+use super::types::{DomValue, HtmlRuntimeEventKind};
 
 const LISTENER_NODE_ID_INDEX: i32 = 1;
 const LISTENER_EVENT_TYPE_INDEX: i32 = 2;
@@ -13,7 +13,7 @@ pub(super) fn dom_callback(
 ) {
     let operation = args.get(0).to_rust_string_lossy(scope);
     if operation == "addEventListener" {
-        match register_click_listener(scope, &args) {
+        match register_listener(scope, &args) {
             Ok(()) => return_value.set(v8::undefined(scope).into()),
             Err(error) => set_bridge_error(scope, &mut return_value, error),
         }
@@ -33,7 +33,7 @@ pub(super) fn dom_callback(
     }
 }
 
-fn register_click_listener(
+fn register_listener(
     scope: &mut v8::PinScope,
     args: &v8::FunctionCallbackArguments,
 ) -> Result<(), String> {
@@ -41,18 +41,17 @@ fn register_click_listener(
     let event_type = args
         .get(LISTENER_EVENT_TYPE_INDEX)
         .to_rust_string_lossy(scope);
-    if event_type != "click" {
-        return Err(format!("unsupported event type: {event_type}"));
-    }
+    let event = HtmlRuntimeEventKind::parse(&event_type)
+        .ok_or_else(|| format!("unsupported event type: {event_type}"))?;
     let Ok(listener) = v8::Local::<v8::Function>::try_from(args.get(LISTENER_FUNCTION_INDEX))
     else {
-        return Err("click listener must be a function".to_string());
+        return Err("event listener must be a function".to_string());
     };
     let listener = v8::Global::new(scope, listener);
     let state = scope
         .get_slot::<HtmlDomBridgeState>()
         .ok_or(MISSING_DOM_STATE_ERROR.to_string())?;
-    state.add_click_listener(node_id, listener);
+    state.add_listener(node_id, event, listener);
     Ok(())
 }
 

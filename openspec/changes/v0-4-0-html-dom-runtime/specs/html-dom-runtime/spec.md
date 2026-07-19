@@ -2,7 +2,7 @@
 
 ### Requirement: KRR は browser-equivalent HTML page を所有しなければならない
 
-システムは、KRR 内で browser engine の persistent page を起動し、HTML5 parsing、CSS cascade/layout/paint、JavaScript/Web API/event loop を engine に評価させなければならない（MUST）。KRR は KatanA から受け取った raw HTML の doctype、comment、head/body 構造、parser mode を host-side の文字列処理または static parser で変更してはならない（MUST NOT）。KRR は custom DOM bridge、独自 CSS layout、静的 HTML serialization を KatanA interactive viewer の source of truth として使ってはならない（MUST NOT）。KRR browser session を開始できない場合、KDV/KatanA は typed error を表示し、旧 static parser、HTML text normalization、export image へ fallback してはならない（MUST NOT）。
+システムは、KRR 内の in-process Rust/V8 persistent session で HTML parsing、CSS cascade/layout/paint、JavaScript event semantics、input、navigation を評価しなければならない（MUST）。KRR は KatanA から受け取った raw HTML を doctype、comment、head/body 構造を壊す host-side 文字列変換で書き換えてはならない（MUST NOT）。interactive runtime は既存の Rust/V8 DOM/CSS primitives を source of truth として強化し、static HTML export/render path を interactive viewer に転用してはならない（MUST NOT）。Chromium、WebView、外部 helper process、browser binary は runtime、test、release artifact に導入してはならない（MUST NOT）。session を開始できない場合、KDV/KatanA は typed error を表示し、static export image へ fallback してはならない（MUST NOT）。
 
 #### Scenario: JavaScript が画面を動的に変更する
 
@@ -20,8 +20,8 @@
 #### Scenario: raw HTML の parser mode を保持する
 
 - **WHEN** local file の raw HTML が doctype を持たない、または comment 内に `<head>` text を含む
-- **THEN** KRR は完全な file document URL の main response body を raw HTML のまま Chromium に供給する
-- **THEN** host は doctype、`<base>`、navigation script を HTML text に挿入せず、Chromium が quirks/standards mode と document tree を決定する
+- **THEN** KRR は完全な document URL origin と raw HTML を in-process runtime に渡す
+- **THEN** host は doctype、`<base>`、navigation script を HTML text に挿入せず、KRR parser/runtime が document tree を決定する
 
 ### Requirement: KRR は browser frame を viewport と同じ surface として返さなければならない
 
@@ -39,30 +39,30 @@
 - **THEN** KRR は変更された領域だけの damage image ではなく、viewport 全体の pixel frame を返す
 - **THEN** 後続 frame は action 前から不変の content と action 後の content を同時に含む
 
-### Requirement: KRR browser runtime は検証可能な配布成果物でなければならない
+### Requirement: KRR in-process runtime は外部 browser asset なしに検証可能でなければならない
 
-システムは、KRR release helper と manifest で固定した Chromium bundle を同一の platform runtime archive として配布しなければならない（MUST）。archive は helper executable、helper 隣接の `chromium/<platform>`、Chromium source manifest、KRR license、runtime manifest を含み、linux64、mac-arm64、mac-x64、win64 ごとの archive checksum を公開しなければならない（MUST）。release workflow は immutable commit を checkout し、Chromium download の SHA-256 を再検証して fresh directory へ展開し、archive 内容、実行権限、全 platform asset の存在を検証しなければならない（MUST）。全 asset は draft GitHub Release へ揃えてから公開し、同一 release tag の既存 asset と内容が異なる場合は上書きしてはならない（MUST NOT）。
+システムは、KRR crate に含まれる Rust/V8 runtime だけで interactive session を起動できなければならない（MUST）。release workflow は dependency graph、package contents、runtime configuration を検証し、Chromium binary/archive/manifest、browser download、external helper、`KRR_CHROME_BIN` のような browser override が含まれないことを確認しなければならない（MUST）。
 
-#### Scenario: KatanA release artifact に browser runtime を組み込む
+#### Scenario: KatanA release artifact が外部 browser runtime を要求しない
 
-- **WHEN** KatanA release workflow が公開済み KRR version の platform runtime archive を取得する
-- **THEN** workflow は公開 checksum を検証してから helper と Chromium bundle を KatanA executable 隣接へ配置する
-- **THEN** `HtmlRuntime::open_packaged` は開発機の Chrome または Cargo build directory に依存せず packaged helper を起動する
+- **WHEN** KatanA release workflow が公開済み KRR version を解決する
+- **THEN** workflow は crates.io package と application dependency だけを検証し、browser bundle を取得または executable 隣接へ配置しない
+- **THEN** `HtmlRuntime::open` は開発機の Chrome、Keychain、Cargo build directory、external helper に依存しない
 
-#### Scenario: platform asset が欠損または改変されている
+#### Scenario: forbidden external browser asset が混入している
 
-- **WHEN** 4 platform の archive/checksum のいずれかが欠損する、checksum が一致しない、または同一 tag の既存 asset と新規 asset が異なる
-- **THEN** release workflow は crates.io publish または KatanA packaging より前に失敗する
-- **THEN** workflow は既存 asset を強制上書きしない
+- **WHEN** package、workflow、runtime configuration が Chromium/WebView/browser download/helper を参照する
+- **THEN** release workflow は publish または KatanA packaging より前に失敗する
+- **THEN** workflow は external browser asset を追加して問題を回避しない
 
 ### Requirement: KatanA は主文書を供給し、KRR は subresource と host capability を policy で制御しなければならない
 
-システムは、KatanA が local file または user-entered URL の主文書を取得し、raw HTML と完全な document URL origin を KDV 経由で KRR に供給しなければならない（MUST）。KRR は document URL origin を基準に許可された stylesheet、script、image などの subresource だけを browser page に解決しなければならない（MUST）。KDV はこの値を転送するだけとし、主文書を取得してはならない（MUST NOT）。KRR は network の許可外 origin、root 外 filesystem、subprocess、remote iframe を request policy で拒否しなければならない（MUST NOT）。
+システムは、KatanA が local file または user-entered URL の主文書を取得し、raw HTML と完全な document URL origin を KDV 経由で KRR に供給しなければならない（MUST）。KRR は document URL origin を基準に許可された stylesheet、script、image などの subresource だけを in-process runtime に解決しなければならない（MUST）。KDV はこの値を転送するだけとし、主文書を取得してはならない（MUST NOT）。KRR は network の許可外 origin、root 外 filesystem、subprocess、remote iframe を resource policy で拒否しなければならない（MUST NOT）。
 
 #### Scenario: local script と stylesheet を読み込む
 
 - **WHEN** KatanA が workspace 内 HTML を raw HTML と完全な file document URL origin として供給し、relative local stylesheet と script を参照する
-- **THEN** KRR browser page はそれらを評価して frame を更新する
+- **THEN** KRR runtime はそれらを評価して frame を更新する
 
 #### Scenario: workspace 外 resource を参照する
 
@@ -71,6 +71,6 @@
 
 #### Scenario: new tab が許可外 origin を参照する
 
-- **WHEN** browser page の user action が許可外 origin を指す new tab/window を生成する
-- **THEN** KRR は browser-level auto-attach で新規 page target を main request より前に停止し、その target を閉じる
-- **THEN** 許可外 origin の server には main-document request が到達しない
+- **WHEN** runtime の user action が許可外 origin を指す navigation/new-window request を生成する
+- **THEN** KRR は request policy でそれを拒否し、navigation event を返さない
+- **THEN** 許可外 origin の resource を取得しない

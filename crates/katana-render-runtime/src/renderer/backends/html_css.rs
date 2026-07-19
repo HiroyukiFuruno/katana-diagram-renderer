@@ -1,19 +1,44 @@
 use super::html_css_rule::{CssDeclaration, CssRule, parse_rules};
-use markup5ever_rcdom::{Handle, NodeData};
+use super::html_css_sources::{inline_styles, interactive_styles};
+use markup5ever_rcdom::Handle;
+use std::collections::HashMap;
 
 pub(super) type HtmlAttributes = Vec<(String, String)>;
 
 #[derive(Debug, Default)]
 pub(super) struct StaticCss {
     rules: Vec<CssRule>,
+    mode: CssResolutionMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum CssResolutionMode {
+    #[default]
+    StaticSnapshot,
+    InteractiveRuntime,
 }
 
 impl StaticCss {
     pub(super) fn from_document(document: &Handle) -> Self {
-        let mut source = String::new();
-        collect_style_blocks(document, &mut source);
+        Self::with_mode(document, CssResolutionMode::StaticSnapshot)
+    }
+
+    pub(super) fn for_interactive_document_with_styles(
+        document: &Handle,
+        external_stylesheets: &HashMap<String, String>,
+    ) -> Self {
+        let source = interactive_styles(document, external_stylesheets);
         Self {
             rules: parse_rules(&source),
+            mode: CssResolutionMode::InteractiveRuntime,
+        }
+    }
+
+    fn with_mode(document: &Handle, mode: CssResolutionMode) -> Self {
+        let source = inline_styles(document);
+        Self {
+            rules: parse_rules(&source),
+            mode,
         }
     }
 
@@ -39,10 +64,19 @@ impl StaticCss {
     fn resolved_declarations(&self, tag: &str, attributes: &HtmlAttributes) -> Vec<String> {
         let mut selected = Vec::<SelectedDeclaration>::new();
         for (rule_order, rule) in self.rules.iter().enumerate() {
-            let Some(specificity) = rule.matches(tag, attributes) else {
+            let matches = match self.mode {
+                CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
+                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes),
+            };
+            let Some(specificity) = matches else {
                 continue;
             };
             for declaration in &rule.declarations {
+                if self.mode == CssResolutionMode::StaticSnapshot
+                    && !static_snapshot_property(&declaration.name)
+                {
+                    continue;
+                }
                 select_declaration(&mut selected, declaration, specificity, rule_order);
             }
         }
@@ -53,41 +87,28 @@ impl StaticCss {
     }
 }
 
+fn static_snapshot_property(name: &str) -> bool {
+    matches!(
+        name,
+        "background"
+            | "background-color"
+            | "color"
+            | "font-family"
+            | "font-style"
+            | "font-weight"
+            | "font-size"
+            | "line-height"
+            | "text-align"
+            | "text-decoration"
+    )
+}
+
 #[derive(Debug)]
 struct SelectedDeclaration {
     name: String,
     value: String,
     specificity: u16,
     rule_order: usize,
-}
-
-fn collect_style_blocks(node: &Handle, source: &mut String) {
-    if element_name(node).is_some_and(|name| name == "style") {
-        source.push_str(&text_content(node));
-        source.push('\n');
-        return;
-    }
-    for child in node.children.borrow().iter() {
-        collect_style_blocks(child, source);
-    }
-}
-
-fn element_name(node: &Handle) -> Option<String> {
-    match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.to_string().to_ascii_lowercase()),
-        _ => None,
-    }
-}
-
-fn text_content(node: &Handle) -> String {
-    let own = match &node.data {
-        NodeData::Text { contents } => contents.borrow().to_string(),
-        _ => String::new(),
-    };
-    node.children.borrow().iter().fold(own, |mut text, child| {
-        text.push_str(&text_content(child));
-        text
-    })
 }
 
 fn style_attribute(attributes: &HtmlAttributes) -> String {

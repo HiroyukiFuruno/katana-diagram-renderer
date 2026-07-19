@@ -106,14 +106,26 @@ fn evaluates_create_element_and_append_child_bridge() -> TestResult {
 }
 
 #[test]
+fn evaluates_attribute_removal_and_style_mutation_bridge() -> TestResult {
+    let output = render(
+        "<p id=target data-state=ready style=\"color: red\">Initial</p><script>const target = document.getElementById('target'); target.removeAttribute('data-state'); target.style.backgroundColor = '#bbf7d0'; target.style.color = 'green'; target.textContent = target.style.color;</script>",
+    )?;
+
+    assert!(!output.contains("data-state"), "{output}");
+    assert!(output.contains("background-color: #bbf7d0"), "{output}");
+    assert!(output.contains(">green</p>"), "{output}");
+    Ok(())
+}
+
+#[test]
 fn rejects_unsupported_event_listener_contracts() {
     assert!(matches!(
         render("<button id=action>Run</button><script>document.getElementById('action').addEventListener('mouseover', () => {});</script>"),
-        Err(message) if message.contains("Only click event listeners are supported")
+        Err(message) if message.contains("Unsupported event listener")
     ));
     assert!(matches!(
         render("<button id=action>Run</button><script>document.getElementById('action').addEventListener('click', 'not a function');</script>"),
-        Err(message) if message.contains("Only click event listeners are supported")
+        Err(message) if message.contains("Unsupported event listener")
     ));
 }
 

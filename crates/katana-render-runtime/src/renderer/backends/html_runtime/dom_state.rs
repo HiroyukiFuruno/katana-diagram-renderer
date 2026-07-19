@@ -1,13 +1,16 @@
 use super::super::html_document::HtmlDocument;
 use super::style::{kebab_case, property as style_property, set_property as set_style_property};
-use super::types::DomValue;
+use super::types::{DomValue, HtmlRuntimeEventKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+type HtmlListenerKey = (u64, HtmlRuntimeEventKind);
+type HtmlEventListeners = HashMap<HtmlListenerKey, Vec<v8::Global<v8::Function>>>;
 
 pub(super) struct HtmlDomBridgeState {
     pub(super) document: RefCell<HtmlDocument>,
     pub(super) error: RefCell<Option<String>>,
-    click_listeners: RefCell<HashMap<u64, Vec<v8::Global<v8::Function>>>>,
+    listeners: RefCell<HtmlEventListeners>,
 }
 
 impl HtmlDomBridgeState {
@@ -15,7 +18,7 @@ impl HtmlDomBridgeState {
         Self {
             document: RefCell::new(document),
             error: RefCell::new(None),
-            click_listeners: RefCell::new(HashMap::new()),
+            listeners: RefCell::new(HashMap::new()),
         }
     }
 
@@ -29,7 +32,7 @@ impl HtmlDomBridgeState {
             | "getAttribute" => self.lookup(operation, arguments),
             "appendChild" | "remove" => self.mutate_tree(operation, arguments),
             "setTextContent" | "setInnerHTML" => self.mutate_content(operation, arguments),
-            "setAttribute" => self.set_attribute(arguments),
+            "setAttribute" | "removeAttribute" => self.set_attribute(operation, arguments),
             "styleGet" | "styleSet" => self.style(operation, arguments),
             _ => Err(format!("unsupported DOM operation: {operation}")),
         }
@@ -92,12 +95,18 @@ impl HtmlDomBridgeState {
         Ok(DomValue::Undefined)
     }
 
-    fn set_attribute(&self, arguments: &[String]) -> Result<DomValue, String> {
-        self.document.borrow_mut().set_attribute(
-            node_id(argument(arguments, 0)?)?,
-            argument(arguments, 1)?,
-            argument(arguments, 2)?,
-        )?;
+    fn set_attribute(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
+        let node_id = node_id(argument(arguments, 0)?)?;
+        let name = argument(arguments, 1)?;
+        match operation {
+            "setAttribute" => {
+                self.document
+                    .borrow_mut()
+                    .set_attribute(node_id, name, argument(arguments, 2)?)?
+            }
+            "removeAttribute" => self.document.borrow_mut().remove_attribute(node_id, name)?,
+            _ => return Err(format!("unsupported HTML attribute operation: {operation}")),
+        }
         Ok(DomValue::Undefined)
     }
 
@@ -128,17 +137,25 @@ impl HtmlDomBridgeState {
         }
     }
 
-    pub(super) fn add_click_listener(&self, node_id: u64, listener: v8::Global<v8::Function>) {
-        self.click_listeners
+    pub(super) fn add_listener(
+        &self,
+        node_id: u64,
+        event: HtmlRuntimeEventKind,
+        listener: v8::Global<v8::Function>,
+    ) {
+        self.listeners
             .borrow_mut()
-            .entry(node_id)
+            .entry((node_id, event))
             .or_default()
             .push(listener);
     }
 
-    #[cfg(test)]
-    pub(super) fn click_listeners(&self, node_id: u64) -> Vec<v8::Global<v8::Function>> {
-        match self.click_listeners.borrow().get(&node_id) {
+    pub(super) fn listeners(
+        &self,
+        node_id: u64,
+        event: HtmlRuntimeEventKind,
+    ) -> Vec<v8::Global<v8::Function>> {
+        match self.listeners.borrow().get(&(node_id, event)) {
             Some(listeners) => listeners.clone(),
             None => Vec::new(),
         }
@@ -179,5 +196,10 @@ mod tests {
                 .is_err()
         );
         assert!(state.style("unsupported", &[]).is_err());
+        assert!(
+            state
+                .set_attribute("unsupported", &["1".to_string(), "state".to_string()])
+                .is_err()
+        );
     }
 }

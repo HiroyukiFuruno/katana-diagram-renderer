@@ -40,5 +40,3 @@ html5ever = "0.39"
 markup5ever_rcdom = "0.39"
 xmltree = "0.12"
 percent-encoding = "2.3"
-headless_chrome = "1.0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }

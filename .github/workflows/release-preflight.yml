@@ -34,8 +34,6 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
-  KRR_CHROMIUM_NO_SANDBOX: "1"
-  KRR_HTML_CHROMIUM_TRACE: "1"
   TEST_THREADS: "1"
 
 jobs:
@@ -110,12 +108,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: just VERSION="${{ steps.version.outputs.version }}" release-target-check
-
-      - name: Enable Chromium user namespace sandbox
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
-        run: |
-          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "0"
 
       - name: Release check
         if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')

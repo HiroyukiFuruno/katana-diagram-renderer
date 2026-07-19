@@ -60,8 +60,6 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
-  KRR_CHROMIUM_NO_SANDBOX: "1"
-  KRR_HTML_CHROMIUM_TRACE: "1"
   TEST_THREADS: "1"
 
 jobs:
@@ -166,15 +164,6 @@ jobs:
       - name: Install PlantUML runtime
         run: just plantuml-install
 
-      - name: Install Chromium browser runtime
-        run: just chromium-install
-
-      - name: Enable Chromium user namespace sandbox on Ubuntu
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "0"
-
       - name: Run tests
         timeout-minutes: 45
         run: just unit-test
@@ -235,11 +224,3 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace || true
           rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental
-
-      - name: Package Chromium release runtime
-        shell: bash
-        run: |
-          just chromium-runtime-package
-          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-          extension="$([[ '${{ matrix.platform }}' == 'win64' ]] && echo zip || echo tar.gz)"
-          test -f "tmp/chromium-release-assets/krr-html-browser-runtime-v${version}-${{ matrix.platform }}.${extension}.sha256"

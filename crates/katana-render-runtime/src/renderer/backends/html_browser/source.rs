@@ -6,7 +6,7 @@ pub const HTML_BROWSER_MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct HtmlBrowserOrigin(String);
+pub struct HtmlBrowserOrigin(Url);
 
 impl HtmlBrowserOrigin {
     pub fn parse(value: impl Into<String>) -> Result<Self, HtmlBrowserError> {
@@ -19,11 +19,19 @@ impl HtmlBrowserOrigin {
             "http" | "https" if parsed.host_str().is_some() => {}
             _ => return Err(HtmlBrowserError::UnsupportedOriginScheme { origin: value }),
         }
-        Ok(Self(parsed.into()))
+        Ok(Self(parsed))
     }
 
     pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub(in crate::renderer::backends) fn url(&self) -> &Url {
         &self.0
+    }
+
+    pub(in crate::renderer::backends) fn from_validated_url(url: Url) -> Self {
+        Self(url)
     }
 }
 

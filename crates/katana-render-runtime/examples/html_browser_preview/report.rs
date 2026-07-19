@@ -24,13 +24,12 @@ const REPORT_TEMPLATE: &str = r#"<!doctype html>
 </style>
 <main>
 <h1>KRR HTML browser preview</h1>
-<p>This PNG was rendered by the KRR Chromium browser session.</p>
+<p>This PNG was rendered by the KRR in-process Rust/V8 HTML session.</p>
 <dl>
 <dt>Origin</dt><dd>{{ORIGIN}}</dd>
 <dt>Viewport</dt><dd>{{WIDTH}} x {{HEIGHT}} @ {{SCALE}}</dd>
 <dt>Frame generation</dt><dd>{{GENERATION}}</dd>
 <dt>Input</dt><dd>{{INPUT}}</dd>
-<dt>Helper</dt><dd>{{HELPER}}</dd>
 <dt>Link navigation probe</dt><dd>{{NAVIGATION}}</dd>
 </dl>
 <h2>Rendered PNG captures</h2>
@@ -110,10 +109,6 @@ fn report_values(
         ("{{SCALE}}", frame.viewport.device_scale_factor.to_string()),
         ("{{GENERATION}}", frame.generation.to_string()),
         ("{{INPUT}}", escape_html(&args.input.display().to_string())),
-        (
-            "{{HELPER}}",
-            escape_html(&args.helper.display().to_string()),
-        ),
         (
             "{{NAVIGATION}}",
             escape_html(navigation_url.unwrap_or("no navigation event captured")),

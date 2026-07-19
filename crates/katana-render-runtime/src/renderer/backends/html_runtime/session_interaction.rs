@@ -1,18 +1,22 @@
 use super::super::dom_state::HtmlDomBridgeState;
 use super::super::execution::ExecutionBudget;
 use super::super::interaction::{
-    click_event, element_reference, event_default_prevented, run_inline_click_handler,
+    element_reference, event, event_default_prevented, run_inline_handler,
 };
 use super::super::script::{
     HtmlTryCatchScope, check_bridge_error, dom_state_unavailable_error, exception_message,
     perform_microtask_checkpoint,
 };
+#[cfg(test)]
+use super::super::types::HtmlNodeId;
 use super::super::types::{
-    HtmlNavigationIntent, HtmlNodeId, HtmlRuntimeDispatch, HtmlRuntimeError, HtmlRuntimeEvent,
+    HtmlNavigationIntent, HtmlRuntimeDispatch, HtmlRuntimeError, HtmlRuntimeEvent,
+    HtmlRuntimeEventKind,
 };
 use super::{StaticHtmlRuntimeSession, discarded_runtime_error};
 
 impl StaticHtmlRuntimeSession {
+    #[cfg(test)]
     pub(crate) fn node_for_element_id(&mut self, id: &str) -> Option<HtmlNodeId> {
         self.isolate
             .as_mut()?
@@ -27,20 +31,19 @@ impl StaticHtmlRuntimeSession {
         &mut self,
         event: HtmlRuntimeEvent,
     ) -> Result<HtmlRuntimeDispatch, HtmlRuntimeError> {
-        match event {
-            HtmlRuntimeEvent::Click { target } => self.click(target),
-        }
-    }
-
-    fn click(&mut self, node_id: HtmlNodeId) -> Result<HtmlRuntimeDispatch, HtmlRuntimeError> {
-        let result = self.run_click(node_id);
+        let result = self.run_event(event);
         if matches!(result, Err(HtmlRuntimeError::ExecutionTimeout)) {
             self.discard();
         }
         result
     }
 
-    fn run_click(&mut self, node_id: HtmlNodeId) -> Result<HtmlRuntimeDispatch, HtmlRuntimeError> {
+    fn run_event(
+        &mut self,
+        event: HtmlRuntimeEvent,
+    ) -> Result<HtmlRuntimeDispatch, HtmlRuntimeError> {
+        let kind = event.kind();
+        let target = event.target();
         let navigation = {
             let isolate = self.isolate.as_mut().ok_or_else(discarded_runtime_error)?;
             let context = self.context.as_ref().ok_or_else(discarded_runtime_error)?;
@@ -48,7 +51,7 @@ impl StaticHtmlRuntimeSession {
             let context = v8::Local::new(handle_scope, context);
             let context_scope = &mut v8::ContextScope::new(handle_scope, context);
             v8::tc_scope!(let scope, &mut **context_scope);
-            dispatch_click(scope, node_id.0)?
+            dispatch_event(scope, target.0, kind)?
         };
         Ok(HtmlRuntimeDispatch {
             content: self.snapshot()?,
@@ -62,27 +65,33 @@ impl StaticHtmlRuntimeSession {
     }
 }
 
-fn dispatch_click(
+fn dispatch_event(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
     node_id: u64,
+    kind: HtmlRuntimeEventKind,
 ) -> Result<Option<HtmlNavigationIntent>, HtmlRuntimeError> {
     let target = element_reference(scope, node_id)?;
-    let event = click_event(scope, target)?;
-    dispatch_registered_listeners(scope, node_id, target, event)?;
-    dispatch_inline_handler(scope, node_id, target, event)?;
-    navigation_intent(scope, node_id, event)
+    let event = event(scope, target, kind.as_str())?;
+    dispatch_registered_listeners(scope, node_id, kind, target, event)?;
+    dispatch_inline_handler(scope, node_id, kind, target, event)?;
+    if kind == HtmlRuntimeEventKind::Click {
+        navigation_intent(scope, node_id, event)
+    } else {
+        Ok(None)
+    }
 }
 
 fn dispatch_registered_listeners(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
     node_id: u64,
+    kind: HtmlRuntimeEventKind,
     target: v8::Local<v8::Object>,
     event: v8::Local<v8::Object>,
 ) -> Result<(), HtmlRuntimeError> {
     let listeners = scope
         .get_slot::<HtmlDomBridgeState>()
         .ok_or_else(dom_state_unavailable_error)?
-        .click_listeners(node_id);
+        .listeners(node_id, kind);
     for listener in listeners {
         let listener = v8::Local::new(scope, listener);
         let budget = ExecutionBudget::start(scope);
@@ -100,9 +109,11 @@ fn dispatch_registered_listeners(
 fn dispatch_inline_handler(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
     node_id: u64,
+    kind: HtmlRuntimeEventKind,
     target: v8::Local<v8::Object>,
     event: v8::Local<v8::Object>,
 ) -> Result<(), HtmlRuntimeError> {
+    let attribute = format!("on{}", kind.as_str());
     let handler = {
         let state = scope
             .get_slot::<HtmlDomBridgeState>()
@@ -110,11 +121,11 @@ fn dispatch_inline_handler(
         state
             .document
             .borrow()
-            .attribute(node_id, "onclick")
+            .attribute(node_id, &attribute)
             .map_err(HtmlRuntimeError::DomBridge)?
     };
     if let Some(handler) = handler {
-        run_inline_click_handler(scope, &handler, target, event)?;
+        run_inline_handler(scope, &handler, target, event)?;
         check_bridge_error(scope)?;
     }
     Ok(())

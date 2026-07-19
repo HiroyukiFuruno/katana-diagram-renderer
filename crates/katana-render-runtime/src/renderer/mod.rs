@@ -12,11 +12,9 @@ pub use api::{
     RendererProfile, RuntimeVersion,
 };
 pub use backends::{
-    DrawioRenderer, HTML_BROWSER_MAX_SOURCE_BYTES, HTML_BROWSER_PROTOCOL_VERSION,
-    HtmlBrowserCommand, HtmlBrowserEngineErrorCode, HtmlBrowserError, HtmlBrowserFrame,
+    DrawioRenderer, HTML_BROWSER_MAX_SOURCE_BYTES, HtmlBrowserError, HtmlBrowserFrame,
     HtmlBrowserInput, HtmlBrowserNavigation, HtmlBrowserNavigationEvent, HtmlBrowserOrigin,
-    HtmlBrowserPixelFormat, HtmlBrowserProcess, HtmlBrowserProcessConfig, HtmlBrowserRequest,
-    HtmlBrowserResponse, HtmlBrowserSession, HtmlBrowserSessionState, HtmlBrowserSource,
+    HtmlBrowserPixelFormat, HtmlBrowserSession, HtmlBrowserSessionState, HtmlBrowserSource,
     HtmlBrowserViewport, HtmlRenderInput, HtmlRenderOutput, HtmlRenderer, HtmlRuntime,
     HtmlRuntimeError, HtmlRuntimeSession, MathJaxRenderer, MermaidRenderer, PlantUmlRenderer,
 };

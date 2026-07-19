@@ -5,6 +5,7 @@ use super::types::HtmlRuntimeError;
 
 pub(super) const DOM_BOOTSTRAP: &str = r#"
 const __krrNativeDom = globalThis.__krr_dom;
+const __krrDatasetAttribute = (property) => `data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 const __krrElement = (nodeId) => {
   if (nodeId === null || nodeId === undefined || nodeId === '') return null;
   const element = Object.create(__krrElementPrototype);
@@ -20,6 +21,20 @@ const __krrElementPrototype = {
   set className(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'class', String(value)); },
   get id() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'id') || ''; },
   set id(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'id', String(value)); },
+  get value() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'value') || ''; },
+  set value(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'value', String(value)); },
+  get open() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'open') !== null; },
+  set open(value) {
+    if (value) __krrNativeDom('setAttribute', this.__krrNodeId, 'open', '');
+    else __krrNativeDom('removeAttribute', this.__krrNodeId, 'open');
+  },
+  get dataset() {
+    const nodeId = this.__krrNodeId;
+    return new Proxy({}, {
+      get(_target, property) { return __krrNativeDom('getAttribute', nodeId, __krrDatasetAttribute(property)) || undefined; },
+      set(_target, property, value) { __krrNativeDom('setAttribute', nodeId, __krrDatasetAttribute(property), String(value)); return true; },
+    });
+  },
   get style() {
     const nodeId = this.__krrNodeId;
     return new Proxy({}, {
@@ -29,10 +44,11 @@ const __krrElementPrototype = {
   },
   getAttribute(name) { return __krrNativeDom('getAttribute', this.__krrNodeId, String(name)); },
   setAttribute(name, value) { __krrNativeDom('setAttribute', this.__krrNodeId, String(name), String(value)); },
+  removeAttribute(name) { __krrNativeDom('removeAttribute', this.__krrNodeId, String(name)); },
   appendChild(child) { __krrNativeDom('appendChild', this.__krrNodeId, child.__krrNodeId); return child; },
   remove() { __krrNativeDom('remove', this.__krrNodeId); },
   addEventListener(type, listener) {
-    if (type !== 'click' || typeof listener !== 'function') throw new TypeError('Only click event listeners are supported');
+    if (!['click', 'input', 'toggle'].includes(type) || typeof listener !== 'function') throw new TypeError('Unsupported event listener');
     __krrNativeDom('addEventListener', this.__krrNodeId, type, listener);
   },
 };
@@ -40,6 +56,7 @@ globalThis.document = {
   getElementById(id) { return __krrElement(__krrNativeDom('getElementById', String(id))); },
   querySelector(selector) { return __krrElement(__krrNativeDom('querySelector', String(selector))); },
   createElement(tag) { return __krrElement(__krrNativeDom('createElement', String(tag))); },
+  get body() { return __krrElement(__krrNativeDom('querySelector', 'body')); },
 };
 globalThis.window = globalThis;
 "#;

@@ -26,6 +26,12 @@ fn source_origin_and_size_validation_are_strict() {
 }
 
 #[test]
+fn serialized_origins_keep_url_validation() {
+    let origin: Result<HtmlBrowserOrigin, _> = serde_json::from_str("\"not a url\"");
+    assert!(origin.is_err());
+}
+
+#[test]
 fn viewport_validation_rejects_invalid_numbers() {
     assert!(matches!(
         HtmlBrowserViewport::new(0, 1, 1.0),
@@ -115,6 +121,13 @@ fn navigation_validates_source_and_target_urls() -> Result<(), String> {
     assert!(matches!(
         HtmlBrowserNavigationEvent::new("mailto:user@example.test"),
         Err(HtmlBrowserError::UnsupportedOriginScheme { .. })
+    ));
+    let mut invalid = HtmlBrowserSource::new("<p>ok</p>", "https://example.test/")
+        .map_err(|error| error.to_string())?;
+    invalid.raw_html = "x".repeat(HTML_BROWSER_MAX_SOURCE_BYTES + 1);
+    assert!(matches!(
+        HtmlBrowserNavigation::new(invalid),
+        Err(HtmlBrowserError::SourceTooLarge { .. })
     ));
     Ok(())
 }

@@ -1,13 +1,11 @@
 use katana_render_runtime::{
     DiagramKind, DrawioRenderer, HtmlBrowserError, HtmlBrowserFrame, HtmlBrowserInput,
-    HtmlBrowserNavigation, HtmlBrowserProcessConfig, HtmlBrowserSession, HtmlRenderInput,
-    HtmlRenderer, MermaidRenderer, RenderConfig, RenderContext, RenderDiagnostics, RenderError,
-    RenderInput, RenderOutput, RenderPolicy, Renderer, RendererProfile, RuntimeVersion,
+    HtmlBrowserNavigation, HtmlRenderInput, HtmlRenderer, MermaidRenderer, RenderConfig,
+    RenderContext, RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy,
+    Renderer, RendererProfile, RuntimeVersion,
 };
-#[cfg(unix)]
 use katana_render_runtime::{
-    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport,
-    HtmlRuntime,
+    HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport, HtmlRuntime,
 };
 use std::path::PathBuf;
 
@@ -59,12 +57,12 @@ fn renderer_rejects_mismatched_diagram_kind_without_fallback()
 
 #[test]
 fn html_browser_contract_can_cross_the_kdv_worker_boundary() {
-    assert_send::<HtmlBrowserSession>();
+    assert_send::<HtmlBrowserSource>();
+    assert_send::<HtmlBrowserViewport>();
     assert_send::<HtmlBrowserInput>();
     assert_send::<HtmlBrowserNavigation>();
     assert_send::<HtmlBrowserError>();
     assert_send_sync::<HtmlBrowserFrame>();
-    assert_send_sync::<HtmlBrowserProcessConfig>();
 }
 
 fn assert_send<T: Send>() {}
@@ -176,10 +174,9 @@ fn html_renderer_static_export_contract_remains_separate() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
 fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = HtmlRuntime.open(browser_source()?, viewport()?, &shell_config())?;
+    let mut session = HtmlRuntime.open(browser_source()?, viewport()?)?;
 
     assert_eq!(session.state(), HtmlBrowserSessionState::Active);
     assert_eq!(
@@ -191,9 +188,7 @@ fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn s
         Some(1)
     );
 
-    session.dispatch_input(HtmlBrowserInput::Text {
-        text: "typed".to_string(),
-    })?;
+    session.refresh_frame()?;
     assert_eq!(
         session.take_frame_update().map(|frame| frame.generation),
         Some(2)
@@ -202,14 +197,6 @@ fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[cfg(unix)]
-fn shell_config() -> HtmlBrowserProcessConfig {
-    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"));
-    config.args = vec!["-c".to_string(), browser_session_script()];
-    config
-}
-
-#[cfg(unix)]
 fn browser_source() -> Result<HtmlBrowserSource, Box<dyn std::error::Error>> {
     Ok(HtmlBrowserSource::new(
         "<button id=action>Run</button>",
@@ -217,24 +204,6 @@ fn browser_source() -> Result<HtmlBrowserSource, Box<dyn std::error::Error>> {
     )?)
 }
 
-#[cfg(unix)]
 fn viewport() -> Result<HtmlBrowserViewport, Box<dyn std::error::Error>> {
-    Ok(HtmlBrowserViewport::new(2, 2, 1.0)?)
-}
-
-#[cfg(unix)]
-fn browser_session_script() -> String {
-    format!(
-        r#"count=0
-while IFS= read -r request; do
-  case "$request" in
-    *'"command":"close"'*)
-      printf '%s\n' '{{"result":"closed","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION}}}'
-      exit 0
-      ;;
-  esac
-  count=$((count + 1))
-  printf '%s\n' '{{"result":"frame","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION},"frame":{{"generation":'"$count"',"origin":"https://example.test/index.html","viewport":{{"width":2,"height":2,"device_scale_factor":1.0}},"pixel_format":"Rgba8","pixels":[0,0,0,255,0,0,0,255,0,0,0,255,0,0,0,255]}}}}'
-done"#
-    )
+    Ok(HtmlBrowserViewport::new(160, 120, 1.0)?)
 }

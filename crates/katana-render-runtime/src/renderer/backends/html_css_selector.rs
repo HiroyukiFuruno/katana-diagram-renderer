@@ -39,31 +39,43 @@ impl CssSelector {
     }
 
     pub(super) fn matches(&self, tag: &str, attributes: &HtmlAttributes) -> bool {
-        self.inherited_from_body
-            || (self
+        (!self.inherited_from_body || tag.eq_ignore_ascii_case("body"))
+            && self
                 .tag
                 .as_ref()
                 .is_none_or(|name| name.eq_ignore_ascii_case(tag))
-                && self.class.as_ref().is_none_or(|class| {
-                    attribute_value(attributes, "class").is_some_and(|classes| {
-                        classes
-                            .split_whitespace()
-                            .any(|item| item.eq_ignore_ascii_case(class))
-                    })
+            && self.class.as_ref().is_none_or(|class| {
+                attribute_value(attributes, "class").is_some_and(|classes| {
+                    classes
+                        .split_whitespace()
+                        .any(|item| item.eq_ignore_ascii_case(class))
                 })
-                && self.id.as_ref().is_none_or(|id| {
-                    attribute_value(attributes, "id")
-                        .is_some_and(|value| value.eq_ignore_ascii_case(id))
-                }))
+            })
+            && self.id.as_ref().is_none_or(|id| {
+                attribute_value(attributes, "id")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(id))
+            })
+    }
+
+    pub(super) fn matches_static_snapshot(&self, tag: &str, attributes: &HtmlAttributes) -> bool {
+        self.inherited_from_body || self.matches(tag, attributes)
     }
 
     pub(super) fn specificity(&self) -> u16 {
         if self.inherited_from_body {
-            return 0;
+            return 1;
         }
         self.tag.iter().count() as u16
             + self.class.iter().count() as u16 * CLASS_SPECIFICITY
             + self.id.iter().count() as u16 * ID_SPECIFICITY
+    }
+
+    pub(super) fn static_snapshot_specificity(&self) -> u16 {
+        if self.inherited_from_body {
+            0
+        } else {
+            self.specificity()
+        }
     }
 }
 
@@ -122,10 +134,25 @@ mod tests {
     }
 
     #[test]
-    fn body_selector_has_zero_specificity() {
-        let specificity = CssSelector::parse("body").map(|selector| selector.specificity());
+    fn selector_parser_accepts_a_plain_tag() -> Result<(), String> {
+        let selector = CssSelector::parse("article").ok_or("tag selector must parse")?;
 
-        assert_eq!(specificity, Some(0));
+        assert!(selector.matches("article", &Vec::new()));
+        Ok(())
+    }
+
+    #[test]
+    fn body_selector_matches_only_the_body_in_interactive_runtime() -> Result<(), String> {
+        let specificity = CssSelector::parse("body").map(|selector| selector.specificity());
+        let selector = CssSelector::parse("body").ok_or("body selector must parse")?;
+        let attributes = Vec::new();
+
+        assert_eq!(specificity, Some(1));
+        assert!(selector.matches("body", &attributes));
+        assert!(!selector.matches("p", &attributes));
+        assert!(selector.matches_static_snapshot("p", &attributes));
+        assert_eq!(selector.static_snapshot_specificity(), 0);
+        Ok(())
     }
 
     #[test]

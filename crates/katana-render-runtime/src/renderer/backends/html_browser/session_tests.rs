@@ -1,154 +1,39 @@
 use super::*;
-use crate::{
-    HTML_BROWSER_PROTOCOL_VERSION, HtmlBrowserEngineErrorCode, HtmlBrowserPixelFormat,
-    HtmlBrowserResponse,
-};
-#[cfg(unix)]
-use std::path::PathBuf;
+use crate::{HTML_BROWSER_MAX_SOURCE_BYTES, HtmlBrowserOrigin};
 
 type TestResult<T = ()> = Result<T, String>;
+const TEST_VIEWPORT_WIDTH: u32 = 160;
+const TEST_VIEWPORT_HEIGHT: u32 = 120;
+const RESIZED_VIEWPORT_WIDTH: u32 = 240;
+const RESIZED_VIEWPORT_HEIGHT: u32 = 180;
+const TEST_POINTER_COORDINATE: f32 = 20.0;
 
 #[test]
-fn new_session_exposes_active_state_without_a_process() -> TestResult {
+fn session_starts_an_in_process_runtime_with_an_initial_frame() -> TestResult {
     let mut session =
         HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
             .map_err(|error| error.to_string())?;
 
-    assert_eq!(session.source().raw_html, "<p>ok</p>");
-    assert_eq!(session.viewport().width, 2);
     assert_eq!(session.state(), HtmlBrowserSessionState::Active);
-    assert!(!session.has_process());
-    assert!(session.latest_frame().is_none());
-    assert!(session.take_frame_update().is_none());
-    Ok(())
-}
-
-#[test]
-fn accept_frame_exposes_each_frame_update_once() -> TestResult {
-    let mut session =
-        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
-            .map_err(|error| error.to_string())?;
-
-    assert!(matches!(
-        session.accept_frame(test_frame("https://example.test/b.html", 1)?),
-        Err(HtmlBrowserError::FrameOriginMismatch { .. })
-    ));
-    session
-        .accept_frame(test_frame("https://example.test/a.html", 2)?)
-        .map_err(|error| error.to_string())?;
-    assert_eq!(
-        session.take_frame_update().map(|frame| frame.generation),
-        Some(2)
-    );
-    assert!(session.take_frame_update().is_none());
-    assert!(matches!(
-        session.accept_frame(test_frame("https://example.test/a.html", 2)?),
-        Err(HtmlBrowserError::StaleFrameGeneration {
-            latest: 2,
-            received: 2
-        })
-    ));
-    Ok(())
-}
-
-#[test]
-fn accept_response_records_navigation() -> TestResult {
-    let mut session =
-        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
-            .map_err(|error| error.to_string())?;
-    let navigation = HtmlBrowserNavigationEvent::new("https://example.test/b.html")
-        .map_err(|error| error.to_string())?;
-
-    session
-        .accept_response(HtmlBrowserResponse::Navigation {
-            protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
-            navigation,
-        })
-        .map_err(|error| error.to_string())?;
-    assert_eq!(
-        session
-            .take_navigation()
-            .map(|event| event.url.as_str().to_string()),
-        Some("https://example.test/b.html".to_string())
-    );
-    Ok(())
-}
-
-#[test]
-fn accept_response_rejects_closed_as_unexpected() -> TestResult {
-    let mut session =
-        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
-            .map_err(|error| error.to_string())?;
-
-    assert!(matches!(
-        session.accept_response(HtmlBrowserResponse::Closed {
-            protocol_version: HTML_BROWSER_PROTOCOL_VERSION
-        }),
-        Err(HtmlBrowserError::UnexpectedProcessResponse { .. })
-    ));
-    Ok(())
-}
-
-#[test]
-fn accept_response_rejects_engine_error() -> TestResult {
-    let mut session =
-        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
-            .map_err(|error| error.to_string())?;
-
-    assert!(matches!(
-        session.accept_response(HtmlBrowserResponse::Error {
-            protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
-            code: "chromium".to_string(),
-            message: "boom".to_string()
-        }),
-        Err(HtmlBrowserError::EngineRejected {
-            code: HtmlBrowserEngineErrorCode::Chromium,
-            ..
-        })
-    ));
-    Ok(())
-}
-
-#[test]
-fn accept_response_errors_do_not_republish_stale_frame_updates() -> TestResult {
-    let mut session =
-        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
-            .map_err(|error| error.to_string())?;
-    session
-        .accept_frame(test_frame("https://example.test/a.html", 1)?)
-        .map_err(|error| error.to_string())?;
-    assert!(session.take_frame_update().is_some());
-
-    let result = session.accept_response(HtmlBrowserResponse::Error {
-        protocol_version: HTML_BROWSER_PROTOCOL_VERSION,
-        code: "invalid_request".to_string(),
-        message: "bad input".to_string(),
-    });
-
-    assert!(matches!(
-        result,
-        Err(HtmlBrowserError::EngineRejected {
-            code: HtmlBrowserEngineErrorCode::InvalidRequest,
-            ..
-        })
-    ));
+    assert!(session.has_in_process_runtime());
     assert_eq!(
         session.latest_frame().map(|frame| frame.generation),
+        Some(1)
+    );
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.generation),
         Some(1)
     );
     assert!(session.take_frame_update().is_none());
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
-fn session_process_roundtrip_supports_navigation_resize_input_and_close() -> TestResult {
-    let mut session = HtmlBrowserSession::start(
-        test_source("https://example.test/a.html")?,
-        viewport()?,
-        &shell_config(&roundtrip_script()),
-    )
-    .map_err(|error| error.to_string())?;
+fn session_navigates_by_replacing_its_in_process_runtime() -> TestResult {
+    let mut session =
+        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
+            .map_err(|error| error.to_string())?;
+    let _ = session.take_frame_update();
 
     session
         .navigate(
@@ -156,103 +41,244 @@ fn session_process_roundtrip_supports_navigation_resize_input_and_close() -> Tes
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
-    session
-        .resize(viewport()?)
-        .map_err(|error| error.to_string())?;
-    session.refresh_frame().map_err(|error| error.to_string())?;
-    session
-        .dispatch_input(HtmlBrowserInput::Text {
-            text: "ok".to_string(),
-        })
-        .map_err(|error| error.to_string())?;
-    session.close().map_err(|error| error.to_string())?;
-    session.close().map_err(|error| error.to_string())?;
 
-    assert_eq!(session.state(), HtmlBrowserSessionState::Closed);
-    assert!(!session.has_process());
+    assert_eq!(
+        session.source().origin.as_str(),
+        "https://example.test/b.html"
+    );
+    assert_eq!(
+        session
+            .take_frame_update()
+            .map(|frame| frame.origin.as_str()),
+        Some("https://example.test/b.html")
+    );
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
-fn close_terminates_process_when_close_request_fails() -> TestResult {
-    let mut session = HtmlBrowserSession::start(
-        test_source("https://example.test/a.html")?,
+fn closed_session_rejects_runtime_operations() -> TestResult {
+    let mut session =
+        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
+            .map_err(|error| error.to_string())?;
+    session.close().map_err(|error| error.to_string())?;
+
+    assert_eq!(session.state(), HtmlBrowserSessionState::Closed);
+    assert!(!session.has_in_process_runtime());
+    assert_eq!(
+        session.refresh_frame(),
+        Err(HtmlBrowserError::SessionClosed)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_exposes_debug_refresh_resize_and_navigation_contracts() -> TestResult {
+    let mut session = HtmlBrowserSession::new(
+        test_source("https://example.test/docs/index.html")?,
         viewport()?,
-        &shell_config(&close_failure_script()),
     )
     .map_err(|error| error.to_string())?;
+    assert_session_identity(&session)?;
+    refresh_and_resize(&mut session)?;
+    dispatch_non_navigating_pointer(&mut session)?;
+    Ok(())
+}
 
+#[test]
+fn session_rejects_invalid_source_missing_runtime_and_invalid_frames() -> TestResult {
+    let mut session =
+        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
+            .map_err(|error| error.to_string())?;
+    assert_invalid_navigation_is_rejected(&mut session)?;
+    assert_frame_invariants(&mut session)?;
+    assert_missing_runtime_is_rejected(&mut session)?;
+    Ok(())
+}
+
+#[test]
+fn session_close_rejects_every_public_runtime_operation() -> TestResult {
+    let mut session =
+        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
+            .map_err(|error| error.to_string())?;
     session.close().map_err(|error| error.to_string())?;
-    assert_eq!(session.state(), HtmlBrowserSessionState::Closed);
-    assert!(!session.has_process());
+
+    assert_eq!(
+        session.navigate(
+            HtmlBrowserNavigation::new(test_source("https://example.test/b.html")?)
+                .map_err(|error| error.to_string())?,
+        ),
+        Err(HtmlBrowserError::SessionClosed)
+    );
+    assert_eq!(
+        session.resize(viewport()?),
+        Err(HtmlBrowserError::SessionClosed)
+    );
+    assert_eq!(
+        session.refresh_frame(),
+        Err(HtmlBrowserError::SessionClosed)
+    );
+    assert_eq!(
+        session.dispatch_input(HtmlBrowserInput::Focus { focused: true }),
+        Err(HtmlBrowserError::SessionClosed)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_reports_runtime_start_failure_during_navigation() -> TestResult {
+    let mut session =
+        HtmlBrowserSession::new(test_source("https://example.test/a.html")?, viewport()?)
+            .map_err(|error| error.to_string())?;
+    let source =
+        HtmlBrowserSource::new("<script>const = ;</script>", "https://example.test/b.html")
+            .map_err(|error| error.to_string())?;
+    let navigation = HtmlBrowserNavigation::new(source).map_err(|error| error.to_string())?;
+
+    assert!(matches!(
+        session.navigate(navigation),
+        Err(HtmlBrowserError::RuntimeFailure { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_forwards_runtime_navigation_once() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        "<a id=next href=linked.html>Next</a>",
+        "https://example.test/docs/index.html",
+    )
+    .map_err(|error| error.to_string())?;
+    let mut session =
+        HtmlBrowserSession::new(source, viewport()?).map_err(|error| error.to_string())?;
+    let (x, y) = (TEST_POINTER_COORDINATE, TEST_POINTER_COORDINATE);
+
+    session
+        .dispatch_input(HtmlBrowserInput::PointerDown { x, y, button: 0 })
+        .map_err(|error| error.to_string())?;
+    session
+        .dispatch_input(HtmlBrowserInput::PointerUp { x, y, button: 0 })
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        session
+            .take_navigation()
+            .map(|navigation| navigation.url.as_str().to_string()),
+        Some("https://example.test/docs/linked.html".to_string())
+    );
+    assert!(session.take_navigation().is_none());
+    Ok(())
+}
+
+fn assert_session_identity(session: &HtmlBrowserSession) -> TestResult {
+    let debug = format!("{session:?}");
+    assert!(debug.contains("HtmlBrowserSession"));
+    assert!(debug.contains("has_in_process_runtime: true"));
+    assert_eq!(
+        session.source().origin.as_str(),
+        "https://example.test/docs/index.html"
+    );
+    assert_eq!(session.viewport(), viewport()?);
+    Ok(())
+}
+
+fn refresh_and_resize(session: &mut HtmlBrowserSession) -> TestResult {
+    let initial = session
+        .latest_frame()
+        .map(|frame| frame.generation)
+        .ok_or_else(|| "initial frame must exist".to_string())?;
+    session.refresh_frame().map_err(|error| error.to_string())?;
+    assert!(
+        session
+            .take_frame_update()
+            .is_some_and(|frame| frame.generation > initial)
+    );
+    let resized = HtmlBrowserViewport::new(RESIZED_VIEWPORT_WIDTH, RESIZED_VIEWPORT_HEIGHT, 1.0)
+        .map_err(|error| error.to_string())?;
+    session.resize(resized).map_err(|error| error.to_string())?;
+    assert_eq!(session.viewport(), resized);
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.viewport),
+        Some(resized)
+    );
+    Ok(())
+}
+
+fn dispatch_non_navigating_pointer(session: &mut HtmlBrowserSession) -> TestResult {
+    for input in [
+        HtmlBrowserInput::PointerDown {
+            x: TEST_POINTER_COORDINATE,
+            y: TEST_POINTER_COORDINATE,
+            button: 0,
+        },
+        HtmlBrowserInput::PointerUp {
+            x: TEST_POINTER_COORDINATE,
+            y: TEST_POINTER_COORDINATE,
+            button: 0,
+        },
+    ] {
+        session
+            .dispatch_input(input)
+            .map_err(|error| error.to_string())?;
+    }
+    assert!(session.take_navigation().is_none());
+    Ok(())
+}
+
+fn assert_invalid_navigation_is_rejected(session: &mut HtmlBrowserSession) -> TestResult {
+    let mut invalid_source = test_source("https://example.test/b.html")?;
+    invalid_source.raw_html = "x".repeat(HTML_BROWSER_MAX_SOURCE_BYTES + 1);
+    assert!(matches!(
+        session.navigate(HtmlBrowserNavigation {
+            source: invalid_source
+        }),
+        Err(HtmlBrowserError::SourceTooLarge { .. })
+    ));
+    Ok(())
+}
+
+fn assert_frame_invariants(session: &mut HtmlBrowserSession) -> TestResult {
+    let latest = session
+        .latest_frame()
+        .cloned()
+        .ok_or_else(|| "initial frame must exist".to_string())?;
+    assert!(matches!(
+        session.accept_frame(latest.clone()),
+        Err(HtmlBrowserError::StaleFrameGeneration { .. })
+    ));
+    let mismatched = HtmlBrowserFrame::new(
+        latest.generation + 1,
+        HtmlBrowserOrigin::parse("https://other.test/index.html")
+            .map_err(|error| error.to_string())?,
+        latest.viewport,
+        latest.pixel_format,
+        latest.pixels,
+    )
+    .map_err(|error| error.to_string())?;
+    assert!(matches!(
+        session.accept_frame(mismatched),
+        Err(HtmlBrowserError::FrameOriginMismatch { .. })
+    ));
+    Ok(())
+}
+
+fn assert_missing_runtime_is_rejected(session: &mut HtmlBrowserSession) -> TestResult {
+    session.interactive = None;
+    assert_eq!(
+        session.refresh_frame(),
+        Err(HtmlBrowserError::RuntimeNotStarted)
+    );
+    assert_eq!(
+        session.resize(viewport()?),
+        Err(HtmlBrowserError::RuntimeNotStarted)
+    );
     Ok(())
 }
 
 fn test_source(origin: &str) -> TestResult<HtmlBrowserSource> {
-    HtmlBrowserSource::new("<p>ok</p>", origin).map_err(|error| error.to_string())
+    HtmlBrowserSource::new("<button id=action>Run</button>", origin)
+        .map_err(|error| error.to_string())
 }
 
 fn viewport() -> TestResult<HtmlBrowserViewport> {
-    HtmlBrowserViewport::new(2, 2, 1.0).map_err(|error| error.to_string())
-}
-
-fn test_frame(origin: &str, generation: u64) -> TestResult<HtmlBrowserFrame> {
-    HtmlBrowserFrame::new(
-        generation,
-        HtmlBrowserSource::new("", origin)
-            .map_err(|error| error.to_string())?
-            .origin,
-        viewport()?,
-        HtmlBrowserPixelFormat::Rgba8,
-        vec![0; 16],
-    )
-    .map_err(|error| error.to_string())
-}
-
-#[cfg(unix)]
-fn shell_config(script: &str) -> HtmlBrowserProcessConfig {
-    let mut config = HtmlBrowserProcessConfig::new(PathBuf::from("/bin/sh"));
-    config.args = vec!["-c".to_string(), script.to_string()];
-    config
-}
-
-#[cfg(unix)]
-fn roundtrip_script() -> String {
-    format!(
-        r#"count=0
-while IFS= read -r request; do
-  case "$request" in
-    *'"command":"close"'*)
-      printf '%s\n' '{{"result":"closed","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION}}}'
-      exit 0
-      ;;
-  esac
-  count=$((count + 1))
-  case "$count" in
-    1) origin='https://example.test/a.html' ;;
-    *) origin='https://example.test/b.html' ;;
-  esac
-  printf '%s\n' '{{"result":"frame","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION},"frame":{{"generation":'"$count"',"origin":"'"$origin"'","viewport":{{"width":2,"height":2,"device_scale_factor":1.0}},"pixel_format":"Rgba8","pixels":[0,0,0,255,0,0,0,255,0,0,0,255,0,0,0,255]}}}}'
-done"#
-    )
-}
-
-#[cfg(unix)]
-fn close_failure_script() -> String {
-    format!(
-        r#"count=0
-while IFS= read -r request; do
-  count=$((count + 1))
-  case "$count" in
-    1)
-      printf '%s\n' '{{"result":"frame","protocol_version":{HTML_BROWSER_PROTOCOL_VERSION},"frame":{{"generation":1,"origin":"https://example.test/a.html","viewport":{{"width":2,"height":2,"device_scale_factor":1.0}},"pixel_format":"Rgba8","pixels":[0,0,0,255,0,0,0,255,0,0,0,255,0,0,0,255]}}}}'
-      ;;
-    *)
-      printf '%s\n' 'not-json'
-      sleep 1
-      ;;
-  esac
-done"#
-    )
+    HtmlBrowserViewport::new(TEST_VIEWPORT_WIDTH, TEST_VIEWPORT_HEIGHT, 1.0)
+        .map_err(|error| error.to_string())
 }

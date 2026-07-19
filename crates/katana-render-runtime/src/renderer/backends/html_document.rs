@@ -1,18 +1,35 @@
-use super::html_dom_helpers::{
-    attribute_value, collect_scripts, detach, find_element, selector_matches, text_content,
-};
+use super::html_css::{HtmlAttributes, StaticCss};
+use super::html_dom_helpers::{attribute_value, collect_scripts, find_element, selector_matches};
 use super::html_snapshot::render_document;
-use html5ever::{Attribute, QualName, parse_document, tendril::TendrilSink};
-use markup5ever_rcdom::{Handle, Node, NodeData, RcDom};
+use html5ever::{Attribute, parse_document, tendril::TendrilSink};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[path = "html_document_mutation.rs"]
+mod mutation;
+
 /// Canonical HTML5 document state shared by CSS rendering and the V8 bridge.
 pub(super) struct HtmlDocument {
-    document: Handle,
+    pub(super) document: Handle,
     nodes: HashMap<u64, Handle>,
     node_ids: HashMap<usize, u64>,
     next_node_id: u64,
+}
+
+/// Dynamic DOM projection used only by KRR's interactive HTML runtime.
+///
+/// It deliberately retains node IDs so the runtime can perform hit-testing and
+/// dispatch input without exposing DOM details to KDV or KatanA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum HtmlDocumentNode {
+    Element {
+        node_id: u64,
+        tag: String,
+        attributes: HtmlAttributes,
+        children: Vec<HtmlDocumentNode>,
+    },
+    Text(String),
 }
 
 impl HtmlDocument {
@@ -30,6 +47,15 @@ impl HtmlDocument {
 
     pub(super) fn render(&self) -> String {
         render_document(&self.document)
+    }
+
+    pub(super) fn interactive_nodes_with_styles(
+        &self,
+        external_stylesheets: &HashMap<String, String>,
+    ) -> Vec<HtmlDocumentNode> {
+        let css =
+            StaticCss::for_interactive_document_with_styles(&self.document, external_stylesheets);
+        self.interactive_children(&self.document, &css)
     }
 
     pub(super) fn inline_scripts(&self) -> Result<Vec<String>, String> {
@@ -54,99 +80,6 @@ impl HtmlDocument {
             selector_matches(selector, tag, attributes)
         })?;
         Some(self.register_subtree(&handle))
-    }
-
-    pub(super) fn create_element(&mut self, tag: &str) -> Result<u64, String> {
-        let tag = tag.trim().to_ascii_lowercase();
-        if tag.is_empty()
-            || !tag
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric())
-        {
-            return Err(format!("unsupported element name: {tag}"));
-        }
-        let node = Node::new(NodeData::Element {
-            name: QualName::new(None, Default::default(), tag.into()),
-            attrs: Default::default(),
-            template_contents: Default::default(),
-            mathml_annotation_xml_integration_point: false,
-        });
-        Ok(self.register_subtree(&node))
-    }
-
-    pub(super) fn append_child(&mut self, parent_id: u64, child_id: u64) -> Result<(), String> {
-        let parent = self.node(parent_id)?;
-        let child = self.node(child_id)?;
-        if !matches!(parent.data, NodeData::Document | NodeData::Element { .. }) {
-            return Err("appendChild target is not a container".to_string());
-        }
-        detach(&child);
-        child.parent.set(Some(Rc::downgrade(&parent)));
-        parent.children.borrow_mut().push(child);
-        Ok(())
-    }
-
-    pub(super) fn remove(&mut self, node_id: u64) -> Result<(), String> {
-        let node = self.node(node_id)?;
-        detach(&node);
-        Ok(())
-    }
-
-    pub(super) fn text_content(&self, node_id: u64) -> Result<String, String> {
-        let node = self.node(node_id)?;
-        Ok(text_content(&node))
-    }
-
-    pub(super) fn set_text_content(&mut self, node_id: u64, value: &str) -> Result<(), String> {
-        let node = self.node(node_id)?;
-        let children = std::mem::take(&mut *node.children.borrow_mut());
-        for child in children {
-            child.parent.set(None);
-        }
-        let text = Node::new(NodeData::Text {
-            contents: std::cell::RefCell::new(value.into()),
-        });
-        text.parent.set(Some(Rc::downgrade(&node)));
-        node.children.borrow_mut().push(text.clone());
-        self.register_subtree(&text);
-        Ok(())
-    }
-
-    pub(super) fn attribute(&self, node_id: u64, name: &str) -> Result<Option<String>, String> {
-        let node = self.node(node_id)?;
-        let NodeData::Element { attrs, .. } = &node.data else {
-            return Err("attribute target is not an element".to_string());
-        };
-        Ok(attribute_value(&attrs.borrow(), name).map(ToOwned::to_owned))
-    }
-
-    pub(super) fn set_attribute(
-        &mut self,
-        node_id: u64,
-        name: &str,
-        value: &str,
-    ) -> Result<(), String> {
-        let node = self.node(node_id)?;
-        let NodeData::Element { attrs, .. } = &node.data else {
-            return Err("attribute target is not an element".to_string());
-        };
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() {
-            return Err("attribute name is empty".to_string());
-        }
-        let mut attrs = attrs.borrow_mut();
-        if let Some(attribute) = attrs
-            .iter_mut()
-            .find(|attribute| attribute.name.local.as_ref() == name)
-        {
-            attribute.value = value.into();
-        } else {
-            attrs.push(Attribute {
-                name: QualName::new(None, Default::default(), name.into()),
-                value: value.into(),
-            });
-        }
-        Ok(())
     }
 
     pub(super) fn node(&self, node_id: u64) -> Result<Handle, String> {
@@ -174,11 +107,75 @@ impl HtmlDocument {
         }
         node_id
     }
+
+    fn interactive_children(&self, node: &Handle, css: &StaticCss) -> Vec<HtmlDocumentNode> {
+        node.children
+            .borrow()
+            .iter()
+            .filter_map(|child| self.interactive_node(child, css))
+            .collect()
+    }
+
+    fn interactive_node(&self, node: &Handle, css: &StaticCss) -> Option<HtmlDocumentNode> {
+        match &node.data {
+            NodeData::Text { contents } => {
+                let text = contents.borrow().to_string();
+                (!text.is_empty()).then_some(HtmlDocumentNode::Text(text))
+            }
+            NodeData::Element { name, attrs, .. } => {
+                let tag = name.local.to_string().to_ascii_lowercase();
+                if is_non_rendered_tag(&tag) {
+                    return None;
+                }
+                let attributes = attributes(&attrs.borrow());
+                let attributes = css.apply(&tag, &attributes);
+                let pointer = Rc::as_ptr(node) as usize;
+                let node_id = self.node_ids.get(&pointer).copied()?;
+                Some(HtmlDocumentNode::Element {
+                    node_id,
+                    tag,
+                    attributes,
+                    children: self.interactive_children(node, css),
+                })
+            }
+            NodeData::Document => None,
+            _ => None,
+        }
+    }
+}
+
+fn attributes(source: &[Attribute]) -> HtmlAttributes {
+    source
+        .iter()
+        .map(|attribute| {
+            (
+                attribute.name.local.to_string().to_ascii_lowercase(),
+                attribute.value.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn is_non_rendered_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "head" | "iframe" | "link" | "meta" | "script" | "style" | "template" | "title"
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::HtmlDocument;
+    use super::{HtmlDocument, StaticCss};
+    use std::collections::HashMap;
+
+    #[test]
+    fn document_root_is_never_projected_as_an_interactive_node() {
+        let document = HtmlDocument::parse("<p>Visible</p>");
+        let css =
+            StaticCss::for_interactive_document_with_styles(&document.document, &HashMap::new());
+
+        assert_eq!(document.interactive_node(&document.document, &css), None);
+    }
 
     #[test]
     fn rejects_container_and_attribute_operations_on_text_nodes() {

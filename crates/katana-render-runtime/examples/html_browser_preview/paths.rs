@@ -32,20 +32,12 @@ impl PreviewPaths {
         Self::workspace_path(PREVIEW_REPORT)
     }
 
-    pub(crate) fn default_helper_path() -> AppResult<PathBuf> {
-        Self::workspace_path(Self::helper_relative_path())
-    }
-
     pub(crate) fn fallback_output_path() -> PathBuf {
         Self::fallback_workspace_path(PREVIEW_OUTPUT)
     }
 
     pub(crate) fn fallback_report_path() -> PathBuf {
         Self::fallback_workspace_path(PREVIEW_REPORT)
-    }
-
-    pub(crate) fn fallback_helper_path() -> PathBuf {
-        Self::fallback_workspace_path(Self::helper_relative_path())
     }
 
     fn package_root() -> PathBuf {
@@ -67,18 +59,4 @@ impl PreviewPaths {
     fn fallback_workspace_path(relative: impl AsRef<Path>) -> PathBuf {
         Self::workspace_path(relative.as_ref()).unwrap_or_else(|_| relative.as_ref().to_path_buf())
     }
-
-    fn helper_relative_path() -> PathBuf {
-        PathBuf::from(format!("target/debug/{}", helper_name()))
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn helper_name() -> &'static str {
-    "krr-html-chromium-engine.exe"
-}
-
-#[cfg(not(target_os = "windows"))]
-fn helper_name() -> &'static str {
-    "krr-html-chromium-engine"
 }

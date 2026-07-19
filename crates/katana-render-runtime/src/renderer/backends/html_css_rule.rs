@@ -15,6 +15,18 @@ impl CssRule {
             .map(CssSelector::specificity)
             .max()
     }
+
+    pub(super) fn matches_static_snapshot(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+    ) -> Option<u16> {
+        self.selectors
+            .iter()
+            .filter(|selector| selector.matches_static_snapshot(tag, attributes))
+            .map(CssSelector::static_snapshot_specificity)
+            .max()
+    }
 }
 
 #[derive(Debug)]
@@ -80,7 +92,53 @@ fn supported_property(name: &str) -> bool {
             | "font-family"
             | "font-style"
             | "font-weight"
+            | "font-size"
+            | "line-height"
             | "text-align"
             | "text-decoration"
+            | "border"
+            | "border-color"
+            | "padding"
+            | "margin"
+            | "margin-top"
+            | "margin-bottom"
+            | "width"
+            | "height"
+            | "min-height"
+            | "display"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_rules, supported_property};
+
+    #[test]
+    fn rules_keep_layout_declarations_for_the_interactive_runtime() {
+        let rules = parse_rules(
+            "main { margin: 24px; padding: 16px; width: 600px; min-height: 400px; font-size: 18px; }",
+        );
+
+        assert_eq!(rules.len(), 1);
+        let rule = &rules[0];
+        let declarations = rule
+            .declarations
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declarations,
+            vec!["margin", "padding", "width", "min-height", "font-size"]
+        );
+    }
+
+    #[test]
+    fn display_is_an_interactive_css_property_but_unknown_names_are_not() {
+        assert!(supported_property("display"));
+        assert!(!supported_property("position"));
+        let rules = parse_rules("p { display: none; position: fixed; }");
+
+        assert_eq!(rules[0].declarations.len(), 1);
+        assert_eq!(rules[0].declarations[0].name, "display");
+    }
 }
