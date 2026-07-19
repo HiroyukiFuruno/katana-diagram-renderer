@@ -24,12 +24,38 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_only_v0_4_0() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_allows_only_v0_4_1() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.0")?);
-    for version in ["0.3.9", "0.3.10", "0.4.1", "0.5.0", "1.0.0", "2.0.0"] {
+    assert!(release_target_check(root, "0.4.1")?);
+    for version in ["0.3.9", "0.4.0", "0.4.2", "0.5.0", "1.0.0", "2.0.0"] {
         assert!(!release_target_check(root, version)?);
     }
+    Ok(())
+}
+
+#[test]
+fn archive_gate_allows_only_an_explicitly_completed_krr_slice()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let fixture = temp_fixture_directory("archive-gate")?;
+    let active_change = fixture.join("openspec/changes/v0-4-0-cross-repo-runtime");
+    std::fs::create_dir_all(&active_change)?;
+
+    assert!(!archive_gate_passes(root, &fixture)?);
+
+    std::fs::write(
+        active_change.join("release-ownership.toml"),
+        "[krr]\ncompleted_release = \"0.3.9\"\n",
+    )?;
+    assert!(!archive_gate_passes(root, &fixture)?);
+
+    std::fs::write(
+        active_change.join("release-ownership.toml"),
+        "[krr]\ncompleted_release = \"0.4.0\"\n",
+    )?;
+    assert!(archive_gate_passes(root, &fixture)?);
+
+    std::fs::remove_dir_all(&fixture)?;
     Ok(())
 }
 
@@ -205,9 +231,30 @@ fn release_target_check(
             "--target-version",
             target_version,
             "--latest-version",
-            "0.3.8",
+            "0.4.0",
         ])
         .current_dir(root)
         .output()?;
     Ok(output.status.success())
+}
+
+fn archive_gate_passes(root: &Path, fixture: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let output = Command::new("bash")
+        .arg(root.join("scripts/release/check-openspec-release-archive.sh"))
+        .arg("0.4.1")
+        .current_dir(fixture)
+        .output()?;
+    Ok(output.status.success())
+}
+
+fn temp_fixture_directory(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let fixture = std::env::temp_dir().join(format!(
+        "katana-render-runtime-{prefix}-{}",
+        std::process::id()
+    ));
+    if fixture.exists() {
+        std::fs::remove_dir_all(&fixture)?;
+    }
+    std::fs::create_dir_all(&fixture)?;
+    Ok(fixture)
 }

@@ -1,6 +1,6 @@
 use super::{
-    RasterTarget, SvgRasterizeOps, bundled_font_db, effective_scale, parse_light_dark_function,
-    rasterizer_options, rasterizer_options_with_font_db,
+    RasterTarget, SvgRasterizeOps, bundled_font_db, effective_scale, font_db,
+    parse_light_dark_function, rasterizer_options, rasterizer_options_with_font_db,
 };
 use crate::markdown::color_preset::DiagramColorPreset;
 use crate::markdown::mermaid_renderer::MermaidRenderOps;
@@ -34,6 +34,11 @@ fn rasterize_svg_renders_text_with_the_bundled_font() -> Result<(), String> {
             .any(|pixel| pixel != [255, 255, 255, 255])
     );
     Ok(())
+}
+
+#[test]
+fn rasterizer_font_database_uses_only_the_bundled_font() {
+    assert_eq!(1, font_db().faces().count());
 }
 
 #[test]
