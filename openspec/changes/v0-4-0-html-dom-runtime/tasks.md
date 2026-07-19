@@ -34,8 +34,8 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   `http/https` document origins without giving KRR main-document acquisition.
 - [x] 1.6 Make every production line reachable through behavioral tests and pass
   `rtk just coverage` with `100% / 0 uncovered` without exclusions or ignores.
-- [/] 1.7 Release KRR `0.4.1` with deterministic bundled-font SVG rasterization.
-  Local quality and release gates are complete; publication verification remains.
+- [x] 1.7 Release and verify KRR `0.4.1` with deterministic bundled-font SVG
+  rasterization.
 
 ### 2. KDV Adapter
 
@@ -44,7 +44,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   typed error, and navigation without parsing HTML.
 - [x] 2.2 Add adapter contract tests for ordered input/frame/navigation lifecycle
   against KRR and pass KDV strict coverage and release checks.
-- [ ] 2.3 After KRR `0.4.0` publication, resolve only crates.io `^0.4.0`, release
+- [x] 2.3 After KRR `0.4.0` publication, resolve only crates.io `^0.4.0`, release
   KDV `0.3.0`, and prove the published artifact before KatanA registry use.
 
 ### 3. KatanA Integration
@@ -55,7 +55,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   reload or resize, preventing stale initial-document state from reappearing.
 - [x] 3.3 Exercise user-entered `http/https` main-document acquisition in an
   automated end-to-end scenario and retain the raw URL origin through reload.
-- [x] 3.4 Capture native-window evidence for CSS, accordion, button, input,
+- [x] 3.4 Capture headless-process evidence for CSS, accordion, button, input,
   local link navigation, reload, and resize using state-specific assertions.
 - [ ] 3.5 Run KatanA compile/unit/release contract gates with registry-only KDV
   after KDV publication; no path/git dependency may remain in committed files.
@@ -63,25 +63,23 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 ### 4. Release Order And User Review
 
 - [x] 4.1 Pass all KRR quality/release gates, publish and verify KRR `0.4.0`.
-- [ ] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
+- [x] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
 - [ ] 4.3 Resolve KDV `0.3.0` from crates.io in KatanA and rerun the complete
-  native acceptance matrix for release target `v0.22.33` only.
+  headless acceptance matrix for release target `v0.22.33` only.
 - [ ] 4.4 Present state-specific screenshots and automated evidence to the user.
   Until explicit approval: no KatanA commit, push, PR, publish, or release.
 
 ## Local Verification Evidence
 
-- KRR: `rtk just check`, strict `rtk just coverage`, the interactive preview
-  example, and `release-target-check` / `release-verify` for `0.4.0` passed.
+- KRR: KRR `0.4.1` is published and verified. Its `rtk just check`, strict
+  `rtk just coverage`, interactive preview example, and release gates passed.
   The raster path embeds Noto Sans with its SIL OFL 1.1 license, and a test
   rasterizes text with only that bundled font database so text frames cannot
   depend on a host or CI system font.
-- KDV: adapter contract integration, adapter 100% coverage, `rtk just check`,
-  `rtk just coverage`, and regenerated native Storybook acceptance artifacts
-  passed with the
-  temporary local patch used only for pre-publication integration. Its release
-  DoD correctly remains blocked on tracked source and refreshed human review.
-- KatanA: native-window acceptance captured CSS, accordion, JavaScript action,
+- KDV: KDV `0.3.0` is published and verified. Adapter contract integration,
+  adapter 100% coverage, `rtk just check`, and `rtk just coverage` passed with
+  crates.io KRR resolution.
+- KatanA: headless acceptance captured CSS, accordion, JavaScript action,
   text input, local navigation, reload, and resize. Registry-only preflight
   correctly remains blocked until KRR and KDV are published. The optimized
   KatanA binary reproduced the same initial, button-action, and navigation

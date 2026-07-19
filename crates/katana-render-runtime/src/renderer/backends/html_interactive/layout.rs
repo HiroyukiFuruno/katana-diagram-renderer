@@ -3,7 +3,7 @@ use super::super::html_document::HtmlDocumentNode;
 use super::constants::{DEFAULT_MARGIN, MIN_LAYOUT_WIDTH};
 use super::style::CssStyle;
 use super::svg::svg_header;
-use super::types::{ElementRenderContext, HitTarget, LayoutContext, LayoutResult};
+use super::types::{DetailsContext, ElementRenderContext, HitTarget, LayoutContext, LayoutResult};
 use std::collections::HashMap;
 
 pub(super) struct HtmlLayoutRenderer {
@@ -30,7 +30,7 @@ impl HtmlLayoutRenderer {
             DEFAULT_MARGIN,
             width,
             &CssStyle::default(),
-            None,
+            DetailsContext::NONE,
         );
         renderer.svg.push_str("</svg>");
         LayoutResult {
@@ -62,10 +62,10 @@ impl HtmlLayoutRenderer {
         mut y: f32,
         width: f32,
         inherited: &CssStyle,
-        details_node_id: Option<u64>,
+        details: DetailsContext,
     ) -> f32 {
         for node in nodes {
-            y = self.render_node(node, x, y, width, inherited, details_node_id);
+            y = self.render_node(node, x, y, width, inherited, details);
         }
         y
     }
@@ -77,7 +77,7 @@ impl HtmlLayoutRenderer {
         y: f32,
         width: f32,
         inherited: &CssStyle,
-        details_node_id: Option<u64>,
+        details: DetailsContext,
     ) -> f32 {
         match node {
             HtmlDocumentNode::Text(text) => self.render_text(text, x, y, width, inherited),
@@ -91,7 +91,7 @@ impl HtmlLayoutRenderer {
                 tag,
                 attributes,
                 children,
-                LayoutContext::new(x, y, width, inherited, details_node_id),
+                LayoutContext::new(x, y, width, inherited, details),
             ),
         }
     }

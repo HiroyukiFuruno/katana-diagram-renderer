@@ -15,7 +15,7 @@ pub(super) struct LayoutContext<'a> {
     pub(super) y: f32,
     pub(super) width: f32,
     pub(super) style: &'a CssStyle,
-    pub(super) details_node_id: Option<u64>,
+    pub(super) details: DetailsContext,
 }
 
 impl<'a> LayoutContext<'a> {
@@ -24,14 +24,34 @@ impl<'a> LayoutContext<'a> {
         y: f32,
         width: f32,
         style: &'a CssStyle,
-        details_node_id: Option<u64>,
+        details: DetailsContext,
     ) -> Self {
         Self {
             x,
             y,
             width,
             style,
-            details_node_id,
+            details,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DetailsContext {
+    pub(super) node_id: Option<u64>,
+    pub(super) open: bool,
+}
+
+impl DetailsContext {
+    pub(super) const NONE: Self = Self {
+        node_id: None,
+        open: false,
+    };
+
+    pub(super) fn from_open_state(node_id: u64, open: bool) -> Self {
+        Self {
+            node_id: Some(node_id),
+            open,
         }
     }
 }

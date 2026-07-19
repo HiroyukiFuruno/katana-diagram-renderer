@@ -56,7 +56,7 @@ impl HtmlLayoutRenderer {
             layout.y,
             layout.width,
             layout.style,
-            layout.details_node_id,
+            layout.details,
         )
     }
 
@@ -87,7 +87,7 @@ impl HtmlLayoutRenderer {
             layout.y,
             layout.width,
             &style,
-            layout.details_node_id,
+            layout.details,
         )
     }
 
