@@ -41,12 +41,16 @@ pub(super) fn visible_details_children(
     attributes: &[(String, String)],
     children: &[HtmlDocumentNode],
 ) -> Vec<HtmlDocumentNode> {
-    let open = attribute(attributes, "open").is_some();
+    let open = details_is_open(attributes);
     children
         .iter()
         .filter(|child| is_summary(child) || open)
         .cloned()
         .collect()
+}
+
+pub(super) fn details_is_open(attributes: &[(String, String)]) -> bool {
+    attribute(attributes, "open").is_some()
 }
 
 pub(super) fn summary_height(style: &CssStyle) -> f32 {

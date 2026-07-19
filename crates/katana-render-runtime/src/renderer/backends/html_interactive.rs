@@ -8,6 +8,7 @@ mod layout_dispatch;
 mod layout_media;
 mod layout_paint;
 mod layout_structures;
+mod layout_summary;
 mod layout_text;
 mod session;
 mod style;

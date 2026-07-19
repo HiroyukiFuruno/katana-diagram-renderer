@@ -3,7 +3,7 @@ use super::constants::MIN_LAYOUT_WIDTH;
 use super::document::{node_text, wrap_text};
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
-use super::types::{HitTarget, HitTargetKind};
+use super::types::{DetailsContext, HitTarget, HitTargetKind};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_container(
@@ -13,7 +13,7 @@ impl HtmlLayoutRenderer {
         y: f32,
         width: f32,
         style: &CssStyle,
-        details_node_id: Option<u64>,
+        details: DetailsContext,
     ) -> f32 {
         let start = y + style.margin_top;
         let box_width = style
@@ -30,7 +30,7 @@ impl HtmlLayoutRenderer {
             start + style.padding,
             inner_width,
             style,
-            details_node_id,
+            details,
         );
         let height = container_height(bottom, start, style);
         self.insert_box(box_start, x, start, box_width, height, style);

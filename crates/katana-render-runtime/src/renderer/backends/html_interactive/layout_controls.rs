@@ -1,15 +1,17 @@
-use super::super::html_document::HtmlDocumentNode;
 use super::constants::{
     BUTTON_TEXT_LEFT_PADDING, CONTROL_HEIGHT, DEFAULT_INPUT_WIDTH, INPUT_TEXT_LEFT_PADDING,
     MIN_LAYOUT_WIDTH,
 };
 use super::control_style::{
-    button_style, button_width, input_style, summary_height, visible_details_children,
+    button_style, button_width, details_is_open, input_style, summary_height,
+    visible_details_children,
 };
 use super::document::{input_initial_value, node_text};
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
-use super::types::{ControlLayout, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext};
+use super::types::{
+    ControlLayout, DetailsContext, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext,
+};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_button(
@@ -64,6 +66,7 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
     ) -> f32 {
         let start = layout.y + layout.style.margin_top;
+        let details_open = details_is_open(element.attributes);
         let content = visible_details_children(element.attributes, element.children);
         let inner_x = layout.x + layout.style.padding;
         let inner_width = (layout.width - layout.style.padding * 2.0).max(MIN_LAYOUT_WIDTH);
@@ -74,7 +77,7 @@ impl HtmlLayoutRenderer {
             start + layout.style.padding,
             inner_width,
             layout.style,
-            Some(element.node_id),
+            DetailsContext::from_open_state(element.node_id, details_open),
         );
         let height = (bottom - start + layout.style.padding).max(CONTROL_HEIGHT);
         self.insert_box(
@@ -97,13 +100,16 @@ impl HtmlLayoutRenderer {
         let height = summary_height(layout.style);
         self.paint_summary(
             element.children,
-            layout.x,
-            start,
-            layout.width,
-            height,
-            layout.style,
+            ControlLayout {
+                x: layout.x,
+                y: start,
+                width: layout.width,
+                height,
+                style: layout.style,
+            },
+            layout.details.open,
         );
-        if let Some(details_node_id) = layout.details_node_id {
+        if let Some(details_node_id) = layout.details.node_id {
             self.push_target(
                 element.node_id,
                 layout.x,
@@ -148,21 +154,7 @@ impl HtmlLayoutRenderer {
         );
     }
 
-    fn paint_summary(
-        &mut self,
-        children: &[HtmlDocumentNode],
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        style: &CssStyle,
-    ) {
-        self.paint_box(x, y, width, height, style);
-        let text = format!("▸ {}", node_text(children));
-        self.paint_control_text(&text, x + style.padding, y + style.padding, height, style);
-    }
-
-    fn paint_control_text(
+    pub(super) fn paint_control_text(
         &mut self,
         text: &str,
         x: f32,
@@ -198,6 +190,7 @@ impl HtmlLayoutRenderer {
 mod tests {
     use super::*;
     use crate::renderer::backends::html_browser::{HtmlBrowserError, HtmlBrowserViewport};
+    use crate::renderer::backends::html_document::HtmlDocumentNode;
     use std::collections::HashMap;
 
     #[test]

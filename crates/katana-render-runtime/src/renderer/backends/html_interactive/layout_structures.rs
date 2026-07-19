@@ -6,7 +6,7 @@ use super::document::{TableCell, node_text, table_rows, wrap_text};
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
 use super::svg::escape_xml;
-use super::types::TableCellLayout;
+use super::types::{DetailsContext, TableCellLayout};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_table(
@@ -83,7 +83,7 @@ impl HtmlLayoutRenderer {
                     current,
                     width - LIST_MARKER_WIDTH,
                     style,
-                    None,
+                    DetailsContext::NONE,
                 );
                 index += 1;
             }
@@ -106,7 +106,7 @@ impl HtmlLayoutRenderer {
             y,
             width - LIST_MARKER_WIDTH,
             style,
-            None,
+            DetailsContext::NONE,
         )
     }
 
