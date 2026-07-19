@@ -34,33 +34,15 @@ fn release_target_check_allows_only_v0_4_1() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn archive_gate_allows_only_an_explicitly_completed_krr_slice()
+fn archive_gate_release_recipe_runs_the_script_contract_test()
 -> Result<(), Box<dyn std::error::Error>> {
-    let root = workspace_root()?;
-    let fixture = temp_fixture_directory("archive-gate")?;
-    let active_change = fixture.join("openspec/changes/v0-4-0-cross-repo-runtime");
-    std::fs::create_dir_all(&active_change)?;
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let recipe = recipe_body(&justfile, "release-openspec-archive")?;
 
-    assert!(!archive_gate_output(root, &fixture)?.status.success());
-
-    std::fs::write(
-        active_change.join("release-ownership.toml"),
-        "[krr]\ncompleted_release = \"0.3.9\"\n",
-    )?;
-    assert!(!archive_gate_output(root, &fixture)?.status.success());
-
-    std::fs::write(
-        active_change.join("release-ownership.toml"),
-        "[krr]\ncompleted_release = \"0.4.0\"\n",
-    )?;
-    let output = archive_gate_output(root, &fixture)?;
+    assert!(recipe.contains("bash scripts/release/check-openspec-release-archive.sh --self-test"));
     assert!(
-        output.status.success(),
-        "archive gate failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        recipe.contains("bash scripts/release/check-openspec-release-archive.sh \"{{VERSION}}\"")
     );
-
-    std::fs::remove_dir_all(&fixture)?;
     Ok(())
 }
 
@@ -241,43 +223,4 @@ fn release_target_check(
         .current_dir(root)
         .output()?;
     Ok(output.status.success())
-}
-
-fn archive_gate_output(
-    root: &Path,
-    fixture: &Path,
-) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-    Ok(Command::new("bash")
-        .arg(bash_compatible_path(
-            &root.join("scripts/release/check-openspec-release-archive.sh"),
-        ))
-        .arg("0.4.1")
-        .current_dir(fixture)
-        .output()?)
-}
-
-#[cfg(windows)]
-fn bash_compatible_path(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
-    if path.len() >= 3 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/' {
-        return format!("/{}/{}", path[..1].to_ascii_lowercase(), &path[3..]);
-    }
-    path
-}
-
-#[cfg(not(windows))]
-fn bash_compatible_path(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-fn temp_fixture_directory(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let fixture = std::env::temp_dir().join(format!(
-        "katana-render-runtime-{prefix}-{}",
-        std::process::id()
-    ));
-    if fixture.exists() {
-        std::fs::remove_dir_all(&fixture)?;
-    }
-    std::fs::create_dir_all(&fixture)?;
-    Ok(fixture)
 }
