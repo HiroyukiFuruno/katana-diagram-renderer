@@ -41,19 +41,24 @@ fn archive_gate_allows_only_an_explicitly_completed_krr_slice()
     let active_change = fixture.join("openspec/changes/v0-4-0-cross-repo-runtime");
     std::fs::create_dir_all(&active_change)?;
 
-    assert!(!archive_gate_passes(root, &fixture)?);
+    assert!(!archive_gate_output(root, &fixture)?.status.success());
 
     std::fs::write(
         active_change.join("release-ownership.toml"),
         "[krr]\ncompleted_release = \"0.3.9\"\n",
     )?;
-    assert!(!archive_gate_passes(root, &fixture)?);
+    assert!(!archive_gate_output(root, &fixture)?.status.success());
 
     std::fs::write(
         active_change.join("release-ownership.toml"),
         "[krr]\ncompleted_release = \"0.4.0\"\n",
     )?;
-    assert!(archive_gate_passes(root, &fixture)?);
+    let output = archive_gate_output(root, &fixture)?;
+    assert!(
+        output.status.success(),
+        "archive gate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     std::fs::remove_dir_all(&fixture)?;
     Ok(())
@@ -238,13 +243,31 @@ fn release_target_check(
     Ok(output.status.success())
 }
 
-fn archive_gate_passes(root: &Path, fixture: &Path) -> Result<bool, Box<dyn std::error::Error>> {
-    let output = Command::new("bash")
-        .arg(root.join("scripts/release/check-openspec-release-archive.sh"))
+fn archive_gate_output(
+    root: &Path,
+    fixture: &Path,
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    Ok(Command::new("bash")
+        .arg(bash_compatible_path(
+            &root.join("scripts/release/check-openspec-release-archive.sh"),
+        ))
         .arg("0.4.1")
         .current_dir(fixture)
-        .output()?;
-    Ok(output.status.success())
+        .output()?)
+}
+
+#[cfg(windows)]
+fn bash_compatible_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.len() >= 3 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/' {
+        return format!("/{}/{}", path[..1].to_ascii_lowercase(), &path[3..]);
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn bash_compatible_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn temp_fixture_directory(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
