@@ -1,5 +1,6 @@
 use super::{
-    DrawioResourceCatalog, drawio_prefix, encoding_for_path, mime_type_for_path, resource_groups,
+    DrawioResourceCatalog, drawio_prefix, encoding_for_path, extract_resource_groups,
+    mime_type_for_path, resource_groups,
 };
 
 #[test]
@@ -49,5 +50,6 @@ fn encoding_for_path_covers_binary_and_text_assets() {
 fn resource_groups_and_prefix_handle_known_values() {
     assert_eq!(resource_groups("rackGeneral"), vec!["rack".to_string()]);
     assert_eq!(resource_groups("custom"), vec!["custom".to_string()]);
+    assert!(extract_resource_groups("shape=mxgraph.rackGeneral.server").contains("rack"));
     assert_eq!(drawio_prefix(";"), None);
 }

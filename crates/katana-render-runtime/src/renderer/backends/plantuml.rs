@@ -83,3 +83,42 @@ impl PlantUmlRenderConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PlantUmlRenderer;
+    use crate::renderer::api::{
+        DiagramKind, RenderConfig, RenderContext, RenderError, RenderInput, RenderPolicy, Renderer,
+    };
+
+    #[test]
+    fn cache_constructor_and_theme_catalog_are_available() {
+        let renderer = PlantUmlRenderer::with_cache_dir("/tmp/krr-plantuml-cache".into());
+
+        assert!(format!("{renderer:?}").contains("plantuml.jar"));
+        assert!(PlantUmlRenderer::available_themes().contains(&"cyborg"));
+    }
+
+    #[test]
+    fn invalid_plantuml_config_returns_runtime_error() {
+        let renderer = PlantUmlRenderer::with_runtime_path("missing-plantuml.jar".into());
+        let result = renderer.render(&input(serde_json::json!({
+            "plantuml_theme": "bad theme",
+        })));
+
+        assert!(matches!(
+            result,
+            Err(RenderError::Runtime(error)) if error.contains("invalid PlantUML config")
+        ));
+    }
+
+    fn input(vendor_config: serde_json::Value) -> RenderInput {
+        RenderInput {
+            kind: DiagramKind::PlantUml,
+            source: "@startuml\nAlice -> Bob\n@enduml".to_string(),
+            config: RenderConfig { vendor_config },
+            policy: RenderPolicy::default(),
+            context: RenderContext::default(),
+        }
+    }
+}

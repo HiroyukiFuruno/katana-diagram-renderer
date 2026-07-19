@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KRR interactive HTML browser preview fixture</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 720px;
+      background: #eef3f8;
+      color: #18202a;
+      font-size: 16px;
+      line-height: 24px;
+      padding: 16px;
+    }
+
+    main {
+      width: 760px;
+      margin: 0;
+      background: white;
+      border: 1px solid #c9d6e4;
+      padding: 16px;
+    }
+
+    h1 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 32px;
+      line-height: 38px;
+    }
+
+    .status {
+      margin-top: 8px;
+      margin-bottom: 16px;
+      padding: 8px 12px;
+      background: #e6f5ef;
+      border: 1px solid #9fd4be;
+      color: #12513a;
+      font-weight: 700;
+    }
+
+    details {
+      width: 520px;
+      border: 1px solid #93b4cf;
+      background: #f7fbff;
+    }
+
+    summary {
+      height: 40px;
+      padding: 8px 16px;
+      color: #173f5f;
+      font-weight: 800;
+    }
+
+    .panel {
+      border-top: 1px solid #c9d6e4;
+      padding: 10px;
+      background: white;
+    }
+
+    .action {
+      margin-bottom: 8px;
+      width: 190px;
+    }
+
+    label {
+      font-weight: 800;
+      color: #263746;
+      margin-bottom: 4px;
+    }
+
+    input {
+      width: 220px;
+      height: 36px;
+      margin-bottom: 4px;
+      border: 1px solid #93b4cf;
+      padding: 8px;
+    }
+
+    button {
+      margin-top: 8px;
+      padding: 10px 16px;
+      border: 0;
+      background: #1f5f8b;
+      color: white;
+      font-weight: 700;
+    }
+
+    .result {
+      margin-top: 0;
+      margin-bottom: 0;
+      min-height: 24px;
+      color: #7a3e1d;
+      font-weight: 800;
+    }
+
+    .navigation-link {
+      margin-top: 20px;
+      padding: 10px 14px;
+      background: #173f5f;
+      color: white;
+      font-weight: 800;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>KRR Rust/V8 HTML Preview</h1>
+    <p>CSS, JavaScript, controls, and links run inside KRR.</p>
+    <p class="status" data-js-status>JavaScript has not executed</p>
+    <details data-accordion>
+      <summary>Accordion: interactive details</summary>
+      <div class="panel">
+        <button class="action" type="button" data-action-button>Run click action</button>
+        <label for="preview-input">Type target</label>
+        <input id="preview-input" data-text-input aria-label="Type target" autocomplete="off">
+        <p class="result" data-result>Waiting for interaction</p>
+      </div>
+    </details>
+    <a class="navigation-link" href="linked-panel.html" data-navigation-link>Open linked page</a>
+  </main>
+  <script>
+    const status = document.querySelector("[data-js-status]");
+    const result = document.querySelector("[data-result]");
+    const input = document.querySelector("[data-text-input]");
+    status.textContent = "JavaScript executed inside KRR V8";
+    document.body.dataset.krrReady = "true";
+    document.querySelector("[data-accordion]").addEventListener("toggle", (event) => {
+      status.textContent = event.currentTarget.open
+        ? "Accordion opened by KRR click"
+        : "Accordion closed";
+    });
+    document.querySelector("[data-action-button]").addEventListener("click", () => {
+      result.textContent = "Button click mutated the DOM";
+      result.style.color = "rgb(18, 81, 58)";
+    });
+    input.addEventListener("input", () => {
+      result.textContent = `Typed text reached KRR: ${input.value}`;
+      result.style.color = "rgb(31, 95, 139)";
+    });
+  </script>
+</body>
+</html>

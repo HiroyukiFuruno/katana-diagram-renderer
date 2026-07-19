@@ -1,8 +1,11 @@
 use katana_render_runtime::{
-    MathJaxRenderer, RenderConfig, RenderContext, RenderInput, RenderKind, RenderPolicy,
-    RenderThemeMode, RenderThemeSnapshot, Renderer, RuntimePathResolver,
+    MathJaxRenderer, RenderConfig, RenderContext, RenderError, RenderInput, RenderKind,
+    RenderPolicy, RenderThemeMode, RenderThemeSnapshot, Renderer, RuntimePathResolver,
 };
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn mathjax_inline_tex_renders_svg() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,12 +62,49 @@ fn mathjax_missing_runtime_path_returns_raw_string() -> Result<(), Box<dyn std::
 
 #[test]
 fn mathjax_uses_explicit_runtime_path() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = TempMathJaxRuntime::create()?;
+    let runtime = TempMathJaxRuntime::create(CUSTOM_MATHJAX_RUNTIME)?;
     let renderer = MathJaxRenderer::with_runtime_path(runtime.path.clone());
     let output = renderer.render(&input("custom runtime", false))?;
 
     assert!(output.svg.contains("data-runtime=\"custom\""));
     assert!(output.diagnostics.errors.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mathjax_invalid_runtime_response_returns_raw_string() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime =
+        TempMathJaxRuntime::create("function katanaRunMathJaxRuntime() { return 'not-json'; }")?;
+    let renderer = MathJaxRenderer::with_runtime_path(runtime.path.clone());
+    let output = renderer.render(&input("invalid response", false))?;
+
+    assert_eq!(output.svg, "invalid response");
+    assert!(
+        output
+            .diagnostics
+            .errors
+            .iter()
+            .any(|error| error.contains("Invalid MathJax runtime response"))
+    );
+    Ok(())
+}
+
+#[test]
+fn mathjax_runtime_error_response_returns_raw_string() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = TempMathJaxRuntime::create(
+        r#"function katanaRunMathJaxRuntime() { return '{"kind":"error","message":"bad math"}'; }"#,
+    )?;
+    let renderer = MathJaxRenderer::with_runtime_path(runtime.path.clone());
+    let output = renderer.render(&input("bad source", false))?;
+
+    assert_eq!(output.svg, "bad source");
+    assert!(
+        output
+            .diagnostics
+            .errors
+            .iter()
+            .any(|error| error.contains("bad math"))
+    );
     Ok(())
 }
 
@@ -75,6 +115,19 @@ fn mathjax_theme_changes_cache_fingerprint() -> Result<(), Box<dyn std::error::E
     let dark = renderer.render(&input_with_theme(RenderThemeMode::Dark))?;
 
     assert_ne!(light.cache_fingerprint, dark.cache_fingerprint);
+    Ok(())
+}
+
+#[test]
+fn mathjax_rejects_non_mathjax_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let renderer = renderer()?;
+    let mut input = input("graph TD; A-->B", false);
+    input.kind = RenderKind::Mermaid;
+
+    assert!(matches!(
+        renderer.render(&input),
+        Err(RenderError::UnsupportedKind)
+    ));
     Ok(())
 }
 
@@ -146,12 +199,13 @@ struct TempMathJaxRuntime {
 }
 
 impl TempMathJaxRuntime {
-    fn create() -> Result<Self, Box<dyn std::error::Error>> {
+    fn create(source: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "katana-render-runtime-mathjax-custom-{}.js",
-            std::process::id()
+            "katana-render-runtime-mathjax-custom-{}-{id}.js",
+            std::process::id(),
         ));
-        std::fs::write(&path, CUSTOM_MATHJAX_RUNTIME)?;
+        std::fs::write(&path, source)?;
         Ok(Self { path })
     }
 }

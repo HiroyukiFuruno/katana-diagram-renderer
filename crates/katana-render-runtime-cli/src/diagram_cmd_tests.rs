@@ -62,6 +62,15 @@ fn drawio_source_passes_through() {
 }
 
 #[test]
+fn mathjax_source_passes_through() {
+    let source = "x^2".to_string();
+    assert_eq!(
+        DiagramSourceOps::prepare(DiagramKind::MathJax, source.clone()),
+        source
+    );
+}
+
+#[test]
 fn extracts_plantuml_fence_from_markdown() {
     let source = "```plantuml\n@startuml\nAlice -> Bob: hello\n@enduml\n```\n".to_string();
     assert_eq!(
@@ -99,6 +108,24 @@ fn plantuml_theme_options_become_vendor_config() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn plantuml_theme_options_without_cache_dir_use_empty_cache_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let config = RenderInputFactory::vendor_config(
+        DiagramKind::PlantUml,
+        Some("cyborg".to_string()),
+        None,
+        Some(ThemeModeArg::Dark),
+        None,
+    )?;
+
+    assert_eq!(config["plantuml_theme"], "cyborg");
+    assert_eq!(config["plantuml_theme_from"], "");
+    assert_eq!(config["plantuml_theme_mode"], "dark");
+    assert_eq!(config["plantuml_cache_dir"], "");
+    Ok(())
+}
+
+#[test]
 fn non_plantuml_rejects_theme_options() {
     let result = RenderInputFactory::vendor_config(
         DiagramKind::Mermaid,
@@ -109,6 +136,89 @@ fn non_plantuml_rejects_theme_options() {
     );
 
     assert!(result.is_err());
+}
+
+#[test]
+fn runtime_option_validation_and_renderer_selection_cover_all_kinds() {
+    let conflict = DiagramCommand::validate_runtime_options(
+        DiagramKind::PlantUml,
+        Some(&"runtime.jar".into()),
+        Some(&"cache".into()),
+    );
+    let accepted = DiagramCommand::validate_runtime_options(DiagramKind::Mermaid, None, None);
+    let _mermaid = DiagramCommand::new(DiagramKind::Mermaid).renderer("mermaid.js".into());
+    let _drawio = DiagramCommand::new(DiagramKind::Drawio).renderer("drawio.js".into());
+    let _plantuml = DiagramCommand::new(DiagramKind::PlantUml).renderer("plantuml.jar".into());
+    let _mathjax = DiagramCommand::new(DiagramKind::MathJax).renderer("mathjax.js".into());
+
+    assert!(conflict.is_err());
+    assert!(accepted.is_ok());
+}
+
+#[test]
+fn plantuml_render_rejects_runtime_and_cache_conflict_before_reading_input() {
+    let result = DiagramCommand::new(DiagramKind::PlantUml).run(DiagramAction::Render {
+        input: "input-is-not-read.puml".into(),
+        output: None,
+        runtime: Some("runtime.jar".into()),
+        theme: None,
+        theme_from: None,
+        theme_mode: None,
+        cache_dir: Some("cache".into()),
+    });
+
+    assert!(
+        matches!(result, Err(error) if error.to_string().contains("--runtime and --cache-dir"))
+    );
+}
+
+#[test]
+fn render_rejects_theme_options_for_non_plantuml_after_reading_input()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = std::env::temp_dir().join(format!("krr-cli-mermaid-{}.mmd", std::process::id()));
+    std::fs::write(&input, "graph TD; A --> B")?;
+    let result = DiagramCommand::new(DiagramKind::Mermaid).run(DiagramAction::Render {
+        input: input.clone(),
+        output: None,
+        runtime: Some("runtime.js".into()),
+        theme: Some("not-supported".to_string()),
+        theme_from: None,
+        theme_mode: None,
+        cache_dir: None,
+    });
+
+    std::fs::remove_file(input)?;
+    assert!(
+        matches!(result, Err(error) if error.to_string().contains("currently supported only for plantuml"))
+    );
+    Ok(())
+}
+
+#[test]
+fn vendor_config_is_null_without_plantuml_options() -> Result<(), Box<dyn std::error::Error>> {
+    let config = RenderInputFactory::vendor_config(DiagramKind::Mermaid, None, None, None, None)?;
+
+    assert!(config.is_null());
+    Ok(())
+}
+
+#[test]
+fn plantuml_render_reaches_config_validation_after_input_loading()
+-> Result<(), Box<dyn std::error::Error>> {
+    let input = std::env::temp_dir().join(format!("krr-cli-plantuml-{}.puml", std::process::id()));
+    std::fs::write(&input, "@startuml\nAlice -> Bob\n@enduml")?;
+    let result = DiagramCommand::new(DiagramKind::PlantUml).run(DiagramAction::Render {
+        input,
+        output: None,
+        runtime: Some("missing-plantuml.jar".into()),
+        theme: Some("bad theme".to_string()),
+        theme_from: None,
+        theme_mode: None,
+        cache_dir: None,
+    });
+
+    assert!(result.is_err());
+    Ok(())
 }
 
 #[test]

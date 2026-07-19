@@ -34,6 +34,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  TEST_THREADS: "1"
 
 jobs:
   preflight:
@@ -47,6 +48,19 @@ jobs:
       - name: Checkout
         if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Java runtime
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Graphviz for PlantUML
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
 
       - name: Install Rust
         if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
@@ -97,4 +111,5 @@ jobs:
 
       - name: Release check
         if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+        timeout-minutes: 75
         run: just VERSION="${{ steps.version.outputs.version }}" release-check

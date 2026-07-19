@@ -7,6 +7,7 @@ use tiny_skia::Pixmap;
 
 const MAX_RASTERIZED_SVG_EDGE: f32 = 8192.0;
 const LIGHT_DARK_FUNCTION: &str = "light-dark(";
+const BUNDLED_SANS_SERIF_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoSans-Regular.ttf");
 
 #[derive(Debug, Clone)]
 pub struct RasterizedSvg {
@@ -78,9 +79,15 @@ impl RasterTarget {
 }
 
 fn rasterizer_options() -> usvg::Options<'static> {
+    rasterizer_options_with_font_db(font_db())
+}
+
+fn rasterizer_options_with_font_db(
+    fontdb: std::sync::Arc<usvg::fontdb::Database>,
+) -> usvg::Options<'static> {
     usvg::Options {
         /* WHY: Text inside SVG becomes invisible if system fonts are not provided. */
-        fontdb: font_db(),
+        fontdb,
         ..usvg::Options::default()
     }
 }
@@ -154,9 +161,18 @@ fn font_db() -> std::sync::Arc<usvg::fontdb::Database> {
         std::sync::OnceLock::new();
     std::sync::Arc::clone(FONT_DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
+        /* WHY: host font が無くても KRR frame の本文を白紙にしない。 */
+        db.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
         db.load_system_fonts();
         std::sync::Arc::new(db)
     }))
+}
+
+#[cfg(test)]
+fn bundled_font_db() -> std::sync::Arc<usvg::fontdb::Database> {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
+    std::sync::Arc::new(db)
 }
 
 fn effective_scale(width: f32, height: f32, requested_scale: f32) -> f32 {

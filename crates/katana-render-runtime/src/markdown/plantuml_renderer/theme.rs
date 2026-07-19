@@ -103,12 +103,8 @@ impl PlantUmlThemeConfig {
     }
 
     fn dark_mode(&self, fallback: bool) -> bool {
-        match self.theme_mode.trim() {
-            "" => fallback,
-            "dark" => true,
-            "light" => false,
-            _ => unreachable!("PlantUML theme mode must be validated before rendering"),
-        }
+        let mode = self.theme_mode.trim();
+        mode == "dark" || (mode.is_empty() && fallback)
     }
 
     fn validate_dark_mode(&self) -> Result<(), String> {
@@ -152,11 +148,12 @@ mod tests {
 
     #[test]
     fn plantuml_theme_config_builds_official_theme_directive() -> Result<(), String> {
-        let config = PlantUmlThemeConfig::from_value(&serde_json::json!({
+        let config_json = serde_json::json!({
             "plantumlTheme": "cyborg",
             "plantumlThemeFrom": "/path/to/themes",
             "plantumlThemeMode": "light",
-        }))?;
+        });
+        let config = PlantUmlThemeConfig::from_value(&config_json)?;
         let style = PlantUmlThemeOps::style(DiagramColorPreset::light(), &config);
 
         assert!(!style.dark_mode());
@@ -169,9 +166,8 @@ mod tests {
 
     #[test]
     fn theme_mode_overrides_preset_dark_mode() -> Result<(), String> {
-        let config = PlantUmlThemeConfig::from_value(&serde_json::json!({
-            "plantuml_theme_mode": "light",
-        }))?;
+        let config_json = serde_json::json!({"plantuml_theme_mode": "light"});
+        let config = PlantUmlThemeConfig::from_value(&config_json)?;
         let style = PlantUmlThemeOps::style(DiagramColorPreset::dark(), &config);
 
         assert!(!style.dark_mode());
@@ -194,5 +190,28 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn theme_config_covers_directive_and_validation_variants() -> Result<(), String> {
+        let dark_json = serde_json::json!({
+            "plantuml_theme": "cyborg",
+            "plantuml_theme_mode": "dark",
+        });
+        let dark = PlantUmlThemeConfig::from_value(&dark_json)?;
+        let dark_style = PlantUmlThemeOps::style(DiagramColorPreset::light(), &dark);
+        let missing_theme = PlantUmlThemeConfig::from_value(&serde_json::json!({
+            "plantuml_theme_from": "local",
+        }));
+        let control = PlantUmlThemeConfig::from_value(&serde_json::json!({
+            "plantuml_theme": "cyborg",
+            "plantuml_theme_from": "bad\u{0000}",
+        }));
+
+        assert!(dark_style.dark_mode());
+        assert_eq!(dark_style.config_lines(), &[String::from("!theme cyborg")]);
+        assert!(missing_theme.is_err());
+        assert!(control.is_err());
+        Ok(())
     }
 }

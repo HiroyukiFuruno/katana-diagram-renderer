@@ -148,10 +148,7 @@ impl RuntimeBundleRule {
             return Ok(files);
         }
         for entry in WalkBuilder::new(&target).standard_filters(true).build() {
-            let entry = entry.map_err(|source| KdrLintError::Walk {
-                path: target.clone(),
-                source,
-            })?;
+            let entry = entry.map_err(|source| Self::walk_error(target.clone(), source))?;
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|extension| extension == "ts") {
                 files.push(path.to_path_buf());
@@ -159,6 +156,10 @@ impl RuntimeBundleRule {
         }
         files.sort();
         Ok(files)
+    }
+
+    fn walk_error(path: PathBuf, source: ignore::Error) -> KdrLintError {
+        KdrLintError::Walk { path, source }
     }
 
     pub(super) fn read_source(path: &Path) -> Result<String, KdrLintError> {
@@ -170,5 +171,23 @@ impl RuntimeBundleRule {
 
     fn violation(path: PathBuf, message: &'static str) -> Violation {
         Violation::new(path, 1, 1, RULE, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeBundleRule;
+    use crate::diagnostics::KdrLintError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn walk_error_preserves_target_path() {
+        let path = PathBuf::from("/tmp/runtime-source");
+        let source = ignore::Error::from(std::io::Error::other("walk"));
+
+        assert!(matches!(
+            RuntimeBundleRule::walk_error(path.clone(), source),
+            KdrLintError::Walk { path: actual, .. } if actual == path
+        ));
     }
 }

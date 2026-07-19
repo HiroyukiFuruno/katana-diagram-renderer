@@ -75,15 +75,19 @@ mod tests {
 
     #[test]
     fn catalog_contains_available_plantuml_themes() {
-        assert!(PlantUmlThemeCatalog::names().contains(&"cyborg"));
-        assert!(PlantUmlThemeCatalog::names().contains(&"black-knight"));
-        assert!(PlantUmlThemeCatalog::names().contains(&"spacelab"));
+        let names = PlantUmlThemeCatalog::names();
+
+        assert!(names.contains(&"cyborg"));
+        assert!(names.contains(&"black-knight"));
+        assert!(names.contains(&"spacelab"));
     }
 
     #[test]
     fn help_text_contains_every_catalog_theme() {
+        let help_text = PlantUmlThemeCatalog::help_text();
+
         for theme in PlantUmlThemeCatalog::names() {
-            assert!(PlantUmlThemeCatalog::HELP_TEXT.contains(theme), "{theme}");
+            assert!(help_text.contains(theme), "{theme}");
         }
     }
 }

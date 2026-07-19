@@ -60,6 +60,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  TEST_THREADS: "1"
 
 jobs:
   test:
@@ -70,8 +71,17 @@ jobs:
         !contains(github.event.head_commit.message, '(#')
       )
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux64
+          - os: macos-15
+            platform: mac-arm64
+          - os: macos-15-intel
+            platform: mac-x64
+          - os: windows-latest
+            platform: win64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Prepare Windows Git checkout
@@ -83,6 +93,12 @@ jobs:
 
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Install Java runtime
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
@@ -90,6 +106,7 @@ jobs:
           components: clippy, rustfmt, llvm-tools-preview
 
       - name: Cache Rust build outputs
+        if: matrix.os != 'ubuntu-latest'
         uses: Swatinem/rust-cache@v2.9.1
         with:
           shared-key: ci-${{ matrix.os }}-stable-default
@@ -140,11 +157,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y graphviz
 
-      - name: Run tests
-        run: cargo test --workspace --all-targets --all-features --locked
+      - name: Install Graphviz for PlantUML on macOS
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install graphviz
 
       - name: Install PlantUML runtime
         run: just plantuml-install
+
+      - name: Run tests
+        timeout-minutes: 45
+        run: just unit-test
 
       - name: Run PlantUML smoke check
         if: matrix.os != 'windows-latest'
@@ -186,7 +208,19 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: just plantuml-runtime-package-check
 
+      - name: Free Ubuntu build space before coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo llvm-cov clean --workspace || true
+          rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental target/debug/build target/debug/examples target/debug/.fingerprint target/package
+          df -h .
+
       - name: Run coverage
         if: matrix.os == 'ubuntu-latest'
-        continue-on-error: true
         run: just coverage
+
+      - name: Free Ubuntu build space after coverage
+        if: matrix.os == 'ubuntu-latest' && always()
+        run: |
+          cargo llvm-cov clean --workspace || true
+          rm -rf target/llvm-cov-target target/debug/deps target/debug/incremental

@@ -1,5 +1,10 @@
+mod asset_path;
+
+use asset_path::PlantUmlCachePathOps;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 
 pub const PLANTUML_JAR_VERSION: &str = "1.2026.6";
 pub const PLANTUML_JAR_CHECKSUM: &str =
@@ -9,25 +14,48 @@ pub const PLANTUML_DOWNLOAD_URL: &str = "https://repo1.maven.org/maven2/net/sour
 const DOWNLOAD_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const HEX_HIGH_NIBBLE_SHIFT: u8 = 4;
 const HEX_LOW_NIBBLE_MASK: u8 = 0x0f;
-const KRR_PLANTUML_CACHE_ENV: &str = "KRR_PLANTUML_CACHE_DIR";
-const KDR_PLANTUML_CACHE_ENV: &str = "KDR_PLANTUML_CACHE_DIR";
+
+type PlantUmlJarVerifier = fn(&[u8]) -> Result<(), String>;
+
+#[cfg(test)]
+pub(super) static PLANTUML_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) struct PlantUmlJarAssetOps;
 
 impl PlantUmlJarAssetOps {
     pub(crate) fn cache_path(cache_dir: Option<&Path>) -> PathBuf {
-        Self::cache_root(cache_dir)
+        PlantUmlCachePathOps::cache_root(cache_dir)
             .join(PLANTUML_JAR_VERSION)
             .join("plantuml.jar")
     }
 
     pub(crate) fn prepare_cache_jar(cache_dir: Option<&Path>) -> Result<PathBuf, String> {
-        let path = Self::cache_path(cache_dir);
+        Self::prepare_cache_jar_from(cache_dir, PLANTUML_DOWNLOAD_URL)
+    }
+
+    fn prepare_cache_jar_from(
+        cache_dir: Option<&Path>,
+        download_url: &str,
+    ) -> Result<PathBuf, String> {
+        let mut download = || Self::download_from_url(download_url);
+        Self::prepare_cache_path(
+            Self::cache_path(cache_dir),
+            Self::verify_bytes,
+            &mut download,
+        )
+    }
+
+    fn prepare_cache_path(
+        path: PathBuf,
+        verify: PlantUmlJarVerifier,
+        download: &mut dyn FnMut() -> Result<Vec<u8>, String>,
+    ) -> Result<PathBuf, String> {
         if path.exists() {
-            Self::verify_jar(&path)?;
+            let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+            verify(&bytes)?;
             return Ok(path);
         }
-        Self::download_to_cache(&path)?;
+        Self::download_to_cache_with(&path, verify, download)?;
         Ok(path)
     }
 
@@ -36,7 +64,11 @@ impl PlantUmlJarAssetOps {
         Self::verify_digest(&digest)
     }
 
-    fn download_to_cache(path: &Path) -> Result<(), String> {
+    fn download_to_cache_with(
+        path: &Path,
+        verify: PlantUmlJarVerifier,
+        download: &mut dyn FnMut() -> Result<Vec<u8>, String>,
+    ) -> Result<(), String> {
         let parent = path.parent().ok_or_else(|| {
             format!(
                 "PlantUML cache path has no parent directory: {}",
@@ -49,8 +81,8 @@ impl PlantUmlJarAssetOps {
                 parent.display()
             )
         })?;
-        let bytes = Self::download_jar()?;
-        Self::verify_bytes(&bytes)?;
+        let bytes = download()?;
+        verify(&bytes)?;
         let temp_path = Self::temp_path(path);
         std::fs::write(&temp_path, bytes).map_err(|error| {
             format!(
@@ -61,21 +93,21 @@ impl PlantUmlJarAssetOps {
         Self::install_temp_file(&temp_path, path)
     }
 
-    fn download_jar() -> Result<Vec<u8>, String> {
-        let mut response = ureq::get(PLANTUML_DOWNLOAD_URL)
+    fn download_from_url(url: &str) -> Result<Vec<u8>, String> {
+        let mut response = ureq::get(url)
             .call()
-            .map_err(Self::download_error)?;
+            .map_err(|error| Self::download_error(url, error))?;
         response
             .body_mut()
             .with_config()
             .limit(DOWNLOAD_LIMIT_BYTES)
             .read_to_vec()
-            .map_err(Self::download_error)
+            .map_err(|error| Self::download_error(url, error))
     }
 
-    fn download_error(error: ureq::Error) -> String {
+    fn download_error(url: &str, error: ureq::Error) -> String {
         format!(
-            "PlantUML JAR download failed from {PLANTUML_DOWNLOAD_URL}: {error}. network connection is required on first use when the cache is empty"
+            "PlantUML JAR download failed from {url}: {error}. network connection is required on first use when the cache is empty"
         )
     }
 
@@ -139,62 +171,16 @@ impl PlantUmlJarAssetOps {
             .unwrap_or("plantuml.jar");
         path.with_file_name(format!("{file_name}.tmp-{}", std::process::id()))
     }
-
-    fn cache_root(cache_dir: Option<&Path>) -> PathBuf {
-        if let Some(path) = cache_dir {
-            return path.to_path_buf();
-        }
-        Self::env_path(KRR_PLANTUML_CACHE_ENV)
-            .or_else(|| Self::env_path(KDR_PLANTUML_CACHE_ENV))
-            .unwrap_or_else(Self::platform_cache_root)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn platform_cache_root() -> PathBuf {
-        Self::home_dir()
-            .map(|it| {
-                it.join("Library")
-                    .join("Caches")
-                    .join("krr")
-                    .join("plantuml")
-            })
-            .unwrap_or_else(Self::temp_cache_root)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn platform_cache_root() -> PathBuf {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .or_else(|| Self::home_dir().map(|it| it.join("AppData").join("Local")))
-            .map(|it| it.join("krr").join("plantuml"))
-            .unwrap_or_else(Self::temp_cache_root)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn platform_cache_root() -> PathBuf {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| Self::home_dir().map(|it| it.join(".cache")))
-            .map(|it| it.join("krr").join("plantuml"))
-            .unwrap_or_else(Self::temp_cache_root)
-    }
-
-    fn temp_cache_root() -> PathBuf {
-        std::env::temp_dir().join("krr").join("plantuml")
-    }
-
-    fn env_path(name: &'static str) -> Option<PathBuf> {
-        let value = std::env::var_os(name)?;
-        (!value.is_empty()).then(|| PathBuf::from(value))
-    }
-
-    fn home_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-    }
 }
 
 #[cfg(test)]
 #[path = "asset_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "asset_env_tests.rs"]
+mod env_tests;
+
+#[cfg(test)]
+#[path = "asset_download_tests.rs"]
+mod download_tests;

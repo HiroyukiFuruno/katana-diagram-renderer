@@ -1,5 +1,6 @@
 /target
 tmp
+.katana-krr-browser-*.html
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store

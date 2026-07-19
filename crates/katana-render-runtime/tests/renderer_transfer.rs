@@ -1,7 +1,11 @@
 use katana_render_runtime::{
-    DiagramKind, DrawioRenderer, MermaidRenderer, RenderConfig, RenderContext, RenderDiagnostics,
-    RenderError, RenderInput, RenderOutput, RenderPolicy, Renderer, RendererProfile,
-    RuntimeVersion,
+    DiagramKind, DrawioRenderer, HtmlBrowserError, HtmlBrowserFrame, HtmlBrowserInput,
+    HtmlBrowserNavigation, HtmlRenderInput, HtmlRenderer, MermaidRenderer, RenderConfig,
+    RenderContext, RenderDiagnostics, RenderError, RenderInput, RenderOutput, RenderPolicy,
+    Renderer, RendererProfile, RuntimeVersion,
+};
+use katana_render_runtime::{
+    HtmlBrowserSessionState, HtmlBrowserSource, HtmlBrowserViewport, HtmlRuntime,
 };
 use std::path::PathBuf;
 
@@ -50,6 +54,20 @@ fn renderer_rejects_mismatched_diagram_kind_without_fallback()
     assert!(matches!(error, RenderError::UnsupportedKind));
     Ok(())
 }
+
+#[test]
+fn html_browser_contract_can_cross_the_kdv_worker_boundary() {
+    assert_send::<HtmlBrowserSource>();
+    assert_send::<HtmlBrowserViewport>();
+    assert_send::<HtmlBrowserInput>();
+    assert_send::<HtmlBrowserNavigation>();
+    assert_send::<HtmlBrowserError>();
+    assert_send_sync::<HtmlBrowserFrame>();
+}
+
+fn assert_send<T: Send>() {}
+
+fn assert_send_sync<T: Send + Sync>() {}
 
 #[test]
 fn render_input_keeps_katana_adapter_relevant_fields() -> Result<(), Box<dyn std::error::Error>> {
@@ -137,4 +155,55 @@ fn drawio_renderer_reports_missing_runtime_without_stub_svg()
 
     assert!(matches!(error, RenderError::NotInstalled { .. }));
     Ok(())
+}
+
+#[test]
+fn html_renderer_static_export_contract_remains_separate() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output = HtmlRenderer.render(&HtmlRenderInput {
+        source: "<style>p { color: red; }</style><p id=state>Static</p>".to_string(),
+    })?;
+
+    assert!(
+        output
+            .content
+            .contains(r#"<p id="state" style="color: red">Static</p>"#),
+        "{}",
+        output.content
+    );
+    Ok(())
+}
+
+#[test]
+fn html_runtime_public_session_is_browser_page_session() -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = HtmlRuntime.open(browser_source()?, viewport()?)?;
+
+    assert_eq!(session.state(), HtmlBrowserSessionState::Active);
+    assert_eq!(
+        session.latest_frame().map(|frame| frame.generation),
+        Some(1)
+    );
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.generation),
+        Some(1)
+    );
+
+    session.refresh_frame()?;
+    assert_eq!(
+        session.take_frame_update().map(|frame| frame.generation),
+        Some(2)
+    );
+    session.close()?;
+    Ok(())
+}
+
+fn browser_source() -> Result<HtmlBrowserSource, Box<dyn std::error::Error>> {
+    Ok(HtmlBrowserSource::new(
+        "<button id=action>Run</button>",
+        "https://example.test/index.html",
+    )?)
+}
+
+fn viewport() -> Result<HtmlBrowserViewport, Box<dyn std::error::Error>> {
+    Ok(HtmlBrowserViewport::new(160, 120, 1.0)?)
 }

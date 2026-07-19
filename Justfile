@@ -5,6 +5,8 @@ RTK := env_var_or_default("RTK", `command -v rtk 2> /dev/null || true`)
 RTK_CMD := if RTK == "" { "" } else { RTK + " " }
 JOBS := env_var_or_default("JOBS", "2")
 FIXTURE_JOBS := env_var_or_default("FIXTURE_JOBS", JOBS)
+TEST_THREADS := env_var_or_default("TEST_THREADS", "1")
+TEST_THREAD_ARGS := if TEST_THREADS == "" { "" } else { " -- --test-threads=" + TEST_THREADS }
 RUNTIME_UPDATE_LOG_DIR := env_var_or_default("RUNTIME_UPDATE_LOG_DIR", "tmp/runtime-update-logs")
 export RUSTFLAGS := env_var_or_default("RUSTFLAGS", "-D warnings")
 CARGO := env_var_or_default("CARGO", RTK_CMD + "cargo")
@@ -65,12 +67,13 @@ dependency-leak:
     fi
 
 # Run workspace tests
-unit-test:
-    {{CARGO}} test --workspace --all-targets --all-features
+unit-test: plantuml-install
+    {{CARGO}} test --workspace --all-targets --all-features --locked{{TEST_THREAD_ARGS}}
 
 # Run coverage as a required full-check gate
-coverage:
-    {{CARGO}} llvm-cov --workspace --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}
+coverage: plantuml-install
+    {{CARGO}} llvm-cov clean --workspace
+    {{CARGO}} llvm-cov --workspace --all-targets --all-features --locked --summary-only --fail-under-lines {{COVERAGE_MIN_LINES}} --fail-uncovered-lines {{COVERAGE_MAX_UNCOVERED_LINES}}{{TEST_THREAD_ARGS}}
 
 # Verify pinned runtime asset checksums
 runtime-asset-check:
@@ -172,7 +175,7 @@ release-openspec-archive:
     bash scripts/release/check-openspec-release-archive.sh "{{VERSION}}"
 
 # Verify release branch readiness before merging
-release-check: release-openspec-archive release-verify
+release-check: release-openspec-archive check coverage release-verify
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:
