@@ -1,7 +1,6 @@
 use super::super::document::{border_color, css_px};
 use super::value::{
-    box_sides, css_font_size, css_line_height, css_number, css_relative_px, grid_column_count,
-    is_bold,
+    box_sides, css_font_size, css_line_height, css_number, css_relative_px, grid_tracks, is_bold,
 };
 use super::{CssLength, CssStyle};
 
@@ -38,10 +37,7 @@ impl CssStyle {
             "font-size" => {
                 self.font_size = css_font_size(value, self.font_size).unwrap_or(self.font_size);
             }
-            "line-height" => {
-                self.line_height =
-                    css_line_height(value, self.font_size).unwrap_or(self.line_height);
-            }
+            "line-height" => self.apply_line_height(value),
             "font-weight" => self.bold = is_bold(value),
             "text-decoration" => self.underline = value.contains("underline"),
             "gap" => self.gap = css_px(value).unwrap_or(self.gap),
@@ -56,10 +52,19 @@ impl CssStyle {
                 self.justify_content = value.parse().ok().or(self.justify_content);
             }
             "grid-template-columns" => {
-                self.grid_columns = grid_column_count(value).unwrap_or(self.grid_columns);
+                self.grid_template_columns = grid_tracks(value, self.font_size)
+                    .unwrap_or_else(|| self.grid_template_columns.clone());
             }
             _ => self.apply_box_measurement(name, value),
         }
+    }
+
+    pub(super) fn apply_line_height(&mut self, value: &str) {
+        let Some((resolved, inherited_factor)) = css_line_height(value, self.font_size) else {
+            return;
+        };
+        self.line_height = resolved;
+        self.line_height_factor = inherited_factor;
     }
 
     fn apply_box_measurement(&mut self, name: &str, value: &str) {

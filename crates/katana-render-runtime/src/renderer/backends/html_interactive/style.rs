@@ -1,6 +1,6 @@
 use super::constants::{
     DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, H1_FONT_SIZE, H1_MARGIN, H2_FONT_SIZE, H2_MARGIN,
-    H3_FONT_SIZE, H3_MARGIN, LINE_HEIGHT_FACTOR, PARAGRAPH_MARGIN,
+    H3_FONT_SIZE, H3_MARGIN, PARAGRAPH_MARGIN,
 };
 use super::document::attribute;
 use taffy::style::{AlignItems, Display, FlexDirection, FlexWrap, JustifyContent};
@@ -16,6 +16,16 @@ pub(super) enum CssLength {
     Percent(f32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum CssGridTrack {
+    Length(f32),
+    Percent(f32),
+    Fraction(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct CssStyle {
     pub(super) color: String,
@@ -23,6 +33,7 @@ pub(super) struct CssStyle {
     pub(super) border: Option<String>,
     pub(super) font_size: f32,
     pub(super) line_height: f32,
+    pub(super) line_height_factor: Option<f32>,
     pub(super) padding_top: f32,
     pub(super) padding_right: f32,
     pub(super) padding_bottom: f32,
@@ -45,7 +56,7 @@ pub(super) struct CssStyle {
     pub(super) flex_shrink: f32,
     pub(super) align_items: Option<AlignItems>,
     pub(super) justify_content: Option<JustifyContent>,
-    pub(super) grid_columns: usize,
+    pub(super) grid_template_columns: Vec<CssGridTrack>,
     pub(super) explicit_color: bool,
     pub(super) explicit_background: bool,
 }
@@ -56,11 +67,12 @@ impl CssStyle {
             color: "#1f2328".to_string(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
+            line_height_factor: Some(DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE),
             display: Display::Block,
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,
             flex_shrink: 1.0,
-            grid_columns: 1,
+            grid_template_columns: vec![CssGridTrack::Fraction(1.0)],
             ..<Self as Default>::default()
         }
     }
@@ -73,8 +85,19 @@ impl CssStyle {
         let Some(source) = attribute(attributes, "style") else {
             return style;
         };
+        let mut line_heights = Vec::new();
         for declaration in source.split(';') {
-            style.apply_declaration(declaration);
+            if let Some((name, value)) = declaration.split_once(':')
+                && name.trim().eq_ignore_ascii_case("line-height")
+            {
+                line_heights.push(value.trim());
+            } else {
+                style.apply_declaration(declaration);
+            }
+        }
+        style.resolve_inherited_line_height();
+        for line_height in line_heights {
+            style.apply_line_height(line_height);
         }
         style
     }
@@ -84,14 +107,21 @@ impl CssStyle {
             color: self.color.clone(),
             font_size: self.font_size,
             line_height: self.line_height,
+            line_height_factor: self.line_height_factor,
             ..Self::browser_default()
         }
     }
 
     pub(super) fn for_tag(mut self, tag: &str) -> Self {
         self.apply_tag_metrics(tag);
-        self.line_height = self.line_height.max(self.font_size * LINE_HEIGHT_FACTOR);
+        self.resolve_inherited_line_height();
         self
+    }
+
+    fn resolve_inherited_line_height(&mut self) {
+        if let Some(factor) = self.line_height_factor {
+            self.line_height = self.font_size * factor;
+        }
     }
 
     fn apply_tag_metrics(&mut self, tag: &str) {
@@ -128,7 +158,8 @@ impl CssStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssStyle, DEFAULT_FONT_SIZE, LINE_HEIGHT_FACTOR};
+    use super::super::constants::LINE_HEIGHT_FACTOR;
+    use super::{CssGridTrack, CssStyle, DEFAULT_FONT_SIZE};
 
     #[test]
     fn box_shorthands_expand_and_longhands_override_individual_edges() {
@@ -182,7 +213,10 @@ mod tests {
 
         assert_eq!(style.display, taffy::style::Display::Grid);
         assert_eq!(style.gap, 12.0);
-        assert_eq!(style.grid_columns, 3);
+        assert_eq!(
+            style.grid_template_columns,
+            vec![CssGridTrack::Fraction(1.0); 3]
+        );
         assert_eq!(style.flex_direction, taffy::style::FlexDirection::Column);
         assert_eq!(style.flex_wrap, taffy::style::FlexWrap::Wrap);
         assert_eq!(style.flex_grow, 2.0);
@@ -225,6 +259,38 @@ mod tests {
     }
 
     #[test]
+    fn unitless_line_height_resolves_after_font_size_and_scales_when_inherited() {
+        let before_font_size = vec![(
+            "style".to_string(),
+            "line-height: 1.5; font-size: 20px".to_string(),
+        )];
+        let parent = CssStyle::from_attributes(&before_font_size, &CssStyle::browser_default());
+        assert_eq!(parent.line_height, 30.0);
+
+        let child_attributes = vec![("style".to_string(), "font-size: 24px".to_string())];
+        let child = CssStyle::from_attributes(&child_attributes, &parent);
+        assert_eq!(child.line_height, 36.0);
+
+        let fixed_parent = vec![(
+            "style".to_string(),
+            "line-height: 30px; font-size: 20px".to_string(),
+        )];
+        let fixed_parent = CssStyle::from_attributes(&fixed_parent, &CssStyle::browser_default());
+        let fixed_child = CssStyle::from_attributes(&child_attributes, &fixed_parent);
+        assert_eq!(fixed_child.line_height, 30.0);
+    }
+
+    #[test]
+    fn invalid_line_height_does_not_erase_the_inherited_value() {
+        let attributes = vec![("style".to_string(), "line-height: invalid".to_string())];
+        let inherited = CssStyle::browser_default();
+        let style = CssStyle::from_attributes(&attributes, &inherited);
+
+        assert_eq!(style.line_height, inherited.line_height);
+        assert_eq!(style.line_height_factor, inherited.line_height_factor);
+    }
+
+    #[test]
     fn hidden_attribute_maps_to_display_none() {
         let attributes = vec![("hidden".to_string(), String::new())];
         let style = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
@@ -264,7 +330,14 @@ mod tests {
         assert_eq!(style.padding_right, 3.0);
         assert_eq!(style.font_size, 20.0);
         assert_eq!(style.line_height, 30.0);
-        assert_eq!(style.grid_columns, 3);
+        assert_eq!(
+            style.grid_template_columns,
+            vec![
+                CssGridTrack::Fraction(1.0),
+                CssGridTrack::Fraction(2.0),
+                CssGridTrack::Fraction(1.0),
+            ]
+        );
 
         let normal = vec![("style".to_string(), "line-height: normal".to_string())];
         let normal = CssStyle::from_attributes(&normal, &CssStyle::browser_default());
@@ -273,5 +346,53 @@ mod tests {
         let em = vec![("style".to_string(), "line-height: 2em".to_string())];
         let em = CssStyle::from_attributes(&em, &CssStyle::browser_default());
         assert_eq!(em.line_height, DEFAULT_FONT_SIZE * 2.0);
+    }
+
+    #[test]
+    fn grid_tracks_preserve_declared_sizes() {
+        let attributes = vec![(
+            "style".to_string(),
+            "display:grid; grid-template-columns: 100px max-content 2fr 25%".to_string(),
+        )];
+        let style = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
+        assert_eq!(
+            style.grid_template_columns,
+            vec![
+                CssGridTrack::Length(100.0),
+                CssGridTrack::MaxContent,
+                CssGridTrack::Fraction(2.0),
+                CssGridTrack::Percent(0.25),
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_repeat_expands_each_declared_track() {
+        let repeat = vec![(
+            "style".to_string(),
+            "grid-template-columns: repeat(2, 80px 1fr)".to_string(),
+        )];
+        let repeat = CssStyle::from_attributes(&repeat, &CssStyle::browser_default());
+        assert_eq!(
+            repeat.grid_template_columns,
+            vec![
+                CssGridTrack::Length(80.0),
+                CssGridTrack::Fraction(1.0),
+                CssGridTrack::Length(80.0),
+                CssGridTrack::Fraction(1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_grid_tracks_preserve_the_inherited_template() {
+        let attributes = vec![(
+            "style".to_string(),
+            "grid-template-columns: minmax(broken)".to_string(),
+        )];
+        let inherited = CssStyle::browser_default();
+        let style = CssStyle::from_attributes(&attributes, &inherited);
+
+        assert_eq!(style.grid_template_columns, inherited.grid_template_columns);
     }
 }

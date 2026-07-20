@@ -242,6 +242,36 @@ main { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 2
 }
 
 #[test]
+fn grid_flow_preserves_fixed_and_fractional_track_sizes() -> TestResult {
+    let mut session = start(
+        r#"<style>
+main { display: grid; grid-template-columns: 100px 1fr; gap: 12px; width: 280px; }
+.card { height: 40px; }
+#first { background: #ef4444; }
+#second { background: #3b82f6; }
+</style>
+<main><section id=first class=card>First</section><section id=second class=card>Second</section></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#ef4444"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="128" y="16" width="168" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
 fn percentage_width_reflows_against_resized_viewport() -> TestResult {
     let mut session = start(r#"<main style="width:50%; height:40px; background:#123456"></main>"#)?;
     let initial = session.layout().map_err(to_string)?;

@@ -101,10 +101,43 @@ fn html_release_flow_never_requires_an_external_browser() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[test]
+fn html_platform_prerequisite_and_fallback_policy_is_contractually_documented()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let readme = std::fs::read_to_string(root.join(README_PATH))?;
+    let release_notes = std::fs::read_to_string(root.join(RELEASE_DOC_PATH))?;
+
+    assert!(
+        readme.contains("Platform Prerequisites for HTML"),
+        "README must document HTML platform prerequisites"
+    );
+    assert!(
+        readme.contains("system font fallback only") && readme.contains("tofu"),
+        "README must document system fallback and tofu risk"
+    );
+    assert!(
+        release_notes.contains("HTML 系プレビュー前提条件")
+            && release_notes.contains("release contract"),
+        "Release docs must document HTML platform prerequisites as release contract"
+    );
+    assert!(
+        release_notes.contains("system font fallback") && release_notes.contains("tofu"),
+        "Release docs must document system font fallback and tofu behavior"
+    );
+    assert!(
+        release_notes.contains("外部ブラウザや WebView を経由せず"),
+        "Release docs must explicitly state no external browser/WebView dependency"
+    );
+    Ok(())
+}
+
 const HTML_BROWSER_SESSION_PATH: &str =
     "crates/katana-render-runtime/src/renderer/backends/html_browser/session.rs";
 const STATIC_HTML_RENDERER_PATH: &str =
     "crates/katana-render-runtime/src/renderer/backends/html.rs";
+const README_PATH: &str = "README.md";
+const RELEASE_DOC_PATH: &str = "docs/release.md";
 
 fn interactive_runtime_surfaces(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut surfaces = [

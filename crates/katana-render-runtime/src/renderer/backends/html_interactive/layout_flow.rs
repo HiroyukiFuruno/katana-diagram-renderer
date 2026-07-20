@@ -1,12 +1,12 @@
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
 use super::layout::HtmlLayoutRenderer;
-use super::layout_flow_measure::{is_layout_item, item_style, leaf_style, measured_width};
-use super::style::CssStyle;
+use super::layout_flow_measure::{is_layout_item, item_style, leaf_style, measured_widths};
+use super::style::{CssGridTrack, CssStyle};
 use super::types::DetailsContext;
 use taffy::geometry::Size;
 use taffy::prelude::{AvailableSpace, Display, Style, TaffyTree};
-use taffy::style_helpers::{auto, fr, length};
+use taffy::style_helpers::{auto, fr, length, max_content, min_content, percent};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_flow_children(
@@ -57,10 +57,13 @@ impl HtmlLayoutRenderer {
         style: &CssStyle,
         details: DetailsContext,
     ) -> Result<Vec<taffy::tree::NodeId>, String> {
+        let item_styles = items
+            .iter()
+            .map(|item| item_style(item, style, width, items.len()))
+            .collect::<Vec<_>>();
+        let widths = measured_widths(items, &item_styles, width, style);
         let mut nodes = Vec::with_capacity(items.len());
-        for item in items {
-            let item_style = item_style(item, style, width, items.len());
-            let measure_width = measured_width(item, &item_style, width, style, items.len());
+        for ((item, item_style), measure_width) in items.iter().zip(item_styles).zip(widths) {
             let height = self.measure_node_height(item, measure_width, style, details)?;
             let node = tree
                 .new_leaf(leaf_style(item_style, measure_width, height))
@@ -134,9 +137,26 @@ fn flow_style(style: &CssStyle, width: f32) -> Style {
         ..Style::default()
     };
     if style.display == Display::Grid {
-        layout.grid_template_columns = vec![fr(1.0_f32); style.grid_columns.max(1)];
+        layout.grid_template_columns = style
+            .grid_template_columns
+            .iter()
+            .copied()
+            .map(taffy_grid_track)
+            .map(Into::into)
+            .collect();
     }
     layout
+}
+
+fn taffy_grid_track(track: CssGridTrack) -> taffy::style::TrackSizingFunction {
+    match track {
+        CssGridTrack::Length(value) => length(value),
+        CssGridTrack::Percent(value) => percent(value),
+        CssGridTrack::Fraction(value) => fr(value),
+        CssGridTrack::Auto => auto(),
+        CssGridTrack::MinContent => min_content(),
+        CssGridTrack::MaxContent => max_content(),
+    }
 }
 
 fn layout_error(error: impl ToString) -> String {
@@ -145,7 +165,8 @@ fn layout_error(error: impl ToString) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssStyle, DetailsContext, Display, HtmlDocumentNode};
+    use super::taffy_grid_track;
+    use super::{CssGridTrack, CssStyle, DetailsContext, Display, HtmlDocumentNode};
     use super::{HtmlLayoutRenderer, layout_error};
     use crate::renderer::backends::html_browser::HtmlBrowserViewport;
     use std::collections::HashMap;
@@ -179,5 +200,31 @@ mod tests {
             Ok(9.0)
         );
         assert_eq!(layout_error("boom"), "CSS flow layout failed: boom");
+    }
+
+    #[test]
+    fn grid_track_conversion_preserves_supported_css_sizing_kinds() {
+        let percent = taffy_grid_track(CssGridTrack::Percent(0.25));
+        assert_eq!(
+            percent
+                .max_sizing_function()
+                .definite_value(Some(200.0), |_, _| 0.0),
+            Some(50.0)
+        );
+        assert!(
+            taffy_grid_track(CssGridTrack::Auto)
+                .max_sizing_function()
+                .is_auto()
+        );
+        assert!(
+            taffy_grid_track(CssGridTrack::MinContent)
+                .max_sizing_function()
+                .is_min_content()
+        );
+        assert!(
+            taffy_grid_track(CssGridTrack::MaxContent)
+                .max_sizing_function()
+                .is_max_content()
+        );
     }
 }
