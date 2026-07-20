@@ -8,6 +8,7 @@ mod layout_control_paint;
 mod layout_controls;
 mod layout_dispatch;
 mod layout_flow;
+mod layout_flow_item;
 mod layout_flow_measure;
 mod layout_media;
 mod layout_paint;

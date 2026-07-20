@@ -15,7 +15,7 @@ struct SelectorTokenizer {
 }
 
 pub(super) fn selector_tokens(selector: &str) -> Option<Vec<SelectorToken>> {
-    if selector.is_empty() || selector.contains(['+', '~', ':']) {
+    if selector.is_empty() {
         return None;
     }
     let mut tokenizer = SelectorTokenizer::default();
@@ -31,6 +31,9 @@ impl SelectorTokenizer {
             return Some(());
         }
         match character {
+            '+' if self.bracket_depth == 0 => return None,
+            '~' if self.bracket_depth == 0 => return None,
+            ':' if self.bracket_depth == 0 => return None,
             '\'' | '"' if self.bracket_depth > 0 => self.start_quote(character),
             '[' => self.open_attribute()?,
             ']' => self.close_attribute()?,

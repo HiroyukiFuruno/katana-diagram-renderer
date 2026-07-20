@@ -190,9 +190,33 @@ mod tests {
         assert!(CssSelector::parse(".bad!").is_none());
         assert!(CssSelector::parse("bad!").is_none());
         assert!(CssSelector::parse("main + p").is_none());
+        assert!(CssSelector::parse("main ~ p").is_none());
         assert!(CssSelector::parse("main > > p").is_none());
+        assert!(CssSelector::parse("a:hover").is_none());
+        assert!(CssSelector::parse("a[href=\"https://example.com\"]:hover").is_none());
         assert!(CssSelector::parse("[data-state").is_none());
         assert!(CssSelector::parse("[data!=ready]").is_none());
+    }
+
+    #[test]
+    fn attribute_selector_with_scheme_url_matches_stylesheet_selector() -> Result<(), String> {
+        let selector = CssSelector::parse("[href=\"https://example.com\"]")
+            .ok_or("attribute selector must parse")?;
+        let attributes = attributes(&[("href", "https://example.com")]);
+
+        assert!(selector.matches("a", &attributes, &[]));
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_selector_with_scheme_url_matches_query_selector() -> Result<(), String> {
+        let selector = CssSelector::parse("a[href=\"https://example.com\"]")
+            .ok_or("attribute selector must parse")?;
+        let ancestors = vec![ancestor("body", &[])];
+        let attributes = attributes(&[("href", "https://example.com")]);
+
+        assert!(selector.matches("a", &attributes, &ancestors));
+        Ok(())
     }
 
     #[test]

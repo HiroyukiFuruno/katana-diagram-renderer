@@ -64,7 +64,7 @@ impl HtmlLayoutRenderer {
         let widths = measured_widths(items, &item_styles, width, style);
         let mut nodes = Vec::with_capacity(items.len());
         for ((item, item_style), measure_width) in items.iter().zip(item_styles).zip(widths) {
-            let height = self.measure_node_height(item, measure_width, style, details)?;
+            let height = self.measure_flow_node_height(item, measure_width, style, details)?;
             let node = tree
                 .new_leaf(leaf_style(item_style, measure_width, height))
                 .map_err(layout_error)?;
@@ -86,7 +86,7 @@ impl HtmlLayoutRenderer {
         let mut bottom = y;
         for (node, item) in nodes.iter().zip(items) {
             let layout = tree.layout(*node).map_err(layout_error)?;
-            let item_bottom = self.render_node(
+            let item_bottom = self.render_flow_node(
                 item,
                 x + layout.location.x,
                 y + layout.location.y,

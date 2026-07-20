@@ -154,6 +154,12 @@ impl CssStyle {
         self.max_width
             .map_or(width, |maximum| width.min(maximum.resolve(available)))
     }
+
+    pub(super) fn consume_assigned_flow_width(&mut self) {
+        if self.width.take().is_some() {
+            self.max_width = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +248,22 @@ mod tests {
         let max_only = vec![("style".to_string(), "max-width: 120px".to_string())];
         let max_only = CssStyle::from_attributes(&max_only, &CssStyle::browser_default());
         assert_eq!(max_only.box_width(400.0), 120.0);
+    }
+
+    #[test]
+    fn assigned_flow_width_consumes_width_and_its_max_constraint() {
+        let attributes = vec![(
+            "style".to_string(),
+            "width: 50%; max-width: 120px".to_string(),
+        )];
+        let mut assigned = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
+        assigned.consume_assigned_flow_width();
+        assert_eq!(assigned.box_width(120.0), 120.0);
+
+        let max_only = vec![("style".to_string(), "max-width: 80px".to_string())];
+        let mut max_only = CssStyle::from_attributes(&max_only, &CssStyle::browser_default());
+        max_only.consume_assigned_flow_width();
+        assert_eq!(max_only.box_width(120.0), 80.0);
     }
 
     #[test]

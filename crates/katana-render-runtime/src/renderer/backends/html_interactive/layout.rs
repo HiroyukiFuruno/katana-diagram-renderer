@@ -103,24 +103,6 @@ impl HtmlLayoutRenderer {
         }
     }
 
-    pub(super) fn measure_node_height(
-        &self,
-        node: &HtmlDocumentNode,
-        width: f32,
-        inherited: &CssStyle,
-        details: DetailsContext,
-    ) -> Result<f32, String> {
-        let viewport = HtmlBrowserViewport {
-            width: width.ceil().max(1.0) as u32,
-            height: 1,
-            device_scale_factor: 1.0,
-        };
-        let mut renderer = Self::new(viewport, 0.0, &self.input_values, self.focused_input);
-        let bottom = renderer.render_node(node, 0.0, 0.0, width, inherited, details);
-        renderer.ensure_layout_succeeded()?;
-        Ok(bottom.max(1.0))
-    }
-
     fn render_element_node(
         &mut self,
         node_id: u64,
@@ -146,17 +128,25 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
     ) -> f32 {
         let style = CssStyle::from_attributes(element.attributes, layout.style);
-        if style.display == taffy::style::Display::None {
-            return layout.y;
-        }
-        self.record_anchor(element, layout.y);
-        self.render_tag(
+        self.render_styled_element(
             element,
             LayoutContext {
                 style: &style,
                 ..layout
             },
         )
+    }
+
+    pub(super) fn render_styled_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+    ) -> f32 {
+        if layout.style.display == taffy::style::Display::None {
+            return layout.y;
+        }
+        self.record_anchor(element, layout.y);
+        self.render_tag(element, layout)
     }
 
     fn record_anchor(&mut self, element: ElementRenderContext<'_>, y: f32) {
@@ -170,7 +160,7 @@ impl HtmlLayoutRenderer {
         }
     }
 
-    fn ensure_layout_succeeded(&mut self) -> Result<(), String> {
+    pub(super) fn ensure_layout_succeeded(&mut self) -> Result<(), String> {
         self.layout_error.take().map_or(Ok(()), Err)
     }
 }

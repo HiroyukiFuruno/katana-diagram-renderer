@@ -165,6 +165,23 @@ main > section.card[data-state="ready"] p.message.emphasis {
 }
 
 #[test]
+fn url_attribute_selector_controls_stylesheet_paint() -> TestResult {
+    let session = start(
+        r#"<style>
+a[href="https://example.com"] { background: #35a853; padding: 4px; }
+</style>
+<a href="https://example.com">Matching URL</a>
+<a href="https://example.net">Different URL</a>"#,
+    )?;
+    let frame = session
+        .latest_frame()
+        .ok_or_else(|| "selector frame must exist".to_string())?;
+
+    assert!(frame_contains_rgb(frame, [53, 168, 83]));
+    Ok(())
+}
+
+#[test]
 fn four_value_box_shorthands_control_painted_geometry() -> TestResult {
     let mut session = start(
         r#"<main style="background: #123456; margin: 2px 4px 6px 8px; padding: 10px 12px 14px 16px"><p>Box model</p></main>"#,
@@ -208,6 +225,34 @@ main { display: flex; gap: 10px; width: 280px; }
         "{}",
         layout.svg
     );
+    Ok(())
+}
+
+#[test]
+fn flex_flow_resolves_percentage_item_width_once() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex; width:280px">
+<section style="width:50%; height:40px; background:#ef4444">Half width</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="140" height="40" fill="#ef4444"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn flex_flow_paints_a_direct_text_node() -> TestResult {
+    let mut session = start(r#"<main style="display:flex; width:280px">Direct flow text</main>"#)?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(layout.svg.contains("Direct flow text"), "{}", layout.svg);
     Ok(())
 }
 
@@ -265,6 +310,25 @@ main { display: grid; grid-template-columns: 100px 1fr; gap: 12px; width: 280px;
         layout
             .svg
             .contains(r##"<rect x="128" y="16" width="168" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn grid_flow_resolves_percentage_item_width_once() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:grid; grid-template-columns:1fr; width:280px">
+<section style="width:50%; height:40px; background:#3b82f6">Half width</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="140" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );

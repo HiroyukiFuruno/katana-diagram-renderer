@@ -136,6 +136,24 @@ fn query_selector_all_returns_each_matching_dom_element() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn url_attribute_selectors_work_through_query_selector_and_query_selector_all() -> TestResult {
+    let output = render(
+        r#"<main><a href="https://example.com">One</a><a href="https://example.com">Two</a><a href="https://example.net">Other</a></main><p id=count></p><script>const selector = 'a[href="https://example.com"]'; document.querySelector(selector).textContent = 'Matched'; const matches = document.querySelectorAll(selector); matches.forEach((item) => { item.setAttribute('data-match', 'yes'); }); document.getElementById('count').textContent = String(matches.length);</script>"#,
+    )?;
+
+    assert!(
+        output.contains(r#"<a href="https://example.com" data-match="yes">Matched</a>"#),
+        "{output}"
+    );
+    assert!(
+        output.contains(r#"<a href="https://example.com" data-match="yes">Two</a>"#),
+        "{output}"
+    );
+    assert!(output.contains("<p id=\"count\">2</p>"), "{output}");
+    Ok(())
+}
+
 fn render(source: &str) -> TestResult<String> {
     HtmlRenderer
         .render(&HtmlRenderInput {
