@@ -6,6 +6,8 @@ use crate::renderer::backends::html_interactive::HtmlInteractiveSession;
 
 #[path = "session_shutdown.rs"]
 mod shutdown;
+#[path = "session_sync.rs"]
+mod sync;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlBrowserSessionState {
@@ -164,36 +166,15 @@ impl HtmlBrowserSession {
             .then_some(())
             .ok_or(HtmlBrowserError::SessionClosed)
     }
-
-    fn sync_interactive_state(&mut self) -> Result<(), HtmlBrowserError> {
-        let (frame, navigation) = {
-            let interactive = self
-                .interactive
-                .as_mut()
-                .ok_or(HtmlBrowserError::RuntimeNotStarted)?;
-            (
-                interactive.latest_frame().cloned(),
-                interactive.take_navigation(),
-            )
-        };
-        if let Some(frame) = frame
-            && self
-                .latest_frame
-                .as_ref()
-                .is_none_or(|latest| latest.generation != frame.generation)
-        {
-            self.accept_frame(frame)?;
-        }
-        if navigation.is_some() {
-            self.pending_navigation = navigation;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_fragment_tests.rs"]
+mod fragment_tests;
 
 #[cfg(test)]
 #[path = "session_state_tests.rs"]

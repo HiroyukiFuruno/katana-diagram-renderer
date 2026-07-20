@@ -5,9 +5,13 @@ Returns the result as raw bytes compatible with egui's `ColorImage`. */
 use resvg::{render, usvg};
 use tiny_skia::Pixmap;
 
+#[path = "svg_rasterize_font.rs"]
+mod font;
+
+use font::{html_rasterizer_options, rasterizer_options};
+
 const MAX_RASTERIZED_SVG_EDGE: f32 = 8192.0;
 const LIGHT_DARK_FUNCTION: &str = "light-dark(";
-const BUNDLED_SANS_SERIF_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoSans-Regular.ttf");
 
 #[derive(Debug, Clone)]
 pub struct RasterizedSvg {
@@ -28,8 +32,23 @@ impl SvgRasterizeOps {
     }
 
     pub fn rasterize_svg(svg_text: &str, scale: f32) -> Result<RasterizedSvg, SvgRasterizeError> {
+        Self::rasterize_with_options(svg_text, scale, &rasterizer_options())
+    }
+
+    pub(crate) fn rasterize_html_svg(
+        svg_text: &str,
+        scale: f32,
+    ) -> Result<RasterizedSvg, SvgRasterizeError> {
+        Self::rasterize_with_options(svg_text, scale, &html_rasterizer_options())
+    }
+
+    fn rasterize_with_options(
+        svg_text: &str,
+        scale: f32,
+        options: &usvg::Options<'_>,
+    ) -> Result<RasterizedSvg, SvgRasterizeError> {
         let compatible_svg = Self::preprocess_for_rasterizer(svg_text);
-        let tree = usvg::Tree::from_str(&compatible_svg, &rasterizer_options())
+        let tree = usvg::Tree::from_str(&compatible_svg, options)
             .map_err(|e| SvgRasterizeError::ParseFailed(e.to_string()))?;
         let raster = RasterTarget::new(tree.size(), scale);
         let pixmap = raster.render(&tree)?;
@@ -75,20 +94,6 @@ impl RasterTarget {
             tiny_skia::Transform::from_scale(self.effective_scale, self.effective_scale);
         render(tree, transform, &mut pixmap.as_mut());
         Ok(pixmap)
-    }
-}
-
-fn rasterizer_options() -> usvg::Options<'static> {
-    rasterizer_options_with_font_db(font_db())
-}
-
-fn rasterizer_options_with_font_db(
-    fontdb: std::sync::Arc<usvg::fontdb::Database>,
-) -> usvg::Options<'static> {
-    usvg::Options {
-        /* WHY: Text inside SVG becomes invisible if system fonts are not provided. */
-        fontdb,
-        ..usvg::Options::default()
     }
 }
 
@@ -154,24 +159,6 @@ fn parse_light_dark_function(content: &str) -> Option<(usize, &str)> {
         }
     }
     None
-}
-
-fn font_db() -> std::sync::Arc<usvg::fontdb::Database> {
-    static FONT_DB: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    std::sync::Arc::clone(FONT_DB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        /* WHY: host font が無くても KRR frame の本文を白紙にしない。 */
-        db.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
-        std::sync::Arc::new(db)
-    }))
-}
-
-#[cfg(test)]
-fn bundled_font_db() -> std::sync::Arc<usvg::fontdb::Database> {
-    let mut db = usvg::fontdb::Database::new();
-    db.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
-    std::sync::Arc::new(db)
 }
 
 fn effective_scale(width: f32, height: f32, requested_scale: f32) -> f32 {

@@ -36,6 +36,9 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   `rtk just coverage` with `100% / 0 uncovered` without exclusions or ignores.
 - [x] 1.7 Release and verify KRR `0.4.1` with deterministic bundled-font SVG
   rasterization.
+- [ ] 1.8 Release and verify KRR `0.4.3` with browser-style system-font
+  fallback, deterministic bundled Latin fallback, and committed IME text
+  rendering. The crates.io 10 MiB package gate must remain unchanged.
 
 ### 2. KDV Adapter
 
@@ -57,28 +60,40 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   automated end-to-end scenario and retain the raw URL origin through reload.
 - [x] 3.4 Capture headless-process evidence for CSS, accordion, button, input,
   local link navigation, reload, and resize using state-specific assertions.
-- [ ] 3.5 Run KatanA compile/unit/release contract gates with registry-only KDV
+- [x] 3.5 Reproduce Japanese committed text end-to-end, reject the tofu-glyph
+  frame, and verify the local KRR `0.4.3` candidate renders `日本語 IME入力` in
+  the input, JavaScript result, and status regions.
+- [ ] 3.6 Run KatanA compile/unit/release contract gates with registry-only KDV
   after KDV publication; no path/git dependency may remain in committed files.
 
 ### 4. Release Order And User Review
 
 - [x] 4.1 Pass all KRR quality/release gates, publish and verify KRR `0.4.0`.
 - [x] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
-- [ ] 4.3 Resolve KDV `0.3.0` from crates.io in KatanA and rerun the complete
-  headless acceptance matrix for release target `v0.22.33` only.
-- [ ] 4.4 Present state-specific screenshots and automated evidence to the user.
+- [ ] 4.3 Publish and verify KRR `0.4.3`, resolve it from crates.io in KatanA,
+  and rerun the complete headless acceptance matrix for `v0.22.33` only.
+- [ ] 4.4 Present final registry-only state-specific screenshots and automated
+  evidence to the user. Local-candidate evidence has already been presented.
   Until explicit approval: no KatanA commit, push, PR, publish, or release.
 
 ## Local Verification Evidence
 
-- KRR: KRR `0.4.1` is published and verified. Its `rtk just check`, strict
-  `rtk just coverage`, interactive preview example, and release gates passed.
-  The raster path embeds Noto Sans with its SIL OFL 1.1 license, and a test
-  rasterizes text with only that bundled font database so text frames cannot
-  depend on a host or CI system font.
-- KDV: KDV `0.3.0` is published and verified. Adapter contract integration,
-  adapter 100% coverage, `rtk just check`, and `rtk just coverage` passed with
-  crates.io KRR resolution.
+- KRR: KRR `0.4.2` is published and verified. The local `0.4.3` patch adds
+  browser-style system-font fallback after headless acceptance exposed tofu
+  glyphs for committed Japanese input. Its SVG tests reject repeated missing-glyph
+  cells, and local patched KatanA headless acceptance renders the committed text.
+  The public SVG rasterizer remains bundled-font-only while the interactive HTML
+  frame path owns system-font fallback. `rtk just check`, strict
+  `rtk just coverage` (600 workspace tests, 100% lines,
+  0 uncovered), `release-check`, package size, and publish dry-run pass; only
+  public release and registry verification remain.
+  The raster path still embeds Noto Sans with its SIL OFL 1.1 license as the
+  deterministic Latin fallback and uses platform fonts for additional scripts.
+- KDV: KDV `0.3.0` is published and verified. The local `0.3.1` patch coalesces
+  adjacent scroll and resize commands without crossing input or navigation
+  boundaries. Its 1,276-test release gate, adapter coverage, package verification,
+  and publish dry-run pass. The packaged dependency is crates.io KRR `^0.4.0`
+  with no path source; only public release and registry verification remain.
 - KatanA: headless acceptance captured CSS, accordion, JavaScript action,
   text input, local navigation, reload, and resize. Registry-only preflight
   correctly remains blocked until KRR and KDV are published. The optimized

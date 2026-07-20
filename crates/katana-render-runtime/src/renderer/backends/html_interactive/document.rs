@@ -141,13 +141,17 @@ fn finish_line(line: String, lines: &mut Vec<String>) {
 }
 
 pub(super) fn css_px(value: &str) -> Option<f32> {
+    css_number(value).filter(|value| *value >= 0.0)
+}
+
+fn css_number(value: &str) -> Option<f32> {
     value
         .trim()
         .strip_suffix("px")
         .unwrap_or(value.trim())
         .parse::<f32>()
         .ok()
-        .filter(|value| value.is_finite() && *value >= 0.0)
+        .filter(|value| value.is_finite())
 }
 
 pub(super) fn border_color(value: &str) -> Option<String> {

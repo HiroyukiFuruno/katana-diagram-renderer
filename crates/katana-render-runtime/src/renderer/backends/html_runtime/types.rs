@@ -30,16 +30,26 @@ pub struct HtmlNodeId(pub(crate) u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum HtmlRuntimeEventKind {
+    Blur,
+    Change,
     Click,
+    Focus,
     Input,
+    KeyDown,
+    KeyUp,
     Toggle,
 }
 
 impl HtmlRuntimeEventKind {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
+            "blur" => Some(Self::Blur),
+            "change" => Some(Self::Change),
             "click" => Some(Self::Click),
+            "focus" => Some(Self::Focus),
             "input" => Some(Self::Input),
+            "keydown" => Some(Self::KeyDown),
+            "keyup" => Some(Self::KeyUp),
             "toggle" => Some(Self::Toggle),
             _ => None,
         }
@@ -47,8 +57,13 @@ impl HtmlRuntimeEventKind {
 
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::Blur => "blur",
+            Self::Change => "change",
             Self::Click => "click",
+            Self::Focus => "focus",
             Self::Input => "input",
+            Self::KeyDown => "keydown",
+            Self::KeyUp => "keyup",
             Self::Toggle => "toggle",
         }
     }
@@ -59,25 +74,49 @@ pub struct HtmlNavigationIntent {
     pub href: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HtmlRuntimeEvent {
+    Blur { target: HtmlNodeId },
+    Change { target: HtmlNodeId },
     Click { target: HtmlNodeId },
+    Focus { target: HtmlNodeId },
     Input { target: HtmlNodeId },
+    KeyDown { target: HtmlNodeId, key: String },
+    KeyUp { target: HtmlNodeId, key: String },
     Toggle { target: HtmlNodeId },
 }
 
 impl HtmlRuntimeEvent {
-    pub(crate) fn kind(self) -> HtmlRuntimeEventKind {
+    pub(crate) fn kind(&self) -> HtmlRuntimeEventKind {
         match self {
+            Self::Blur { .. } => HtmlRuntimeEventKind::Blur,
+            Self::Change { .. } => HtmlRuntimeEventKind::Change,
             Self::Click { .. } => HtmlRuntimeEventKind::Click,
+            Self::Focus { .. } => HtmlRuntimeEventKind::Focus,
             Self::Input { .. } => HtmlRuntimeEventKind::Input,
+            Self::KeyDown { .. } => HtmlRuntimeEventKind::KeyDown,
+            Self::KeyUp { .. } => HtmlRuntimeEventKind::KeyUp,
             Self::Toggle { .. } => HtmlRuntimeEventKind::Toggle,
         }
     }
 
-    pub(crate) fn target(self) -> HtmlNodeId {
+    pub(crate) fn target(&self) -> HtmlNodeId {
         match self {
-            Self::Click { target } | Self::Input { target } | Self::Toggle { target } => target,
+            Self::Blur { target }
+            | Self::Change { target }
+            | Self::Click { target }
+            | Self::Focus { target }
+            | Self::Input { target }
+            | Self::KeyDown { target, .. }
+            | Self::KeyUp { target, .. }
+            | Self::Toggle { target } => *target,
+        }
+    }
+
+    pub(crate) fn key(&self) -> Option<&str> {
+        match self {
+            Self::KeyDown { key, .. } | Self::KeyUp { key, .. } => Some(key),
+            _ => None,
         }
     }
 }
@@ -93,4 +132,5 @@ pub(super) enum DomValue {
     Null,
     String(String),
     NodeId(u64),
+    NodeIds(Vec<u64>),
 }

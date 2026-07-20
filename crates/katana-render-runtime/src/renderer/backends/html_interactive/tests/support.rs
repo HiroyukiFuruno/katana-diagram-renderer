@@ -83,12 +83,20 @@ fn input_value_node(node: &HtmlDocumentNode) -> Option<&str> {
 }
 
 pub(super) fn frame_contains_rgb(frame: &HtmlBrowserFrame, expected: [u8; 3]) -> bool {
-    frame.pixels.chunks_exact(4).any(|pixel| {
-        pixel[0] == expected[0]
-            && pixel[1] == expected[1]
-            && pixel[2] == expected[2]
-            && pixel[3] == 255
-    })
+    frame_matching_rgb_pixels(frame, expected) > 0
+}
+
+pub(super) fn frame_matching_rgb_pixels(frame: &HtmlBrowserFrame, expected: [u8; 3]) -> usize {
+    frame
+        .pixels
+        .chunks_exact(4)
+        .filter(|pixel| {
+            pixel[0] == expected[0]
+                && pixel[1] == expected[1]
+                && pixel[2] == expected[2]
+                && pixel[3] == 255
+        })
+        .count()
 }
 
 pub(super) fn to_string(error: impl ToString) -> String {

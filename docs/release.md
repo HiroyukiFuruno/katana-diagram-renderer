@@ -36,6 +36,14 @@ GitHub のブランチ保護（branch protection）では、少なくとも次�
 - `katana-render-runtime` の梱包（package）と公開の事前実行（publish dry-run）
 - `katana-render-runtime-cli` の梱包（package）収録対象確認
 
+## HTML 系プレビュー前提条件（release contract）
+
+`katana-render-runtime` の HTML/CSS の interactive preview は、外部ブラウザや WebView を経由せず、プラットフォームの system font fallback に依存する設計です。
+このため、日本語文字を表示する場合は、対象ホストに日本語対応のシステムフォントが存在することを前提とします。
+前提条件を満たさない環境では、文字が tofu（□）になる可能性があります。
+
+この条件は `v0.4.3` のリリース契約として扱い、release checklist に明記して確認を維持してください。
+
 `katana-render-runtime-cli` は `katana-render-runtime` を先に公開しないと crates.io 上で依存解決できないため、
 取り込み依頼（Pull Request）時点では `katana-render-runtime` を事前実行（dry-run）し、CLI は収録対象確認までに留める。
 公開順序は `katana-render-runtime`、`katana-render-runtime-cli` の順に固定する。

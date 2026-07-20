@@ -151,11 +151,11 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: just runtime-bundle-check
 
-      - name: Install Graphviz for PlantUML
+      - name: Install Linux runtime test prerequisites
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y fonts-noto-cjk graphviz
 
       - name: Install Graphviz for PlantUML on macOS
         if: startsWith(matrix.os, 'macos-')

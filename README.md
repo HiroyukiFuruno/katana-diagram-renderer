@@ -121,6 +121,12 @@ katana-render-runtime = "0.3"
 
 Each renderer exposes the same `Renderer` trait, so rendering code can switch renderer implementations without changing the output contract.
 
+## Platform Prerequisites for HTML
+
+The HTML/CSS rendering path uses system font fallback only and does not bundle Japanese fonts.
+If a host does not provide a Japanese-capable system font, `tofu` glyphs (□) may appear for Japanese text.
+Applications consuming this crate must ensure required system fonts are available in their target environments.
+
 ## Non-Goals
 
 - Markdown AST parsing.

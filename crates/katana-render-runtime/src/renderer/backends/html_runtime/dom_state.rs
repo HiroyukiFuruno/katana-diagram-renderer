@@ -28,8 +28,8 @@ impl HtmlDomBridgeState {
         arguments: &[String],
     ) -> Result<DomValue, String> {
         match operation {
-            "getElementById" | "querySelector" | "createElement" | "textContent" | "innerHTML"
-            | "getAttribute" => self.lookup(operation, arguments),
+            "getElementById" | "querySelector" | "querySelectorAll" | "createElement"
+            | "textContent" | "innerHTML" | "getAttribute" => self.lookup(operation, arguments),
             "appendChild" | "remove" => self.mutate_tree(operation, arguments),
             "setTextContent" | "setInnerHTML" => self.mutate_content(operation, arguments),
             "setAttribute" | "removeAttribute" => self.set_attribute(operation, arguments),
@@ -49,6 +49,9 @@ impl HtmlDomBridgeState {
                 .query_selector(argument(arguments, 0)?)
                 .map(DomValue::NodeId)
                 .unwrap_or(DomValue::Null)),
+            "querySelectorAll" => Ok(DomValue::NodeIds(
+                document.query_selector_all(argument(arguments, 0)?),
+            )),
             "createElement" => document
                 .create_element(argument(arguments, 0)?)
                 .map(DomValue::NodeId),

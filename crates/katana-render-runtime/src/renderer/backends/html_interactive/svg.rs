@@ -2,9 +2,11 @@ use super::super::html_browser::HtmlBrowserViewport;
 use super::style::CssStyle;
 
 pub(super) fn svg_header(viewport: HtmlBrowserViewport) -> String {
+    let logical_width = viewport.logical_width();
+    let logical_height = viewport.logical_height();
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}"><rect width="100%" height="100%" fill="#ffffff"/>"##,
-        viewport.width, viewport.height, viewport.width, viewport.height
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {logical_width} {logical_height}"><rect width="100%" height="100%" fill="#ffffff"/>"##,
+        viewport.width, viewport.height
     )
 }
 

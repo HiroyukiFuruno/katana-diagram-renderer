@@ -1,12 +1,15 @@
-use super::{
-    RasterTarget, SvgRasterizeOps, bundled_font_db, effective_scale, font_db,
-    parse_light_dark_function, rasterizer_options, rasterizer_options_with_font_db,
+use super::font::{
+    bundled_font_db, html_font_db, html_rasterizer_options, rasterizer_options,
+    rasterizer_options_with_font_db,
 };
+use super::{RasterTarget, SvgRasterizeOps, effective_scale, parse_light_dark_function};
 use crate::markdown::color_preset::DiagramColorPreset;
 use crate::markdown::mermaid_renderer::MermaidRenderOps;
 use crate::markdown::runtime_assets::RuntimeAsset;
 use crate::markdown::{DiagramBlock, DiagramKind, DiagramResult};
 use resvg::usvg;
+
+const RGBA_CHANNELS: usize = 4;
 
 #[test]
 fn rasterize_svg_returns_pixels_for_simple_svg() {
@@ -37,8 +40,74 @@ fn rasterize_svg_renders_text_with_the_bundled_font() -> Result<(), String> {
 }
 
 #[test]
-fn rasterizer_font_database_uses_only_the_bundled_font() {
-    assert_eq!(1, font_db().faces().count());
+fn rasterize_svg_renders_distinct_japanese_glyphs_with_system_font_fallback() -> Result<(), String>
+{
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="48"><rect width="240" height="48" fill="#fff"/><g font-family="Noto Sans JP, Noto Sans, sans-serif" font-size="32" fill="#14532d"><text x="8" y="36">日</text><text x="56" y="36">本</text><text x="104" y="36">語</text><text x="152" y="36">入</text><text x="200" y="36">力</text></g></svg>"##;
+    let image = SvgRasterizeOps::rasterize_html_svg(svg, 1.0).map_err(|error| error.to_string())?;
+
+    let painted_pixels = image
+        .rgba
+        .chunks_exact(4)
+        .filter(|pixel| **pixel != [255, 255, 255, 255])
+        .count();
+    assert!(painted_pixels > 500, "painted pixels: {painted_pixels}");
+
+    let distinct_cells = distinct_cell_count(&image.rgba, image.height, 240, 48, 5);
+    assert!(
+        distinct_cells >= 4,
+        "Japanese glyph cells collapsed to repeated missing-glyph boxes"
+    );
+    Ok(())
+}
+
+fn distinct_cell_count(
+    image: &[u8],
+    image_height: u32,
+    image_width: usize,
+    cell_width: usize,
+    cell_count: usize,
+) -> usize {
+    (0..cell_count)
+        .map(|cell| {
+            let mut pixels = Vec::with_capacity(cell_width * image_height as usize * RGBA_CHANNELS);
+            for row in 0..image_height as usize {
+                let start = (row * image_width + cell * cell_width) * RGBA_CHANNELS;
+                pixels.extend_from_slice(&image[start..start + cell_width * RGBA_CHANNELS]);
+            }
+            pixels
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+#[test]
+fn rasterizer_prefers_the_bundled_noto_sans_before_system_fonts() -> Result<(), String> {
+    let database = html_font_db();
+    let query = usvg::fontdb::Query {
+        families: &[usvg::fontdb::Family::Name("Noto Sans")],
+        weight: usvg::fontdb::Weight::NORMAL,
+        stretch: usvg::fontdb::Stretch::Normal,
+        style: usvg::fontdb::Style::Normal,
+    };
+    let id = database
+        .query(&query)
+        .ok_or_else(|| "bundled Noto Sans was not found".to_string())?;
+    let face = database
+        .face(id)
+        .ok_or_else(|| "selected Noto Sans face was not found".to_string())?;
+
+    assert!(matches!(face.source, usvg::fontdb::Source::Binary(_)));
+    Ok(())
+}
+
+#[test]
+fn public_and_html_rasterizers_use_separate_font_databases() {
+    let public = rasterizer_options();
+    let html = html_rasterizer_options();
+
+    assert!(std::sync::Arc::ptr_eq(&public.fontdb, &bundled_font_db()));
+    assert!(std::sync::Arc::ptr_eq(&html.fontdb, &html_font_db()));
+    assert!(!std::sync::Arc::ptr_eq(&public.fontdb, &html.fontdb));
 }
 
 #[test]

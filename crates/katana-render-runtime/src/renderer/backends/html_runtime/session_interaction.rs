@@ -44,6 +44,7 @@ impl StaticHtmlRuntimeSession {
     ) -> Result<HtmlRuntimeDispatch, HtmlRuntimeError> {
         let kind = event.kind();
         let target = event.target();
+        let key = event.key();
         let navigation = {
             let isolate = self.isolate.as_mut().ok_or_else(discarded_runtime_error)?;
             let context = self.context.as_ref().ok_or_else(discarded_runtime_error)?;
@@ -51,7 +52,7 @@ impl StaticHtmlRuntimeSession {
             let context = v8::Local::new(handle_scope, context);
             let context_scope = &mut v8::ContextScope::new(handle_scope, context);
             v8::tc_scope!(let scope, &mut **context_scope);
-            dispatch_event(scope, target.0, kind)?
+            dispatch_event(scope, target.0, kind, key)?
         };
         Ok(HtmlRuntimeDispatch {
             content: self.snapshot()?,
@@ -69,9 +70,10 @@ fn dispatch_event(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
     node_id: u64,
     kind: HtmlRuntimeEventKind,
+    key: Option<&str>,
 ) -> Result<Option<HtmlNavigationIntent>, HtmlRuntimeError> {
     let target = element_reference(scope, node_id)?;
-    let event = event(scope, target, kind.as_str())?;
+    let event = event(scope, target, kind.as_str(), key)?;
     dispatch_registered_listeners(scope, node_id, kind, target, event)?;
     dispatch_inline_handler(scope, node_id, kind, target, event)?;
     if kind == HtmlRuntimeEventKind::Click {

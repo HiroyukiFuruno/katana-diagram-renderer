@@ -1,4 +1,5 @@
 use super::html_css_rule::{CssDeclaration, CssRule, parse_rules};
+use super::html_css_selector::CssAncestor;
 use super::html_css_sources::{inline_styles, interactive_styles};
 use markup5ever_rcdom::Handle;
 use std::collections::HashMap;
@@ -43,12 +44,21 @@ impl StaticCss {
     }
 
     pub(super) fn apply(&self, tag: &str, attributes: &HtmlAttributes) -> HtmlAttributes {
+        self.apply_with_ancestors(tag, attributes, &[])
+    }
+
+    pub(super) fn apply_with_ancestors(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> HtmlAttributes {
         let mut rendered = attributes
             .iter()
             .filter(|(name, _)| !name.eq_ignore_ascii_case("style"))
             .cloned()
             .collect::<HtmlAttributes>();
-        let stylesheet = self.resolved_declarations(tag, attributes);
+        let stylesheet = self.resolved_declarations(tag, attributes, ancestors);
         let inline = style_attribute(attributes);
         if stylesheet.is_empty() && inline.trim().is_empty() {
             return rendered;
@@ -61,12 +71,17 @@ impl StaticCss {
         rendered
     }
 
-    fn resolved_declarations(&self, tag: &str, attributes: &HtmlAttributes) -> Vec<String> {
+    fn resolved_declarations(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> Vec<String> {
         let mut selected = Vec::<SelectedDeclaration>::new();
         for (rule_order, rule) in self.rules.iter().enumerate() {
             let matches = match self.mode {
                 CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
-                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes),
+                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes, ancestors),
             };
             let Some(specificity) = matches else {
                 continue;
@@ -139,5 +154,60 @@ fn select_declaration(
     };
     if (candidate.specificity, candidate.rule_order) >= (current.specificity, current.rule_order) {
         *current = candidate;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::html_document::{HtmlDocument, HtmlDocumentNode};
+    use std::collections::HashMap;
+
+    #[test]
+    fn longhand_padding_is_resolved_before_shorthand() {
+        let document = HtmlDocument::parse(
+            "<style>.card { padding-left: 20px; } div { padding: 0; }</style>prefix<div class='card'>A</div>",
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+        let style = find_style_attribute(&nodes, "div");
+
+        assert_eq!(
+            style.as_deref(),
+            Some("padding-left: 20px; padding-top: 0; padding-right: 0; padding-bottom: 0")
+        );
+    }
+
+    #[test]
+    fn later_longhand_wins_after_an_intervening_shorthand() {
+        let document = HtmlDocument::parse(
+            "<style>.card { padding-left: 20px; padding: 0; padding-left: 10px; }</style><div class='card'>A</div>",
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+        let style = find_style_attribute(&nodes, "div");
+
+        assert_eq!(
+            style.as_deref(),
+            Some("padding-left: 10px; padding-top: 0; padding-right: 0; padding-bottom: 0")
+        );
+    }
+
+    fn find_style_attribute(nodes: &[HtmlDocumentNode], target_tag: &str) -> Option<String> {
+        nodes.iter().find_map(|node| match node {
+            HtmlDocumentNode::Element {
+                tag,
+                attributes,
+                children,
+                ..
+            } => {
+                if tag == target_tag {
+                    attributes
+                        .iter()
+                        .find(|(name, _)| name == "style")
+                        .map(|(_, value)| value.clone())
+                } else {
+                    find_style_attribute(children, target_tag)
+                }
+            }
+            HtmlDocumentNode::Text(_) => None,
+        })
     }
 }

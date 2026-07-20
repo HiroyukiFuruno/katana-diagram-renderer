@@ -81,7 +81,21 @@ fn dom_value<'scope>(
             let undefined = v8::undefined(scope).into();
             v8::String::new(scope, &value.to_string()).map_or(undefined, |value| value.into())
         }
+        DomValue::NodeIds(values) => node_id_array(scope, &values).into(),
     }
+}
+
+fn node_id_array<'scope>(
+    scope: &mut v8::PinScope<'scope, '_>,
+    values: &[u64],
+) -> v8::Local<'scope, v8::Array> {
+    let length = i32::try_from(values.len()).unwrap_or(i32::MAX);
+    let array = v8::Array::new(scope, length);
+    for (index, value) in values.iter().enumerate() {
+        let _assigned = v8::String::new(scope, &value.to_string())
+            .map(|value| array.set_index(scope, index as u32, value.into()));
+    }
+    array
 }
 
 #[cfg(test)]

@@ -6,10 +6,11 @@ use super::super::html_runtime::{StaticHtmlRuntime, StaticHtmlRuntimeSession};
 use super::super::html_subresources::HtmlSubresourcePolicy;
 use super::document::seed_input_values;
 use super::layout::HtmlLayoutRenderer;
+use super::session_geometry::max_scroll_for;
 use super::types::{HitTarget, LayoutResult};
 use super::{HtmlBrowserError, runtime_failure};
 use crate::markdown::svg_rasterize::SvgRasterizeOps;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// In-process Rust/V8 HTML session. It owns the DOM, layout, hit-test and
 /// raster frame so downstream crates only exchange frames and input events.
@@ -23,8 +24,10 @@ pub(in crate::renderer::backends) struct HtmlInteractiveSession {
     pub(super) input_values: HashMap<u64, String>,
     pub(super) pressed_target: Option<u64>,
     pub(super) focused_input: Option<u64>,
+    pub(super) dirty_inputs: HashSet<u64>,
     pub(super) scroll_y: f32,
     pub(super) content_height: f32,
+    pub(super) resize_anchor: Option<String>,
     pub(super) pending_navigation: Option<HtmlBrowserNavigationEvent>,
     pub(super) resource_policy: HtmlSubresourcePolicy,
 }
@@ -41,6 +44,11 @@ impl HtmlInteractiveSession {
             .map_err(runtime_failure)?;
         let mut session = Self::new(source, viewport, runtime);
         session.render_frame()?;
+        if session.source.origin.url().fragment().is_some() {
+            let origin = session.source.origin.clone();
+            session.apply_fragment_navigation(origin)?;
+            session.render_frame()?;
+        }
         Ok(session)
     }
 
@@ -60,8 +68,10 @@ impl HtmlInteractiveSession {
             input_values: HashMap::new(),
             pressed_target: None,
             focused_input: None,
+            dirty_inputs: HashSet::new(),
             scroll_y: 0.0,
             content_height: 0.0,
+            resize_anchor: None,
             pending_navigation: None,
             resource_policy,
         }
@@ -87,7 +97,14 @@ impl HtmlInteractiveSession {
     ) -> Result<(), HtmlBrowserError> {
         viewport.validate()?;
         self.viewport = viewport;
-        self.scroll_y = self.scroll_y.min(self.max_scroll());
+        let layout = self.layout()?;
+        let next_scroll = self
+            .resize_anchor
+            .as_ref()
+            .and_then(|anchor| layout.anchor_positions.get(anchor))
+            .copied()
+            .unwrap_or(self.scroll_y);
+        self.scroll_y = next_scroll.clamp(0.0, max_scroll_for(&layout, viewport));
         self.render_frame()
     }
 
@@ -98,26 +115,27 @@ impl HtmlInteractiveSession {
         self.store_frame(render, frame)
     }
 
-    fn layout(&mut self) -> Result<LayoutResult, HtmlBrowserError> {
+    pub(super) fn layout(&mut self) -> Result<LayoutResult, HtmlBrowserError> {
         let nodes = self.runtime.interactive_nodes().map_err(runtime_failure)?;
         seed_input_values(&nodes, &mut self.input_values);
-        Ok(HtmlLayoutRenderer::render(
+        HtmlLayoutRenderer::render(
             &nodes,
             self.viewport,
             self.scroll_y,
             &self.input_values,
             self.focused_input,
-        ))
+        )
+        .map_err(runtime_failure)
     }
 
     fn update_scroll(&mut self, render: &LayoutResult) {
         self.scroll_y = self
             .scroll_y
-            .min((render.content_height - self.viewport.height as f32).max(0.0));
+            .min((render.content_height - self.viewport.logical_height()).max(0.0));
     }
 
     fn rasterize(&self, svg: &str) -> Result<Vec<u8>, HtmlBrowserError> {
-        let raster = SvgRasterizeOps::rasterize_svg(svg, 1.0)
+        let raster = SvgRasterizeOps::rasterize_html_svg(svg, 1.0)
             .map_err(|error| runtime_failure(error.to_string()))?;
         self.validate_raster_dimensions(raster.width, raster.height)?;
         Ok(raster.rgba)
@@ -157,22 +175,6 @@ impl HtmlInteractiveSession {
         self.content_height = render.content_height;
         Ok(())
     }
-
-    pub(super) fn hit_target_at(&self, x: f32, y: f32) -> Option<&HitTarget> {
-        let document_y = y + self.scroll_y;
-        self.hit_targets
-            .iter()
-            .rev()
-            .find(|target| contains(target, x, document_y))
-    }
-
-    pub(super) fn max_scroll(&self) -> f32 {
-        (self.content_height - self.viewport.height as f32).max(0.0)
-    }
-}
-
-fn contains(target: &HitTarget, x: f32, y: f32) -> bool {
-    x >= target.x && x <= target.x + target.width && y >= target.y && y <= target.y + target.height
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use super::super::html_document::HtmlDocumentNode;
 use super::style::CssStyle;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(super) struct ElementRenderContext<'a> {
@@ -95,5 +96,6 @@ pub(super) enum HitTargetKind {
 pub(super) struct LayoutResult {
     pub(super) svg: String,
     pub(super) hit_targets: Vec<HitTarget>,
+    pub(super) anchor_positions: HashMap<String, f32>,
     pub(super) content_height: f32,
 }
