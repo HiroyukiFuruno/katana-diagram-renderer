@@ -1,5 +1,7 @@
 use super::html_css::HtmlAttributes;
 use super::html_css_selector::{CssAncestor, CssSelector};
+#[path = "html_css_shorthand.rs"]
+mod html_css_shorthand;
 
 #[derive(Debug)]
 pub(super) struct CssRule {
@@ -80,12 +82,21 @@ fn parse_declarations(source: &str) -> Vec<CssDeclaration> {
         .filter_map(|(name, value)| {
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim();
-            (supported_property(&name) && !value.is_empty()).then_some(CssDeclaration {
-                name,
-                value: value.to_string(),
+            (supported_property(&name) && !value.is_empty()).then(|| {
+                expand_box_shorthand(&name, value).unwrap_or_else(|| {
+                    vec![CssDeclaration {
+                        name: name.clone(),
+                        value: value.to_string(),
+                    }]
+                })
             })
         })
+        .flatten()
         .collect()
+}
+
+fn expand_box_shorthand(name: &str, value: &str) -> Option<Vec<CssDeclaration>> {
+    html_css_shorthand::expand_box_shorthand(name, value)
 }
 
 fn supported_property(name: &str) -> bool {
@@ -147,7 +158,7 @@ fn is_flow_property(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_rules, supported_property};
+    use super::{parse_declarations, parse_rules, supported_property};
 
     #[test]
     fn rules_keep_layout_declarations_for_the_interactive_runtime() {
@@ -164,7 +175,19 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             declarations,
-            vec!["margin", "padding", "width", "min-height", "font-size"]
+            vec![
+                "margin-top",
+                "margin-right",
+                "margin-bottom",
+                "margin-left",
+                "padding-top",
+                "padding-right",
+                "padding-bottom",
+                "padding-left",
+                "width",
+                "min-height",
+                "font-size",
+            ]
         );
     }
 
@@ -176,5 +199,33 @@ mod tests {
 
         assert_eq!(rules[0].declarations.len(), 1);
         assert_eq!(rules[0].declarations[0].name, "display");
+    }
+
+    #[test]
+    fn parse_box_shorthand_is_expanded_into_longhands() {
+        let declarations = parse_declarations(
+            "padding: 4px 5px 6px 7px; margin: 10px 20px; margin-top: 30px; padding: 1px 2px 3px 4px 5px;",
+        );
+        let actual = declarations
+            .iter()
+            .map(|declaration| (declaration.name.as_str(), declaration.value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected_box_declarations());
+    }
+
+    fn expected_box_declarations() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("padding-top", "4px"),
+            ("padding-right", "5px"),
+            ("padding-bottom", "6px"),
+            ("padding-left", "7px"),
+            ("margin-top", "10px"),
+            ("margin-right", "20px"),
+            ("margin-bottom", "10px"),
+            ("margin-left", "20px"),
+            ("margin-top", "30px"),
+            ("padding", "1px 2px 3px 4px 5px"),
+        ]
     }
 }

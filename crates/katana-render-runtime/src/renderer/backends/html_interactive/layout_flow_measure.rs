@@ -8,7 +8,11 @@ use taffy::style_helpers::length;
 
 pub(super) fn leaf_style(style: CssStyle, width: f32, height: f32) -> Style {
     Style {
-        display: Display::Block,
+        display: if style.display == Display::None {
+            Display::None
+        } else {
+            Display::Block
+        },
         size: Size {
             width: length(width),
             height: length(height),

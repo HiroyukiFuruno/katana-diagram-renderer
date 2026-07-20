@@ -82,7 +82,9 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   browser-style system-font fallback after headless acceptance exposed tofu
   glyphs for committed Japanese input. Its SVG tests reject repeated missing-glyph
   cells, and local patched KatanA headless acceptance renders the committed text.
-  `rtk just check`, strict `rtk just coverage` (571 workspace tests, 100% lines,
+  The public SVG rasterizer remains bundled-font-only while the interactive HTML
+  frame path owns system-font fallback. `rtk just check`, strict
+  `rtk just coverage` (598 workspace tests, 100% lines,
   0 uncovered), `release-check`, package size, and publish dry-run pass; only
   public release and registry verification remain.
   The raster path still embeds Noto Sans with its SIL OFL 1.1 license as the

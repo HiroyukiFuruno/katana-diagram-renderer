@@ -199,6 +199,21 @@ fn four_value_box_shorthands_control_painted_geometry() -> TestResult {
 }
 
 #[test]
+fn more_specific_padding_longhand_wins_over_later_shorthand_during_paint() -> TestResult {
+    let mut session = start(
+        r#"<style>
+.card { padding-left: 20px; }
+div { padding: 0; }
+</style>
+<div class="card">Cascade text</div>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(layout.svg.contains(r#"<text x="36""#), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
 fn flex_flow_positions_items_with_css_gap() -> TestResult {
     let mut session = start(
         r#"<style>
@@ -253,6 +268,48 @@ fn flex_flow_paints_a_direct_text_node() -> TestResult {
     let layout = session.layout().map_err(to_string)?;
 
     assert!(layout.svg.contains("Direct flow text"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn hidden_flex_item_does_not_consume_width_or_gap() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex; gap:10px; width:280px">
+<section hidden style="width:100px; height:40px; background:#ef4444">Hidden</section>
+<section style="width:100px; height:40px; background:#3b82f6">Visible</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(!layout.svg.contains("Hidden"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn hidden_grid_item_does_not_consume_a_track_or_gap() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:grid; grid-template-columns:100px 100px; gap:10px; width:280px">
+<section hidden style="height:40px; background:#ef4444">Hidden</section>
+<section style="height:40px; background:#3b82f6">Visible</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(!layout.svg.contains("Hidden"), "{}", layout.svg);
     Ok(())
 }
 

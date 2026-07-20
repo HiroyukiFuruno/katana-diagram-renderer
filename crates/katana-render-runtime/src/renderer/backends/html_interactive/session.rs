@@ -135,7 +135,7 @@ impl HtmlInteractiveSession {
     }
 
     fn rasterize(&self, svg: &str) -> Result<Vec<u8>, HtmlBrowserError> {
-        let raster = SvgRasterizeOps::rasterize_svg(svg, 1.0)
+        let raster = SvgRasterizeOps::rasterize_html_svg(svg, 1.0)
             .map_err(|error| runtime_failure(error.to_string()))?;
         self.validate_raster_dimensions(raster.width, raster.height)?;
         Ok(raster.rgba)
