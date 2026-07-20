@@ -1,4 +1,5 @@
 use super::html_css_rule::{CssDeclaration, CssRule, parse_rules};
+use super::html_css_selector::CssAncestor;
 use super::html_css_sources::{inline_styles, interactive_styles};
 use markup5ever_rcdom::Handle;
 use std::collections::HashMap;
@@ -43,12 +44,21 @@ impl StaticCss {
     }
 
     pub(super) fn apply(&self, tag: &str, attributes: &HtmlAttributes) -> HtmlAttributes {
+        self.apply_with_ancestors(tag, attributes, &[])
+    }
+
+    pub(super) fn apply_with_ancestors(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> HtmlAttributes {
         let mut rendered = attributes
             .iter()
             .filter(|(name, _)| !name.eq_ignore_ascii_case("style"))
             .cloned()
             .collect::<HtmlAttributes>();
-        let stylesheet = self.resolved_declarations(tag, attributes);
+        let stylesheet = self.resolved_declarations(tag, attributes, ancestors);
         let inline = style_attribute(attributes);
         if stylesheet.is_empty() && inline.trim().is_empty() {
             return rendered;
@@ -61,12 +71,17 @@ impl StaticCss {
         rendered
     }
 
-    fn resolved_declarations(&self, tag: &str, attributes: &HtmlAttributes) -> Vec<String> {
+    fn resolved_declarations(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> Vec<String> {
         let mut selected = Vec::<SelectedDeclaration>::new();
         for (rule_order, rule) in self.rules.iter().enumerate() {
             let matches = match self.mode {
                 CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
-                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes),
+                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes, ancestors),
             };
             let Some(specificity) = matches else {
                 continue;

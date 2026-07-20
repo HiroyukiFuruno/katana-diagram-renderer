@@ -21,7 +21,7 @@ impl HtmlLayoutRenderer {
             layout.height,
             layout.style,
         );
-        let marker_x = layout.x + layout.style.padding;
+        let marker_x = layout.x + layout.style.padding_left;
         let marker_y = layout.y + (layout.height - SUMMARY_MARKER_SIZE) / 2.0;
         self.svg.push_str(&format!(
             r#"<path d="{}" fill="{}"/>"#,
@@ -31,7 +31,7 @@ impl HtmlLayoutRenderer {
         self.paint_control_text(
             &node_text(children),
             marker_x + SUMMARY_MARKER_SIZE + SUMMARY_MARKER_TEXT_GAP,
-            layout.y + layout.style.padding,
+            layout.y + layout.style.padding_top,
             layout.height,
             layout.style,
         );
@@ -61,11 +61,12 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn summary_layout_uses_a_vector_disclosure_marker() {
-        let svg = render_summary_svg(false);
+    fn summary_layout_uses_a_vector_disclosure_marker() -> Result<(), String> {
+        let svg = render_summary_svg(false)?;
 
         assert!(svg.contains("<path d=\"M "));
         assert!(!svg.contains("▸"));
+        Ok(())
     }
 
     #[test]
@@ -78,18 +79,19 @@ mod tests {
     }
 
     #[test]
-    fn details_open_attribute_changes_the_rendered_marker_direction() {
-        let closed_svg = render_summary_svg(false);
-        let open_svg = render_summary_svg(true);
+    fn details_open_attribute_changes_the_rendered_marker_direction() -> Result<(), String> {
+        let closed_svg = render_summary_svg(false)?;
+        let open_svg = render_summary_svg(true)?;
         let closed_marker = summary_marker_path(&closed_svg);
         let open_marker = summary_marker_path(&open_svg);
 
         assert!(closed_marker.is_some());
         assert!(open_marker.is_some());
         assert_ne!(closed_marker, open_marker);
+        Ok(())
     }
 
-    fn render_summary_svg(open: bool) -> String {
+    fn render_summary_svg(open: bool) -> Result<String, String> {
         HtmlLayoutRenderer::render(
             &details_nodes(open),
             HtmlBrowserViewport {
@@ -101,7 +103,7 @@ mod tests {
             &HashMap::new(),
             None,
         )
-        .svg
+        .map(|layout| layout.svg)
     }
 
     fn details_nodes(open: bool) -> Vec<HtmlDocumentNode> {

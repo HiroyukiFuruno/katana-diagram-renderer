@@ -4,7 +4,7 @@ use super::document::{attribute, node_text};
 use super::style::CssStyle;
 
 pub(super) fn button_width(children: &[HtmlDocumentNode], width: f32, style: &CssStyle) -> f32 {
-    style.width.unwrap_or_else(|| {
+    style.explicit_width(width).unwrap_or_else(|| {
         (node_text(children).chars().count() as f32 * style.font_size * BUTTON_TEXT_WIDTH_FACTOR
             + BUTTON_TEXT_HORIZONTAL_PADDING)
             .min(width)
@@ -54,7 +54,8 @@ pub(super) fn details_is_open(attributes: &[(String, String)]) -> bool {
 }
 
 pub(super) fn summary_height(style: &CssStyle) -> f32 {
-    (style.height.unwrap_or(CONTROL_HEIGHT) + style.padding * 2.0).max(style.min_height)
+    (style.height.unwrap_or(CONTROL_HEIGHT) + style.padding_top + style.padding_bottom)
+        .max(style.min_height)
 }
 
 fn is_summary(node: &&HtmlDocumentNode) -> bool {
@@ -70,7 +71,7 @@ mod tests {
         let style = CssStyle {
             background: Some("#123456".to_string()),
             explicit_background: true,
-            ..CssStyle::default()
+            ..CssStyle::browser_default()
         };
 
         assert_eq!(button_style(&style).background.as_deref(), Some("#123456"));

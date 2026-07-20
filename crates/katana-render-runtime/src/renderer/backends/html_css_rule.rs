@@ -1,5 +1,5 @@
 use super::html_css::HtmlAttributes;
-use super::html_css_selector::CssSelector;
+use super::html_css_selector::{CssAncestor, CssSelector};
 
 #[derive(Debug)]
 pub(super) struct CssRule {
@@ -8,10 +8,15 @@ pub(super) struct CssRule {
 }
 
 impl CssRule {
-    pub(super) fn matches(&self, tag: &str, attributes: &HtmlAttributes) -> Option<u16> {
+    pub(super) fn matches(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> Option<u16> {
         self.selectors
             .iter()
-            .filter(|selector| selector.matches(tag, attributes))
+            .filter(|selector| selector.matches(tag, attributes, ancestors))
             .map(CssSelector::specificity)
             .max()
     }
@@ -84,6 +89,10 @@ fn parse_declarations(source: &str) -> Vec<CssDeclaration> {
 }
 
 fn supported_property(name: &str) -> bool {
+    is_paint_property(name) || is_box_property(name) || is_flow_property(name)
+}
+
+fn is_paint_property(name: &str) -> bool {
     matches!(
         name,
         "background"
@@ -96,16 +105,43 @@ fn supported_property(name: &str) -> bool {
             | "line-height"
             | "text-align"
             | "text-decoration"
-            | "border"
+    )
+}
+
+fn is_box_property(name: &str) -> bool {
+    matches!(
+        name,
+        "border"
             | "border-color"
             | "padding"
+            | "padding-top"
+            | "padding-right"
+            | "padding-bottom"
+            | "padding-left"
             | "margin"
             | "margin-top"
+            | "margin-right"
             | "margin-bottom"
+            | "margin-left"
             | "width"
+            | "max-width"
             | "height"
             | "min-height"
-            | "display"
+    )
+}
+
+fn is_flow_property(name: &str) -> bool {
+    matches!(
+        name,
+        "display"
+            | "gap"
+            | "flex-direction"
+            | "flex-wrap"
+            | "flex-grow"
+            | "flex-shrink"
+            | "align-items"
+            | "justify-content"
+            | "grid-template-columns"
     )
 }
 

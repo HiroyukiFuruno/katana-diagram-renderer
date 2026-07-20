@@ -161,8 +161,9 @@ fn font_db() -> std::sync::Arc<usvg::fontdb::Database> {
         std::sync::OnceLock::new();
     std::sync::Arc::clone(FONT_DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
-        /* WHY: host font が無くても KRR frame の本文を白紙にしない。 */
+        /* WHY: 同梱fontをLatinの決定的な第一候補にし、OS fontをscript別fallbackに使う。 */
         db.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
+        db.load_system_fonts();
         std::sync::Arc::new(db)
     }))
 }

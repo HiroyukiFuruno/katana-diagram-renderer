@@ -33,6 +33,20 @@ impl HtmlBrowserOrigin {
     pub(in crate::renderer::backends) fn from_validated_url(url: Url) -> Self {
         Self(url)
     }
+
+    pub(in crate::renderer::backends) fn is_same_document_fragment_navigation(
+        &self,
+        target: &Self,
+    ) -> bool {
+        if self.0.fragment().is_none() && target.0.fragment().is_none() {
+            return false;
+        }
+        let mut current = self.0.clone();
+        let mut target = target.0.clone();
+        current.set_fragment(None);
+        target.set_fragment(None);
+        current == target
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +108,14 @@ impl HtmlBrowserViewport {
             return Err(HtmlBrowserError::InvalidDeviceScaleFactor);
         }
         Ok(())
+    }
+
+    pub fn logical_width(&self) -> f32 {
+        self.width as f32 / self.device_scale_factor
+    }
+
+    pub fn logical_height(&self) -> f32 {
+        self.height as f32 / self.device_scale_factor
     }
 }
 

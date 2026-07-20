@@ -15,13 +15,15 @@ impl HtmlLayoutRenderer {
         style: &CssStyle,
     ) -> f32 {
         let start = y + style.margin_top;
+        let x = x + style.margin_left;
+        let available_width =
+            (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
         let Some(source) = image_source(attributes) else {
             return start + style.margin_bottom;
         };
         let image_width = style
-            .width
-            .unwrap_or(width)
-            .min(width)
+            .box_width(available_width)
+            .min(available_width)
             .max(MIN_LAYOUT_WIDTH);
         let image_height = style
             .height

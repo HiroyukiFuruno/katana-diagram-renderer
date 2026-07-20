@@ -17,7 +17,7 @@ fn image_without_a_source_does_not_emit_svg_image_content() -> TestResult {
         attributes: Vec::new(),
         children: Vec::new(),
     }];
-    let layout = HtmlLayoutRenderer::render(&nodes, viewport, 0.0, &HashMap::new(), None);
+    let layout = HtmlLayoutRenderer::render(&nodes, viewport, 0.0, &HashMap::new(), None)?;
 
     assert!(!layout.svg.contains("<image"));
     Ok(())

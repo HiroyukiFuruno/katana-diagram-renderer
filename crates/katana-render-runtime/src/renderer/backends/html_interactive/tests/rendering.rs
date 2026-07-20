@@ -138,6 +138,136 @@ fn inline_style_applies_box_font_and_visibility_declarations() -> TestResult {
 }
 
 #[test]
+fn compound_child_and_descendant_selectors_control_paint() -> TestResult {
+    let session = start(
+        r#"<style>
+main > section.card[data-state="ready"] p.message.emphasis {
+  background: #35a853;
+  color: #17372a;
+  padding: 4px;
+}
+</style>
+<main>
+  <section class="card" data-state="ready">
+    <p class="message emphasis">Selector target</p>
+  </section>
+  <section class="card" data-state="pending">
+    <p class="message emphasis">Non-target</p>
+  </section>
+</main>"#,
+    )?;
+    let frame = session
+        .latest_frame()
+        .ok_or_else(|| "selector frame must exist".to_string())?;
+
+    assert!(frame_contains_rgb(frame, [53, 168, 83]));
+    Ok(())
+}
+
+#[test]
+fn four_value_box_shorthands_control_painted_geometry() -> TestResult {
+    let mut session = start(
+        r#"<main style="background: #123456; margin: 2px 4px 6px 8px; padding: 10px 12px 14px 16px"><p>Box model</p></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="24" y="18" width="276" height="56" fill="#123456"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn flex_flow_positions_items_with_css_gap() -> TestResult {
+    let mut session = start(
+        r#"<style>
+main { display: flex; gap: 10px; width: 280px; }
+.card { width: 100px; height: 40px; }
+#first { background: #ef4444; }
+#second { background: #3b82f6; }
+</style>
+<main><section id=first class=card>First</section><section id=second class=card>Second</section></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#ef4444"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="126" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn grid_flow_positions_items_in_declared_columns() -> TestResult {
+    let mut session = start(
+        r#"<style>
+main { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 280px; }
+.card { height: 40px; }
+#first { background: #ef4444; }
+#second { background: #3b82f6; }
+</style>
+<main><section id=first class=card>First</section><section id=second class=card>Second</section></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="134" height="40" fill="#ef4444"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="162" y="16" width="134" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn percentage_width_reflows_against_resized_viewport() -> TestResult {
+    let mut session = start(r#"<main style="width:50%; height:40px; background:#123456"></main>"#)?;
+    let initial = session.layout().map_err(to_string)?;
+    assert!(
+        initial
+            .svg
+            .contains(r##"<rect x="16" y="16" width="144" height="40" fill="#123456"/>"##),
+        "{}",
+        initial.svg
+    );
+
+    session
+        .resize(HtmlBrowserViewport::new(480, 240, 1.0).map_err(to_string)?)
+        .map_err(to_string)?;
+    let resized = session.layout().map_err(to_string)?;
+    assert!(
+        resized
+            .svg
+            .contains(r##"<rect x="16" y="16" width="224" height="40" fill="#123456"/>"##),
+        "{}",
+        resized.svg
+    );
+    Ok(())
+}
+
+#[test]
 fn raster_dimension_mismatch_is_a_typed_runtime_failure() -> TestResult {
     let session = start("<p>frame</p>")?;
 
@@ -167,6 +297,32 @@ fn session_start_validates_mutated_sources_and_viewports() -> TestResult {
         ),
         Err(HtmlBrowserError::InvalidViewport)
     ));
+    Ok(())
+}
+
+#[test]
+fn high_density_viewport_uses_logical_css_layout_and_physical_frame() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        "<main style='background:#123456'><p>Retina frame</p></main>",
+        "https://example.test/docs/index.html",
+    )
+    .map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(640, 480, 2.0).map_err(to_string)?;
+    let mut session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+    let frame = session
+        .latest_frame()
+        .ok_or_else(|| "retina frame must exist".to_string())?;
+
+    assert_eq!(frame.pixels.len(), 640 * 480 * 4);
+    let layout = session.layout().map_err(to_string)?;
+    assert!(
+        layout
+            .svg
+            .starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 320 240">"#),
+        "{}",
+        layout.svg
+    );
     Ok(())
 }
 

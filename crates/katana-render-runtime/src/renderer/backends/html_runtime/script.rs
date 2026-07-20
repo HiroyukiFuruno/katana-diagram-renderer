@@ -6,6 +6,11 @@ use super::types::HtmlRuntimeError;
 pub(super) const DOM_BOOTSTRAP: &str = r#"
 const __krrNativeDom = globalThis.__krr_dom;
 const __krrDatasetAttribute = (property) => `data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+const __krrClassToken = (token) => {
+  token = String(token);
+  if (!token || /\s/.test(token)) throw new TypeError('Invalid class token');
+  return token;
+};
 const __krrElement = (nodeId) => {
   if (nodeId === null || nodeId === undefined || nodeId === '') return null;
   const element = Object.create(__krrElementPrototype);
@@ -19,6 +24,28 @@ const __krrElementPrototype = {
   set innerHTML(value) { __krrNativeDom('setInnerHTML', this.__krrNodeId, String(value)); },
   get className() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'class') || ''; },
   set className(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'class', String(value)); },
+  get classList() {
+    const element = this;
+    const read = () => new Set(element.className.split(/\s+/).filter(Boolean));
+    const write = (tokens) => {
+      const value = Array.from(tokens).join(' ');
+      if (value) element.className = value;
+      else element.removeAttribute('class');
+    };
+    return {
+      add(...values) { const tokens = read(); for (const value of values) tokens.add(__krrClassToken(value)); write(tokens); },
+      remove(...values) { const tokens = read(); for (const value of values) tokens.delete(__krrClassToken(value)); write(tokens); },
+      contains(value) { return read().has(__krrClassToken(value)); },
+      toggle(value, force) {
+        const token = __krrClassToken(value);
+        const tokens = read();
+        const enabled = force === undefined ? !tokens.has(token) : Boolean(force);
+        if (enabled) tokens.add(token); else tokens.delete(token);
+        write(tokens);
+        return enabled;
+      },
+    };
+  },
   get id() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'id') || ''; },
   set id(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'id', String(value)); },
   get value() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'value') || ''; },
@@ -48,13 +75,14 @@ const __krrElementPrototype = {
   appendChild(child) { __krrNativeDom('appendChild', this.__krrNodeId, child.__krrNodeId); return child; },
   remove() { __krrNativeDom('remove', this.__krrNodeId); },
   addEventListener(type, listener) {
-    if (!['click', 'input', 'toggle'].includes(type) || typeof listener !== 'function') throw new TypeError('Unsupported event listener');
+    if (!['blur', 'change', 'click', 'focus', 'input', 'keydown', 'keyup', 'toggle'].includes(type) || typeof listener !== 'function') throw new TypeError('Unsupported event listener');
     __krrNativeDom('addEventListener', this.__krrNodeId, type, listener);
   },
 };
 globalThis.document = {
   getElementById(id) { return __krrElement(__krrNativeDom('getElementById', String(id))); },
   querySelector(selector) { return __krrElement(__krrNativeDom('querySelector', String(selector))); },
+  querySelectorAll(selector) { return __krrNativeDom('querySelectorAll', String(selector)).map(__krrElement); },
   createElement(tag) { return __krrElement(__krrNativeDom('createElement', String(tag))); },
   get body() { return __krrElement(__krrNativeDom('querySelector', 'body')); },
 };

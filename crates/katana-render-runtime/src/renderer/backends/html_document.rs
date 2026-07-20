@@ -1,5 +1,6 @@
 use super::html_css::{HtmlAttributes, StaticCss};
-use super::html_dom_helpers::{attribute_value, collect_scripts, find_element, selector_matches};
+use super::html_css_selector::CssAncestor;
+use super::html_dom_helpers::{attribute_value, collect_scripts, find_element};
 use super::html_snapshot::render_document;
 use html5ever::{Attribute, parse_document, tendril::TendrilSink};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
@@ -8,6 +9,8 @@ use std::rc::Rc;
 
 #[path = "html_document_mutation.rs"]
 mod mutation;
+#[path = "html_document_selector.rs"]
+mod selector;
 
 /// Canonical HTML5 document state shared by CSS rendering and the V8 bridge.
 pub(super) struct HtmlDocument {
@@ -55,7 +58,7 @@ impl HtmlDocument {
     ) -> Vec<HtmlDocumentNode> {
         let css =
             StaticCss::for_interactive_document_with_styles(&self.document, external_stylesheets);
-        self.interactive_children(&self.document, &css)
+        self.interactive_children(&self.document, &css, &[])
     }
 
     pub(super) fn inline_scripts(&self) -> Result<Vec<String>, String> {
@@ -72,14 +75,21 @@ impl HtmlDocument {
     }
 
     pub(super) fn query_selector(&mut self, selector: &str) -> Option<u64> {
-        let selector = selector.trim();
-        if selector.is_empty() {
-            return None;
-        }
-        let handle = find_element(&self.document, |tag, attributes| {
-            selector_matches(selector, tag, attributes)
-        })?;
+        let selector = super::html_css_selector::CssSelector::parse(selector)?;
+        let handle = selector::find_selector(&self.document, &selector, &[])?;
         Some(self.register_subtree(&handle))
+    }
+
+    pub(super) fn query_selector_all(&mut self, selector: &str) -> Vec<u64> {
+        let Some(selector) = super::html_css_selector::CssSelector::parse(selector) else {
+            return Vec::new();
+        };
+        let mut handles = Vec::new();
+        selector::collect_selectors(&self.document, &selector, &[], &mut handles);
+        handles
+            .iter()
+            .map(|handle| self.register_subtree(handle))
+            .collect()
     }
 
     pub(super) fn node(&self, node_id: u64) -> Result<Handle, String> {
@@ -108,39 +118,63 @@ impl HtmlDocument {
         node_id
     }
 
-    fn interactive_children(&self, node: &Handle, css: &StaticCss) -> Vec<HtmlDocumentNode> {
+    fn interactive_children(
+        &self,
+        node: &Handle,
+        css: &StaticCss,
+        ancestors: &[CssAncestor],
+    ) -> Vec<HtmlDocumentNode> {
         node.children
             .borrow()
             .iter()
-            .filter_map(|child| self.interactive_node(child, css))
+            .filter_map(|child| self.interactive_node(child, css, ancestors))
             .collect()
     }
 
-    fn interactive_node(&self, node: &Handle, css: &StaticCss) -> Option<HtmlDocumentNode> {
+    fn interactive_node(
+        &self,
+        node: &Handle,
+        css: &StaticCss,
+        ancestors: &[CssAncestor],
+    ) -> Option<HtmlDocumentNode> {
         match &node.data {
             NodeData::Text { contents } => {
                 let text = contents.borrow().to_string();
                 (!text.is_empty()).then_some(HtmlDocumentNode::Text(text))
             }
-            NodeData::Element { name, attrs, .. } => {
-                let tag = name.local.to_string().to_ascii_lowercase();
-                if is_non_rendered_tag(&tag) {
-                    return None;
-                }
-                let attributes = attributes(&attrs.borrow());
-                let attributes = css.apply(&tag, &attributes);
-                let pointer = Rc::as_ptr(node) as usize;
-                let node_id = self.node_ids.get(&pointer).copied()?;
-                Some(HtmlDocumentNode::Element {
-                    node_id,
-                    tag,
-                    attributes,
-                    children: self.interactive_children(node, css),
-                })
-            }
+            NodeData::Element { name, attrs, .. } => self.interactive_element(
+                node,
+                name.local.to_string().to_ascii_lowercase(),
+                attributes(&attrs.borrow()),
+                css,
+                ancestors,
+            ),
             NodeData::Document => None,
             _ => None,
         }
+    }
+
+    fn interactive_element(
+        &self,
+        node: &Handle,
+        tag: String,
+        source_attributes: HtmlAttributes,
+        css: &StaticCss,
+        ancestors: &[CssAncestor],
+    ) -> Option<HtmlDocumentNode> {
+        if is_non_rendered_tag(&tag) {
+            return None;
+        }
+        let attributes = css.apply_with_ancestors(&tag, &source_attributes, ancestors);
+        let mut child_ancestors = ancestors.to_vec();
+        child_ancestors.push(CssAncestor::new(&tag, &source_attributes));
+        let node_id = self.node_ids.get(&(Rc::as_ptr(node) as usize)).copied()?;
+        Some(HtmlDocumentNode::Element {
+            node_id,
+            tag,
+            attributes,
+            children: self.interactive_children(node, css, &child_ancestors),
+        })
     }
 }
 
@@ -174,7 +208,10 @@ mod tests {
         let css =
             StaticCss::for_interactive_document_with_styles(&document.document, &HashMap::new());
 
-        assert_eq!(document.interactive_node(&document.document, &css), None);
+        assert_eq!(
+            document.interactive_node(&document.document, &css, &[]),
+            None
+        );
     }
 
     #[test]
@@ -206,6 +243,7 @@ mod tests {
             Err(error) if error.contains("external script is not supported: app.js")
         ));
         assert_eq!(document.query_selector(".missing"), None);
+        assert!(document.query_selector_all("main + p").is_empty());
         assert_eq!(document.get_element_by_id("missing"), None);
     }
 

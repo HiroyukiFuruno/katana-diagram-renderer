@@ -1,8 +1,11 @@
 use super::super::types::HitTargetKind;
 use super::support::{
-    TestResult, click_element, click_first_target, has_open_details, input_value, start, to_string,
+    TestResult, click_element, click_first_target, frame_contains_rgb, frame_matching_rgb_pixels,
+    has_open_details, input_value, start, to_string,
 };
-use crate::renderer::backends::html_browser::{HtmlBrowserInput, HtmlBrowserViewport};
+use crate::renderer::backends::html_browser::{
+    HtmlBrowserInput, HtmlBrowserSource, HtmlBrowserViewport,
+};
 
 const NO_HORIZONTAL_SCROLL: f32 = 0.0;
 const UNIT_SCROLL_DELTA: f32 = 1.0;
@@ -21,6 +24,27 @@ fn button_click_runs_v8_handler_and_repaints() -> TestResult {
             .map_err(to_string)?
             .contains("Done")
     );
+    Ok(())
+}
+
+#[test]
+fn class_list_mutation_recascades_css_after_click() -> TestResult {
+    let mut session = start(
+        r#"<style>button.active { background: #35a853; color: #ffffff; }</style><button id=run>Run</button><script>document.getElementById('run').addEventListener('click', function () { this.classList.toggle('active'); });</script>"#,
+    )?;
+    let before = session
+        .latest_frame()
+        .ok_or_else(|| "initial frame must exist".to_string())?;
+    assert!(!frame_contains_rgb(before, [53, 168, 83]));
+
+    click_element(&mut session, "run")?;
+
+    let after = session
+        .latest_frame()
+        .ok_or_else(|| "updated frame must exist".to_string())?;
+    assert!(frame_contains_rgb(after, [53, 168, 83]));
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(snapshot.contains(r#"class="active""#), "{snapshot}");
     Ok(())
 }
 
@@ -65,6 +89,85 @@ fn attribute_selectors_dataset_and_input_toggle_events_repaint_the_dom() -> Test
 }
 
 #[test]
+fn focused_input_dispatches_keyboard_text_change_and_blur_in_order() -> TestResult {
+    let mut session = start(
+        r#"<input id=field><p id=status></p><script>
+const field = document.getElementById('field');
+const status = document.getElementById('status');
+for (const type of ['focus', 'keydown', 'keyup', 'input', 'change', 'blur']) {
+  field.addEventListener(type, (event) => {
+    status.textContent += `${event.type}${event.key ? ':' + event.key : ''}|`;
+  });
+}
+</script>"#,
+    )?;
+
+    click_element(&mut session, "field")?;
+    click_element(&mut session, "field")?;
+    dispatch_committed_input(&mut session)?;
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(
+        snapshot.contains("focus|keydown:A|input|keyup:A|change|blur|"),
+        "{snapshot}"
+    );
+    Ok(())
+}
+
+fn dispatch_committed_input(session: &mut super::super::HtmlInteractiveSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::KeyDown {
+            key: "A".to_string(),
+        })
+        .map_err(to_string)?;
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "a".to_string(),
+        })
+        .map_err(to_string)?;
+    session
+        .dispatch_input(HtmlBrowserInput::KeyUp {
+            key: "A".to_string(),
+        })
+        .map_err(to_string)?;
+    session
+        .dispatch_input(HtmlBrowserInput::Focus { focused: false })
+        .map_err(to_string)?;
+    Ok(())
+}
+
+#[test]
+fn high_density_pointer_coordinates_hit_logical_css_targets() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        r#"<button id=run style="margin-left:100px" onclick="this.textContent='Clicked'">Run</button>"#,
+        "https://example.test/docs/index.html",
+    )
+    .map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(640, 480, 2.0).map_err(to_string)?;
+    let mut session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+
+    for input in [
+        HtmlBrowserInput::PointerDown {
+            x: 234.0,
+            y: 34.0,
+            button: 0,
+        },
+        HtmlBrowserInput::PointerUp {
+            x: 234.0,
+            y: 34.0,
+            button: 0,
+        },
+    ] {
+        session.dispatch_input(input).map_err(to_string)?;
+    }
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(snapshot.contains("Clicked"), "{snapshot}");
+    Ok(())
+}
+
+#[test]
 fn relative_link_emits_resolved_navigation() -> TestResult {
     let mut session = start("<a href=guide/next.html>Next</a>")?;
     click_first_target(&mut session)?;
@@ -78,6 +181,189 @@ fn relative_link_emits_resolved_navigation() -> TestResult {
 }
 
 #[test]
+fn relative_link_navigation_preserves_the_target_fragment() -> TestResult {
+    let mut session = start("<a href='linked-panel.html#linked-target'>Next</a>")?;
+    click_first_target(&mut session)?;
+    assert_eq!(
+        session
+            .take_navigation()
+            .map(|navigation| navigation.url.as_str().to_string()),
+        Some("https://example.test/docs/linked-panel.html#linked-target".to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn same_document_fragment_scrolls_without_host_navigation_or_runtime_reset() -> TestResult {
+    let mut session = start(&fragment_document())?;
+    click_element(&mut session, "mutate")?;
+    click_element(&mut session, "jump")?;
+
+    assert!(session.take_navigation().is_none());
+    assert_eq!(
+        session.source.origin.as_str(),
+        "https://example.test/docs/index.html#%74arget"
+    );
+    assert!(session.scroll_y > 0.0);
+    assert!(
+        session
+            .runtime
+            .snapshot()
+            .map_err(to_string)?
+            .contains("changed")
+    );
+    assert_eq!(
+        session.latest_frame().map(|frame| frame.origin.as_str()),
+        Some("https://example.test/docs/index.html#%74arget")
+    );
+    Ok(())
+}
+
+#[test]
+fn initial_document_fragment_scrolls_before_the_first_public_frame() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        initial_fragment_document(),
+        "https://example.test/docs/index.html#%74arget",
+    )
+    .map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(320, 240, 1.0).map_err(to_string)?;
+
+    let mut session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+
+    assert!(session.scroll_y > 0.0);
+    assert!(session.take_navigation().is_none());
+    assert!(
+        session
+            .latest_frame()
+            .is_some_and(|frame| frame_contains_rgb(frame, [232, 199, 255]))
+    );
+    assert_eq!(
+        session.latest_frame().map(|frame| frame.origin.as_str()),
+        Some("https://example.test/docs/index.html#%74arget")
+    );
+    Ok(())
+}
+
+#[test]
+fn initial_document_fragment_reflows_to_the_target_after_viewport_resize() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        linked_fragment_document(),
+        "https://example.test/docs/linked-panel.html#linked-target",
+    )
+    .map_err(to_string)?;
+    let initial_viewport = HtmlBrowserViewport::new(1, 1, 1.0).map_err(to_string)?;
+    let mut session =
+        super::super::HtmlInteractiveSession::start(source, initial_viewport).map_err(to_string)?;
+
+    session
+        .resize(HtmlBrowserViewport::new(320, 1, 2.0).map_err(to_string)?)
+        .map_err(to_string)?;
+    session
+        .resize(HtmlBrowserViewport::new(1946, 1292, 2.0).map_err(to_string)?)
+        .map_err(to_string)?;
+
+    let frame = session.latest_frame().ok_or("missing resized frame")?;
+    assert!(frame_matching_rgb_pixels(frame, [232, 199, 255]) >= 1_000);
+    Ok(())
+}
+
+#[test]
+fn explicit_scroll_releases_fragment_resize_alignment() -> TestResult {
+    let source = HtmlBrowserSource::new(
+        initial_fragment_document(),
+        "https://example.test/docs/index.html#target",
+    )
+    .map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(320, 240, 1.0).map_err(to_string)?;
+    let mut session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+
+    assert_eq!(session.resize_anchor.as_deref(), Some("target"));
+    session
+        .dispatch_input(HtmlBrowserInput::Scroll {
+            delta_x: 0.0,
+            delta_y: -1.0,
+        })
+        .map_err(to_string)?;
+
+    assert!(session.resize_anchor.is_none());
+    Ok(())
+}
+
+fn linked_fragment_document() -> String {
+    "<!doctype html><html lang=en><head><meta charset=utf-8><style>\
+     main { margin: 24px; padding: 24px; border: 2px solid #8e78a9; background: #f4d7ff; }\
+     h1 { margin: 0 0 12px; font-size: 30px; color: #17372a; }\
+     p { margin: 0 0 12px; } a { color: #0969da; }\
+     #linked-target { padding: 16px; border: 2px solid #7d5ba6; background: #e8c7ff; }\
+     </style></head><body><main><h1>Linked panel loaded by KRR</h1>\
+     <p>KatanA forwarded file navigation to the active KRR HTML session.</p>\
+     <div style='height: 900px'></div><section id=linked-target>\
+     <h1>Linked fragment target loaded by KRR</h1>\
+     <p>The initial KRR frame applied the complete document URL fragment.</p>\
+     <a href=index.html>Back to preview</a></section>\
+     <div style='height: 400px'></div></main></body></html>"
+        .to_string()
+}
+
+fn initial_fragment_document() -> String {
+    "<style>#target { background: #e8c7ff; height: 120px; }</style>\
+     <div style='height: 900px'></div><section id=target>Target</section>\
+     <div style='height: 400px'></div>"
+        .to_string()
+}
+
+#[test]
+fn same_document_fragment_removal_scrolls_to_top_without_host_navigation() -> TestResult {
+    let mut session = start(&fragment_document())?;
+    click_element(&mut session, "jump")?;
+    assert!(session.scroll_y > 0.0);
+
+    click_element(&mut session, "top")?;
+
+    assert!(session.take_navigation().is_none());
+    assert_eq!(
+        session.source.origin.as_str(),
+        "https://example.test/docs/index.html"
+    );
+    assert_eq!(session.scroll_y, 0.0);
+    Ok(())
+}
+
+#[test]
+fn same_url_without_a_fragment_remains_a_main_document_navigation() -> TestResult {
+    let mut session = start("<a id=reload href=index.html>Reload</a>")?;
+    click_element(&mut session, "reload")?;
+    assert_eq!(
+        session
+            .take_navigation()
+            .map(|navigation| navigation.url.as_str().to_string()),
+        Some("https://example.test/docs/index.html".to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_fragment_keeps_scroll_and_legacy_named_anchor_is_supported() -> TestResult {
+    let mut session = start(&fragment_document())?;
+    click_element(&mut session, "jump")?;
+    let target_scroll = session.scroll_y;
+
+    click_element(&mut session, "missing-link")?;
+    assert_eq!(session.scroll_y, target_scroll);
+    assert!(session.take_navigation().is_none());
+
+    click_element(&mut session, "legacy-jump")?;
+    assert!(session.scroll_y > 0.0);
+    assert_eq!(
+        session.source.origin.as_str(),
+        "https://example.test/docs/index.html#legacy"
+    );
+    Ok(())
+}
+
+#[test]
 fn cross_origin_link_is_rejected_without_a_navigation_event() -> TestResult {
     let mut session = start("<a id=remote href=https://other.example/next.html>Remote</a>")?;
     let error = required_error(click_element(&mut session, "remote"), "cross-origin link")?;
@@ -85,6 +371,17 @@ fn cross_origin_link_is_rejected_without_a_navigation_event() -> TestResult {
     assert!(error.contains("navigation is not allowed"));
     assert!(session.take_navigation().is_none());
     Ok(())
+}
+
+fn fragment_document() -> String {
+    format!(
+        "<button id=mutate onclick=\"document.getElementById('state').textContent='changed'\">Mutate</button>\
+         <p id=state>initial</p><a id=jump href=#%74arget>Jump</a>\
+         <a id=top href=index.html>Top</a><a id=missing-link href=#absent>Missing</a>\
+         <a id=legacy-jump href=#legacy>Legacy</a>{}\
+         <h2 id=target>Target</h2><a name=legacy>Legacy target</a><p>After target</p>",
+        "<p>spacer</p>".repeat(30)
+    )
 }
 
 #[test]
@@ -176,15 +473,11 @@ fn assert_timeout_discards_runtime_for_later_input() -> TestResult {
     click_element(&mut session, "entry")?;
     let timeout = required_error(click_element(&mut session, "run"), "handler timeout")?;
     assert!(timeout.contains("timed out"));
-    let text_error = required_error(
-        session
-            .dispatch_input(HtmlBrowserInput::Text {
-                text: "after timeout".to_string(),
-            })
-            .map_err(to_string),
-        "discarded runtime text",
-    )?;
-    assert!(text_error.to_string().contains("discarded"));
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "after timeout".to_string(),
+        })
+        .map_err(to_string)?;
     let scroll_error = required_error(
         session
             .dispatch_input(HtmlBrowserInput::Scroll {

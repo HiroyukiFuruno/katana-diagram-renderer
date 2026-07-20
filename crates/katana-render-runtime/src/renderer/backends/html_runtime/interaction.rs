@@ -21,6 +21,7 @@ pub(super) fn event<'scope>(
     scope: &mut HtmlTryCatchScope<'scope, '_, '_, '_>,
     target: v8::Local<'scope, v8::Object>,
     event_type: &str,
+    event_key: Option<&str>,
 ) -> Result<v8::Local<'scope, v8::Object>, HtmlRuntimeError> {
     let value = evaluate_value(scope, "krr-html-dom-event", EVENT_SOURCE)?;
     let event = v8::Local::<v8::Object>::try_from(value).map_err(event_error)?;
@@ -37,6 +38,13 @@ pub(super) fn event<'scope>(
     event
         .set(scope, key.into(), value.into())
         .ok_or_else(event_assignment_error)?;
+    if let Some(event_key) = event_key {
+        let key = v8::String::new(scope, "key").ok_or_else(event_key_error)?;
+        let value = v8::String::new(scope, event_key).ok_or_else(event_type_error)?;
+        event
+            .set(scope, key.into(), value.into())
+            .ok_or_else(event_assignment_error)?;
+    }
     Ok(event)
 }
 

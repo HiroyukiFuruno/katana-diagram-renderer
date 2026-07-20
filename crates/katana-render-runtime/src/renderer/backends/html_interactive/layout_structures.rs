@@ -1,6 +1,7 @@
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::{
-    LIST_MARKER_WIDTH, RULE_VERTICAL_INSET, TABLE_CELL_CONTENT_INSET, TABLE_CELL_PADDING,
+    LIST_MARKER_WIDTH, MIN_LAYOUT_WIDTH, RULE_VERTICAL_INSET, TABLE_CELL_CONTENT_INSET,
+    TABLE_CELL_PADDING,
 };
 use super::document::{TableCell, node_text, table_rows, wrap_text};
 use super::layout::HtmlLayoutRenderer;
@@ -21,6 +22,8 @@ impl HtmlLayoutRenderer {
         if rows.is_empty() {
             return y;
         }
+        let x = x + style.margin_left;
+        let width = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
         let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
         let column_width = width / columns as f32;
         let bottom = self.render_table_rows(&rows, x, y + style.margin_top, column_width, style);
@@ -55,6 +58,8 @@ impl HtmlLayoutRenderer {
 
     pub(super) fn render_rule(&mut self, x: f32, y: f32, width: f32, style: &CssStyle) -> f32 {
         let line_y = y + style.margin_top + RULE_VERTICAL_INSET;
+        let x = x + style.margin_left;
+        let width = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
         self.svg.push_str(&format!(
             r#"<line x1="{x}" y1="{line_y}" x2="{}" y2="{line_y}" stroke="{}" stroke-width="1"/>"#,
             x + width,
@@ -73,6 +78,8 @@ impl HtmlLayoutRenderer {
         ordered: bool,
     ) -> f32 {
         let mut current = y + style.margin_top;
+        let x = x + style.margin_left;
+        let width = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
         let mut index = 1usize;
         for child in children {
             if let Some(items) = list_item_children(child) {
