@@ -47,6 +47,9 @@ impl HtmlInteractiveSession {
 
     fn activate_target_at(&mut self, x: f32, y: f32) -> Result<(), HtmlBrowserError> {
         let Some(target) = self.hit_target_at(x, y).cloned() else {
+            if self.pressed_target.is_none() {
+                self.blur_focused_input()?;
+            }
             return Ok(());
         };
         if self.pressed_target != Some(target.node_id) {

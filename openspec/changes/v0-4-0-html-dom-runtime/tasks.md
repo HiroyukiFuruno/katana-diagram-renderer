@@ -84,7 +84,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   cells, and local patched KatanA headless acceptance renders the committed text.
   The public SVG rasterizer remains bundled-font-only while the interactive HTML
   frame path owns system-font fallback. `rtk just check`, strict
-  `rtk just coverage` (598 workspace tests, 100% lines,
+  `rtk just coverage` (600 workspace tests, 100% lines,
   0 uncovered), `release-check`, package size, and publish dry-run pass; only
   public release and registry verification remain.
   The raster path still embeds Noto Sans with its SIL OFL 1.1 license as the

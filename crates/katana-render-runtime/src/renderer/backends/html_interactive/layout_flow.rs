@@ -38,7 +38,7 @@ impl HtmlLayoutRenderer {
     ) -> Result<f32, String> {
         let items = children
             .iter()
-            .filter(|node| is_layout_item(node))
+            .filter(|node| is_visible_layout_item(node, style))
             .collect::<Vec<_>>();
         if items.is_empty() {
             return Ok(y);
@@ -97,6 +97,20 @@ impl HtmlLayoutRenderer {
             bottom = bottom.max(item_bottom);
         }
         Ok(bottom)
+    }
+}
+
+fn is_visible_layout_item(node: &HtmlDocumentNode, inherited: &CssStyle) -> bool {
+    if !is_layout_item(node) {
+        return false;
+    }
+
+    match node {
+        HtmlDocumentNode::Text(_) => true,
+        HtmlDocumentNode::Element { attributes, .. } => {
+            let style = CssStyle::from_attributes(attributes, inherited);
+            style.display != Display::None
+        }
     }
 }
 

@@ -114,6 +114,73 @@ for (const type of ['focus', 'keydown', 'keyup', 'input', 'change', 'blur']) {
     Ok(())
 }
 
+#[test]
+fn focused_input_is_blurred_on_blank_pointer_activation_and_text_stops_after_focus_loss()
+-> TestResult {
+    let mut session = blank_blur_session()?;
+    click_element(&mut session, "field")?;
+    dispatch_dirty_input(&mut session)?;
+    let (miss_x, miss_y) = blank_pointer_position(&session);
+    assert_blank_click_blurs_and_blocks_text(&mut session, miss_x, miss_y)?;
+    assert_drag_release_on_blank_keeps_focus(&mut session, miss_x, miss_y)
+}
+
+fn blank_blur_session() -> TestResult<super::super::HtmlInteractiveSession> {
+    start(
+        r#"<input id=field value=initial><p id=status></p><script>
+const field = document.getElementById('field');
+const status = document.getElementById('status');
+for (const type of ['focus', 'keydown', 'keyup', 'input', 'change', 'blur']) {
+  field.addEventListener(type, (event) => {
+    status.textContent += `${event.type}${event.key ? ':' + event.key : ''}|`;
+  });
+}
+</script>"#,
+    )
+}
+
+fn dispatch_dirty_input(session: &mut super::super::HtmlInteractiveSession) -> TestResult {
+    dispatch_inputs(
+        session,
+        [
+            HtmlBrowserInput::KeyDown {
+                key: "A".to_string(),
+            },
+            HtmlBrowserInput::Text {
+                text: "a".to_string(),
+            },
+            HtmlBrowserInput::KeyUp {
+                key: "A".to_string(),
+            },
+        ],
+    )
+}
+
+fn assert_blank_click_blurs_and_blocks_text(
+    session: &mut super::super::HtmlInteractiveSession,
+    miss_x: f32,
+    miss_y: f32,
+) -> TestResult {
+    dispatch_primary_click(session, miss_x, miss_y, miss_x, miss_y)?;
+    assert_eq!(session.focused_input, None);
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: " appended".to_string(),
+        })
+        .map_err(to_string)?;
+    assert_eq!(
+        input_value(&session.runtime.interactive_nodes().map_err(to_string)?),
+        Some("initiala")
+    );
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(
+        snapshot.contains("focus|keydown:A|input|keyup:A|change|blur|"),
+        "{snapshot}"
+    );
+    Ok(())
+}
+
 fn dispatch_committed_input(session: &mut super::super::HtmlInteractiveSession) -> TestResult {
     session
         .dispatch_input(HtmlBrowserInput::KeyDown {
@@ -133,6 +200,44 @@ fn dispatch_committed_input(session: &mut super::super::HtmlInteractiveSession) 
     session
         .dispatch_input(HtmlBrowserInput::Focus { focused: false })
         .map_err(to_string)?;
+    Ok(())
+}
+
+fn blank_pointer_position(session: &super::super::HtmlInteractiveSession) -> (f32, f32) {
+    let position = (1..239).find_map(|y| {
+        (1..320)
+            .find(|x| session.hit_target_at(*x as f32, y as f32).is_none())
+            .map(|x| (x as f32, y as f32))
+    });
+    assert!(
+        position.is_some(),
+        "document viewport must contain blank space"
+    );
+    position.unwrap_or((0.0, 0.0))
+}
+
+fn assert_drag_release_on_blank_keeps_focus(
+    session: &mut super::super::HtmlInteractiveSession,
+    miss_x: f32,
+    miss_y: f32,
+) -> TestResult {
+    click_element(session, "field")?;
+    let target = session.hit_targets.first().cloned();
+    assert!(target.is_some(), "input target must exist");
+    let (x, y) = target
+        .map(|value| (value.x + 1.0, value.y + 1.0))
+        .unwrap_or((0.0, 0.0));
+    dispatch_primary_click(session, x, y, miss_x, miss_y)?;
+    assert!(session.focused_input.is_some());
+    session
+        .dispatch_input(HtmlBrowserInput::Text {
+            text: "b".to_string(),
+        })
+        .map_err(to_string)?;
+    assert_eq!(
+        input_value(&session.runtime.interactive_nodes().map_err(to_string)?),
+        Some("initialab")
+    );
     Ok(())
 }
 

@@ -314,6 +314,27 @@ fn hidden_grid_item_does_not_consume_a_track_or_gap() -> TestResult {
 }
 
 #[test]
+fn hidden_grid_item_preserves_first_track_position_for_following_items() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:grid; grid-template-columns:70px 150px; gap:10px; width:280px">
+<section hidden style="height:40px; background:#ef4444">Hidden</section>
+<section style="height:40px; background:#3b82f6">Visible</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="16" y="16" width="70" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(!layout.svg.contains("Hidden"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
 fn grid_flow_positions_items_in_declared_columns() -> TestResult {
     let mut session = start(
         r#"<style>
