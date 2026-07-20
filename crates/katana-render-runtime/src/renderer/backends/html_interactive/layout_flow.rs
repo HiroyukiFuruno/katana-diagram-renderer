@@ -134,7 +134,7 @@ fn flow_style(style: &CssStyle, width: f32) -> Style {
         ..Style::default()
     };
     if style.display == Display::Grid {
-        layout.grid_template_columns = vec![fr(1.0); style.grid_columns.max(1)];
+        layout.grid_template_columns = vec![fr(1.0_f32); style.grid_columns.max(1)];
     }
     layout
 }
