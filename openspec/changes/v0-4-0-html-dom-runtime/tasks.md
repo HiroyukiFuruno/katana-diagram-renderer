@@ -36,9 +36,14 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   `rtk just coverage` with `100% / 0 uncovered` without exclusions or ignores.
 - [x] 1.7 Release and verify KRR `0.4.1` with deterministic bundled-font SVG
   rasterization.
-- [ ] 1.8 Release and verify KRR `0.4.3` with browser-style system-font
+- [x] 1.8 Release and verify KRR `0.4.3` with browser-style system-font
   fallback, deterministic bundled Latin fallback, and committed IME text
   rendering. The crates.io 10 MiB package gate must remain unchanged.
+- [/] 1.9 Release and verify KRR `0.4.4` with allowed cross-origin HTTP/HTTPS
+  stylesheet/script/image loading, non-fatal blocked or failed subresources,
+  and embedded SVG projection/layout. HTTPS mixed content, credential-bearing
+  network URLs, local file escape, unsupported schemes, and iframe fetching
+  remain rejected. Strict coverage stays at 100% lines and 0 uncovered.
 
 ### 2. KDV Adapter
 
@@ -75,6 +80,10 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [ ] 4.4 Present final registry-only state-specific screenshots and automated
   evidence to the user. Local-candidate evidence has already been presented.
   Until explicit approval: no KatanA commit, push, PR, publish, or release.
+- [/] 4.5 Publish and verify KRR `0.4.4`, then allow KDV `0.3.2` and KatanA
+  `v0.22.34` to consume only its crates.io artifact. KatanA evidence must cover
+  remote resources, embedded Mermaid SVG, worker error recovery, and the full
+  interactive HTML acceptance matrix without Chromium or WebView.
 
 ## Local Verification Evidence
 
