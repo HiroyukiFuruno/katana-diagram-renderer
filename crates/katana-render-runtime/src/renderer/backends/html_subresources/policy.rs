@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn unsupported_scheme_is_not_an_allowed_subresource() -> Result<(), Box<dyn std::error::Error>>
     {
-        let source = HtmlBrowserSource::new("<p>ok</p>", "file:///workspace/index.html")?;
+        let source = HtmlBrowserSource::new("<p>ok</p>", "https://example.test/index.html")?;
         let unsupported = Url::parse("ftp://example.test/image.png")?;
         let policy = HtmlSubresourcePolicy::from_source(&source);
 

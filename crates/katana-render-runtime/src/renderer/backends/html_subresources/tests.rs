@@ -42,9 +42,11 @@ fn local_resources_feed_css_v8_and_image_layout() -> TestResult {
 #[test]
 fn cross_origin_http_resources_are_loaded_without_main_document_fetch() -> TestResult {
     let (origin, server) = local_resource_server()?;
-    let source =
-        HtmlBrowserSource::new(http_document(&origin), "file:///workspace/site/index.html")
-            .map_err(to_string)?;
+    let source = HtmlBrowserSource::new(
+        http_document(&origin),
+        "http://example.test/site/index.html",
+    )
+    .map_err(to_string)?;
     let frame = HtmlRuntime
         .open(source, viewport()?)
         .map_err(to_string)?
@@ -109,7 +111,7 @@ fn iframe_sources_are_not_fetched_by_the_subresource_loader() -> TestResult {
     listener.set_nonblocking(true).map_err(to_string)?;
     let source = HtmlBrowserSource::new(
         format!("<iframe src=http://{address}/frame.html></iframe><p>Visible</p>"),
-        "file:///workspace/site/index.html",
+        "https://example.test/site/index.html",
     )
     .map_err(to_string)?;
 
