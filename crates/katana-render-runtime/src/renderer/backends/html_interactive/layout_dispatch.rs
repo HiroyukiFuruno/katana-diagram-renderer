@@ -23,6 +23,7 @@ impl HtmlLayoutRenderer {
                 layout.width,
                 layout.style,
             ),
+            "svg" => self.render_embedded_svg(element.attributes, layout),
             "input" | "textarea" => self.render_input_element(element, layout),
             "details" => self.render_details(element, layout),
             "summary" => self.render_summary(element, layout),

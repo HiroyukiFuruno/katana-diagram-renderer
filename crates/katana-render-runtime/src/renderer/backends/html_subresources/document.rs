@@ -7,36 +7,28 @@ pub(super) fn load_document_resources(
     loader: &HtmlSubresourceLoader,
     document: &mut HtmlDocument,
 ) -> Result<HtmlDocumentResources, String> {
-    reject_iframes(&document.document)?;
-    let stylesheets = load_stylesheets(loader, &document.document)?;
-    let scripts = load_scripts(loader, &document.document)?;
-    inline_images(loader, &document.document)?;
+    let stylesheets = load_stylesheets(loader, &document.document);
+    let scripts = load_scripts(loader, &document.document);
+    inline_images(loader, &document.document);
     Ok(HtmlDocumentResources {
         stylesheets,
         scripts,
     })
 }
 
-fn load_stylesheets(
-    loader: &HtmlSubresourceLoader,
-    document: &Handle,
-) -> Result<HashMap<String, String>, String> {
+fn load_stylesheets(loader: &HtmlSubresourceLoader, document: &Handle) -> HashMap<String, String> {
     let mut references = Vec::new();
     collect_stylesheet_references(document, &mut references);
     references
         .into_iter()
-        .map(|reference| {
-            loader
-                .load_text(&reference)
-                .map(|source| (reference, source))
-        })
+        .filter_map(|reference| load_text(loader, "stylesheet", reference))
         .collect()
 }
 
-fn load_scripts(loader: &HtmlSubresourceLoader, document: &Handle) -> Result<Vec<String>, String> {
+fn load_scripts(loader: &HtmlSubresourceLoader, document: &Handle) -> Vec<String> {
     let mut scripts = Vec::new();
-    collect_scripts(loader, document, &mut scripts)?;
-    Ok(scripts)
+    collect_scripts(loader, document, &mut scripts);
+    scripts
 }
 
 fn collect_stylesheet_references(node: &Handle, references: &mut Vec<String>) {
@@ -50,45 +42,69 @@ fn collect_stylesheet_references(node: &Handle, references: &mut Vec<String>) {
     }
 }
 
-fn collect_scripts(
-    loader: &HtmlSubresourceLoader,
-    node: &Handle,
-    scripts: &mut Vec<String>,
-) -> Result<(), String> {
+fn collect_scripts(loader: &HtmlSubresourceLoader, node: &Handle, scripts: &mut Vec<String>) {
     if is_tag(node, "script") {
-        let script = attribute(node, "src")
-            .map(|reference| loader.load_text(&reference))
-            .unwrap_or_else(|| Ok(text_content(node)))?;
-        scripts.push(script);
-        return Ok(());
+        if let Some(script) = load_script(loader, node) {
+            scripts.push(script);
+        }
+        return;
     }
     for child in node.children.borrow().iter() {
-        collect_scripts(loader, child, scripts)?;
+        collect_scripts(loader, child, scripts);
     }
-    Ok(())
 }
 
-fn inline_images(loader: &HtmlSubresourceLoader, node: &Handle) -> Result<(), String> {
+fn load_script(loader: &HtmlSubresourceLoader, node: &Handle) -> Option<String> {
+    attribute(node, "src")
+        .map(|reference| load_text(loader, "script", reference).map(|(_, source)| source))
+        .unwrap_or_else(|| Some(text_content(node)))
+}
+
+fn inline_images(loader: &HtmlSubresourceLoader, node: &Handle) {
     if is_tag(node, "img")
         && let Some(source) = attribute(node, "src")
     {
-        set_attribute(node, "src", &loader.load_image_data_url(&source)?);
+        match loader.load_image_data_url(&source) {
+            Ok(data_url) => set_attribute(node, "src", &data_url),
+            Err(error) => log_subresource_failure(loader, "image", &source, &error),
+        }
     }
     let children = node.children.borrow().clone();
     for child in children {
-        inline_images(loader, &child)?;
+        inline_images(loader, &child);
     }
-    Ok(())
 }
 
-fn reject_iframes(node: &Handle) -> Result<(), String> {
-    if is_tag(node, "iframe") && attribute(node, "src").is_some() {
-        return Err("iframe subresources are not supported".to_string());
+fn load_text(
+    loader: &HtmlSubresourceLoader,
+    resource_kind: &'static str,
+    reference: String,
+) -> Option<(String, String)> {
+    match loader.load_text(&reference) {
+        Ok(source) => Some((reference, source)),
+        Err(error) => {
+            log_subresource_failure(loader, resource_kind, &reference, &error);
+            None
+        }
     }
-    for child in node.children.borrow().iter() {
-        reject_iframes(child)?;
-    }
-    Ok(())
+}
+
+fn log_subresource_failure(
+    loader: &HtmlSubresourceLoader,
+    resource_kind: &'static str,
+    reference: &str,
+    error: &str,
+) {
+    let document_origin = loader.document_origin();
+    tracing::warn!(
+        layer = "KRR runtime",
+        operation = "load_subresource",
+        document = document_origin,
+        resource_kind,
+        resource = reference,
+        error,
+        "HTML subresource load failed; rendering continues"
+    );
 }
 
 fn is_stylesheet(node: &Handle) -> bool {
