@@ -1,16 +1,24 @@
-use super::html_css::{HtmlAttributes, StaticCss};
-use super::html_css_selector::CssAncestor;
+use super::html_css::HtmlAttributes;
 use super::html_dom_helpers::{attribute_value, collect_scripts, find_element};
 use super::html_snapshot::render_document;
-use html5ever::{Attribute, parse_document, tendril::TendrilSink};
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
+use html5ever::{parse_document, tendril::TendrilSink};
+use markup5ever_rcdom::{Handle, RcDom};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 #[path = "html_document_mutation.rs"]
 mod mutation;
+#[path = "html_document_projection.rs"]
+mod projection;
+use projection::attributes;
 #[path = "html_document_selector.rs"]
 mod selector;
+#[path = "html_document_svg.rs"]
+mod svg;
+pub(super) use svg::{
+    EMBEDDED_SVG_HEIGHT_PLACEHOLDER, EMBEDDED_SVG_MARKUP_ATTRIBUTE, EMBEDDED_SVG_WIDTH_PLACEHOLDER,
+    EMBEDDED_SVG_X_PLACEHOLDER, EMBEDDED_SVG_Y_PLACEHOLDER,
+};
 
 /// Canonical HTML5 document state shared by CSS rendering and the V8 bridge.
 pub(super) struct HtmlDocument {
@@ -50,15 +58,6 @@ impl HtmlDocument {
 
     pub(super) fn render(&self) -> String {
         render_document(&self.document)
-    }
-
-    pub(super) fn interactive_nodes_with_styles(
-        &self,
-        external_stylesheets: &HashMap<String, String>,
-    ) -> Vec<HtmlDocumentNode> {
-        let css =
-            StaticCss::for_interactive_document_with_styles(&self.document, external_stylesheets);
-        self.interactive_children(&self.document, &css, &[])
     }
 
     pub(super) fn inline_scripts(&self) -> Result<Vec<String>, String> {
@@ -117,89 +116,12 @@ impl HtmlDocument {
         }
         node_id
     }
-
-    fn interactive_children(
-        &self,
-        node: &Handle,
-        css: &StaticCss,
-        ancestors: &[CssAncestor],
-    ) -> Vec<HtmlDocumentNode> {
-        node.children
-            .borrow()
-            .iter()
-            .filter_map(|child| self.interactive_node(child, css, ancestors))
-            .collect()
-    }
-
-    fn interactive_node(
-        &self,
-        node: &Handle,
-        css: &StaticCss,
-        ancestors: &[CssAncestor],
-    ) -> Option<HtmlDocumentNode> {
-        match &node.data {
-            NodeData::Text { contents } => {
-                let text = contents.borrow().to_string();
-                (!text.is_empty()).then_some(HtmlDocumentNode::Text(text))
-            }
-            NodeData::Element { name, attrs, .. } => self.interactive_element(
-                node,
-                name.local.to_string().to_ascii_lowercase(),
-                attributes(&attrs.borrow()),
-                css,
-                ancestors,
-            ),
-            NodeData::Document => None,
-            _ => None,
-        }
-    }
-
-    fn interactive_element(
-        &self,
-        node: &Handle,
-        tag: String,
-        source_attributes: HtmlAttributes,
-        css: &StaticCss,
-        ancestors: &[CssAncestor],
-    ) -> Option<HtmlDocumentNode> {
-        if is_non_rendered_tag(&tag) {
-            return None;
-        }
-        let attributes = css.apply_with_ancestors(&tag, &source_attributes, ancestors);
-        let mut child_ancestors = ancestors.to_vec();
-        child_ancestors.push(CssAncestor::new(&tag, &source_attributes));
-        let node_id = self.node_ids.get(&(Rc::as_ptr(node) as usize)).copied()?;
-        Some(HtmlDocumentNode::Element {
-            node_id,
-            tag,
-            attributes,
-            children: self.interactive_children(node, css, &child_ancestors),
-        })
-    }
-}
-
-fn attributes(source: &[Attribute]) -> HtmlAttributes {
-    source
-        .iter()
-        .map(|attribute| {
-            (
-                attribute.name.local.to_string().to_ascii_lowercase(),
-                attribute.value.to_string(),
-            )
-        })
-        .collect()
-}
-
-fn is_non_rendered_tag(tag: &str) -> bool {
-    matches!(
-        tag,
-        "head" | "iframe" | "link" | "meta" | "script" | "style" | "template" | "title"
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HtmlDocument, StaticCss};
+    use super::super::html_css::StaticCss;
+    use super::{EMBEDDED_SVG_MARKUP_ATTRIBUTE, HtmlDocument, HtmlDocumentNode};
     use std::collections::HashMap;
 
     #[test]
@@ -210,6 +132,29 @@ mod tests {
 
         assert_eq!(
             document.interactive_node(&document.document, &css, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_svg_projection_preserves_vector_markup_and_attribute_case() {
+        let document = HtmlDocument::parse(
+            r##"<style>svg { max-width: 90px; }</style><svg viewBox="0 0 120 80" preserveAspectRatio="xMidYMid meet" xmlns:xlink="http://www.w3.org/1999/xlink"><!-- marker --><defs><marker id="dot" markerHeight="8"><path d="M0 0L8 4L0 8Z"/></marker></defs><use xlink:href="#dot"/><circle cx="40" cy="40" r="20" fill="#22c55e"/></svg>"##,
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+        let markup = must_some(
+            embedded_svg_markup(&nodes),
+            "embedded SVG markup must exist",
+        );
+
+        assert!(markup.contains("viewBox=\"0 0 120 80\""), "{markup}");
+        assert!(markup.contains("preserveAspectRatio=\"xMidYMid meet\""));
+        assert!(markup.contains("markerHeight=\"8\""));
+        assert!(markup.contains("xlink:href=\"#dot\""));
+        assert!(markup.contains("<path"));
+        assert!(markup.contains("max-width: 90px"));
+        assert_eq!(
+            embedded_svg_markup(&[HtmlDocumentNode::Text("plain".to_string())]),
             None
         );
     }
@@ -231,6 +176,26 @@ mod tests {
         assert!(matches!(append, Err(error) if error.contains("not a container")));
         assert!(matches!(attribute, Err(error) if error.contains("not an element")));
         assert!(matches!(set_attribute, Err(error) if error.contains("not an element")));
+    }
+
+    fn embedded_svg_markup(nodes: &[HtmlDocumentNode]) -> Option<&str> {
+        nodes.iter().find_map(|node| match node {
+            HtmlDocumentNode::Element {
+                tag,
+                attributes,
+                children,
+                ..
+            } => (tag == "svg")
+                .then(|| {
+                    attributes
+                        .iter()
+                        .find(|(name, _)| name == EMBEDDED_SVG_MARKUP_ATTRIBUTE)
+                        .map(|(_, value)| value.as_str())
+                })
+                .flatten()
+                .or_else(|| embedded_svg_markup(children)),
+            HtmlDocumentNode::Text(_) => None,
+        })
     }
 
     #[test]

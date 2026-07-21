@@ -25,6 +25,19 @@ impl std::fmt::Display for HtmlRuntimeError {
 
 impl std::error::Error for HtmlRuntimeError {}
 
+#[cfg(test)]
+mod tests {
+    use super::HtmlRuntimeError;
+
+    #[test]
+    fn subresource_error_preserves_diagnostic_context() {
+        assert_eq!(
+            HtmlRuntimeError::Subresource("blocked style.css".to_string()).to_string(),
+            "HTML subresource error: blocked style.css"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HtmlNodeId(pub(crate) u64);
 

@@ -49,10 +49,13 @@ impl HtmlSubresourcePolicy {
     }
 
     fn allows_subresource(&self, reference: &str, url: &Url) -> bool {
-        if url.scheme() == "data" {
-            return true;
+        match url.scheme() {
+            "data" => true,
+            "file" => self.allows_same_origin(reference, url),
+            "https" => valid_network_url(url),
+            "http" => self.origin.scheme() != "https" && valid_network_url(url),
+            _ => false,
         }
-        self.allows_same_origin(reference, url)
     }
 
     fn allows_navigation(&self, reference: &str, url: &Url) -> bool {
@@ -103,4 +106,26 @@ fn relative_file_reference(reference: &str) -> bool {
     Url::parse(reference).is_err()
         && !Path::new(reference).is_absolute()
         && !reference.starts_with('/')
+}
+
+fn valid_network_url(url: &Url) -> bool {
+    url.host_str().is_some() && url.username().is_empty() && url.password().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HtmlSubresourcePolicy;
+    use crate::renderer::backends::HtmlBrowserSource;
+    use url::Url;
+
+    #[test]
+    fn unsupported_scheme_is_not_an_allowed_subresource() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let source = HtmlBrowserSource::new("<p>ok</p>", "https://example.test/index.html")?;
+        let unsupported = Url::parse("ftp://example.test/image.png")?;
+        let policy = HtmlSubresourcePolicy::from_source(&source);
+
+        assert!(!policy.allows_subresource("ftp://example.test/image.png", &unsupported));
+        Ok(())
+    }
 }

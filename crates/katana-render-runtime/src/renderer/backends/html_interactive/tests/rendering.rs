@@ -52,6 +52,23 @@ fn styled_summary_and_link_paint_their_clickable_boxes() -> TestResult {
 }
 
 #[test]
+fn embedded_svg_preserves_vector_geometry_in_the_browser_frame() -> TestResult {
+    let session = start(
+        r##"<svg width="120" height="80" viewBox="0 0 120 80" role="img">
+        <rect x="10" y="10" width="100" height="60" rx="8" fill="#e11d48"/>
+        <circle cx="60" cy="40" r="18" fill="#22c55e"/>
+        </svg>"##,
+    )?;
+    let frame = session
+        .latest_frame()
+        .ok_or_else(|| "embedded SVG frame must exist".to_string())?;
+
+    assert!(frame_contains_rgb(frame, [225, 29, 72]));
+    assert!(frame_contains_rgb(frame, [34, 197, 94]));
+    Ok(())
+}
+
+#[test]
 fn secondary_heading_levels_paint_with_their_tag_metrics() -> TestResult {
     let session = start("<h2>Section</h2><h3>Subsection</h3>")?;
     let frame = session
