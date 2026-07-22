@@ -26,6 +26,30 @@ fn renders_css_and_hides_document_metadata() -> TestResult {
 }
 
 #[test]
+fn document_lifecycle_mutation_is_present_in_the_initial_browser_frame() -> TestResult {
+    let session = start(
+        r#"<p id=status style="background: #ef4444; padding: 12px">Waiting</p>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const status = document.getElementById('status');
+  status.textContent = `Ready:${document.readyState}`;
+  status.style.backgroundColor = '#35a853';
+});
+</script>"#,
+    )?;
+    let frame = session
+        .latest_frame()
+        .ok_or_else(|| "initial lifecycle frame must exist".to_string())?;
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+
+    assert!(snapshot.contains("Ready:interactive"), "{snapshot}");
+    assert!(snapshot.contains("background-color: #35a853"), "{snapshot}");
+    assert!(frame_contains_rgb(frame, [53, 168, 83]));
+    assert!(!frame_contains_rgb(frame, [239, 68, 68]));
+    Ok(())
+}
+
+#[test]
 fn body_layout_rules_do_not_expand_descendant_boxes() -> TestResult {
     let session = start(
         r#"<style>body { min-height: 720px; background: #ef4444; color: #172554; }</style><p>Visible body text</p>"#,

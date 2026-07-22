@@ -6,6 +6,7 @@ type TestResult<T = ()> = Result<T, String>;
 const HTML_RUNTIME_HOST_BINDING_SOURCE: &str = concat!(
     include_str!("html_runtime/bridge.rs"),
     include_str!("html_runtime/script.rs"),
+    include_str!("html_runtime/dom_bootstrap.js"),
 );
 
 #[test]
@@ -18,11 +19,14 @@ fn rejects_execution_timeouts_without_a_partial_snapshot() {
 }
 
 #[test]
-fn reports_javascript_compile_errors() {
-    assert!(matches!(
-        render("<p>visible</p><script>const = ;</script>"),
-        Err(message) if message.contains("JavaScript exception")
-    ));
+fn reports_javascript_compile_errors() -> TestResult {
+    let error = render("<p>visible</p><script>const = ;</script>")
+        .err()
+        .ok_or_else(|| "invalid JavaScript rendered unexpectedly".to_string())?;
+    assert!(error.contains("JavaScript exception"), "{error}");
+    assert!(error.contains("inline-script:1:"), "{error}");
+    assert!(error.contains("const = ;"), "{error}");
+    Ok(())
 }
 
 #[test]

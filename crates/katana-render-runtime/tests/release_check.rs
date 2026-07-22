@@ -24,11 +24,11 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_only_v0_4_4() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_allows_only_v0_4_5() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.4")?);
+    assert!(release_target_check(root, "0.4.5")?);
     for version in [
-        "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.5", "0.5.0", "1.0.0", "2.0.0",
+        "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.6", "0.5.0", "1.0.0", "2.0.0",
     ] {
         assert!(!release_target_check(root, version)?);
     }
@@ -62,6 +62,20 @@ fn coverage_gate_remains_strict_and_includes_integration_targets()
             .contains("COVERAGE_MIN_LINES := env_var_or_default(\"COVERAGE_MIN_LINES\", \"100\")")
     );
     assert!(justfile.contains("COVERAGE_MAX_UNCOVERED_LINES := env_var_or_default(\"COVERAGE_MAX_UNCOVERED_LINES\", \"0\")"));
+    Ok(())
+}
+
+#[test]
+fn quality_gate_requires_the_html_runtime_in_the_crate_package()
+-> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let package_check = recipe_body(&justfile, "html-runtime-package-check")?;
+
+    assert!(
+        justfile.contains("html-runtime-package-check plantuml-runtime-package-check"),
+        "check must require the HTML runtime package gate"
+    );
+    assert!(package_check.contains("src/renderer/backends/html_runtime/dom_bootstrap.js"));
     Ok(())
 }
 
@@ -253,7 +267,7 @@ fn release_target_check(
             "--target-version",
             target_version,
             "--latest-version",
-            "0.4.3",
+            "0.4.4",
         ])
         .current_dir(root)
         .output()?;

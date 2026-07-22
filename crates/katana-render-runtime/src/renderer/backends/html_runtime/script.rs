@@ -3,91 +3,10 @@ use super::dom_state::HtmlDomBridgeState;
 use super::execution::ExecutionBudget;
 use super::types::HtmlRuntimeError;
 
-pub(super) const DOM_BOOTSTRAP: &str = r#"
-const __krrNativeDom = globalThis.__krr_dom;
-const __krrDatasetAttribute = (property) => `data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
-const __krrClassToken = (token) => {
-  token = String(token);
-  if (!token || /\s/.test(token)) throw new TypeError('Invalid class token');
-  return token;
-};
-const __krrElement = (nodeId) => {
-  if (nodeId === null || nodeId === undefined || nodeId === '') return null;
-  const element = Object.create(__krrElementPrototype);
-  Object.defineProperty(element, '__krrNodeId', { value: String(nodeId) });
-  return element;
-};
-const __krrElementPrototype = {
-  get textContent() { return __krrNativeDom('textContent', this.__krrNodeId); },
-  set textContent(value) { __krrNativeDom('setTextContent', this.__krrNodeId, String(value)); },
-  get innerHTML() { return __krrNativeDom('innerHTML', this.__krrNodeId); },
-  set innerHTML(value) { __krrNativeDom('setInnerHTML', this.__krrNodeId, String(value)); },
-  get className() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'class') || ''; },
-  set className(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'class', String(value)); },
-  get classList() {
-    const element = this;
-    const read = () => new Set(element.className.split(/\s+/).filter(Boolean));
-    const write = (tokens) => {
-      const value = Array.from(tokens).join(' ');
-      if (value) element.className = value;
-      else element.removeAttribute('class');
-    };
-    return {
-      add(...values) { const tokens = read(); for (const value of values) tokens.add(__krrClassToken(value)); write(tokens); },
-      remove(...values) { const tokens = read(); for (const value of values) tokens.delete(__krrClassToken(value)); write(tokens); },
-      contains(value) { return read().has(__krrClassToken(value)); },
-      toggle(value, force) {
-        const token = __krrClassToken(value);
-        const tokens = read();
-        const enabled = force === undefined ? !tokens.has(token) : Boolean(force);
-        if (enabled) tokens.add(token); else tokens.delete(token);
-        write(tokens);
-        return enabled;
-      },
-    };
-  },
-  get id() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'id') || ''; },
-  set id(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'id', String(value)); },
-  get value() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'value') || ''; },
-  set value(value) { __krrNativeDom('setAttribute', this.__krrNodeId, 'value', String(value)); },
-  get open() { return __krrNativeDom('getAttribute', this.__krrNodeId, 'open') !== null; },
-  set open(value) {
-    if (value) __krrNativeDom('setAttribute', this.__krrNodeId, 'open', '');
-    else __krrNativeDom('removeAttribute', this.__krrNodeId, 'open');
-  },
-  get dataset() {
-    const nodeId = this.__krrNodeId;
-    return new Proxy({}, {
-      get(_target, property) { return __krrNativeDom('getAttribute', nodeId, __krrDatasetAttribute(property)) || undefined; },
-      set(_target, property, value) { __krrNativeDom('setAttribute', nodeId, __krrDatasetAttribute(property), String(value)); return true; },
-    });
-  },
-  get style() {
-    const nodeId = this.__krrNodeId;
-    return new Proxy({}, {
-      get(_target, property) { return __krrNativeDom('styleGet', nodeId, String(property)) || ''; },
-      set(_target, property, value) { __krrNativeDom('styleSet', nodeId, String(property), String(value)); return true; },
-    });
-  },
-  getAttribute(name) { return __krrNativeDom('getAttribute', this.__krrNodeId, String(name)); },
-  setAttribute(name, value) { __krrNativeDom('setAttribute', this.__krrNodeId, String(name), String(value)); },
-  removeAttribute(name) { __krrNativeDom('removeAttribute', this.__krrNodeId, String(name)); },
-  appendChild(child) { __krrNativeDom('appendChild', this.__krrNodeId, child.__krrNodeId); return child; },
-  remove() { __krrNativeDom('remove', this.__krrNodeId); },
-  addEventListener(type, listener) {
-    if (!['blur', 'change', 'click', 'focus', 'input', 'keydown', 'keyup', 'toggle'].includes(type) || typeof listener !== 'function') throw new TypeError('Unsupported event listener');
-    __krrNativeDom('addEventListener', this.__krrNodeId, type, listener);
-  },
-};
-globalThis.document = {
-  getElementById(id) { return __krrElement(__krrNativeDom('getElementById', String(id))); },
-  querySelector(selector) { return __krrElement(__krrNativeDom('querySelector', String(selector))); },
-  querySelectorAll(selector) { return __krrNativeDom('querySelectorAll', String(selector)).map(__krrElement); },
-  createElement(tag) { return __krrElement(__krrNativeDom('createElement', String(tag))); },
-  get body() { return __krrElement(__krrNativeDom('querySelector', 'body')); },
-};
-globalThis.window = globalThis;
-"#;
+pub(super) const DOM_BOOTSTRAP: &str = include_str!("dom_bootstrap.js");
+
+pub(super) const DOM_CONTENT_LOADED_DISPATCH: &str = "__krrDispatchDocumentContentLoaded();";
+pub(super) const WINDOW_LOAD_DISPATCH: &str = "__krrDispatchWindowLoad();";
 
 pub(super) type HtmlTryCatchScope<'pin, 'scope, 'object, 'isolate> =
     v8::PinnedRef<'pin, v8::TryCatch<'scope, 'object, v8::HandleScope<'isolate>>>;
@@ -188,10 +107,37 @@ fn filename_allocation_error() -> HtmlRuntimeError {
 }
 
 pub(super) fn exception_message(scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>) -> String {
-    scope
-        .exception()
-        .map(|exception| exception.to_rust_string_lossy(scope))
-        .unwrap_or_else(unknown_v8_exception_message)
+    let Some(exception) = scope.exception() else {
+        return unknown_v8_exception_message();
+    };
+    let summary = exception.to_rust_string_lossy(scope);
+    let stack = scope
+        .stack_trace()
+        .map(|stack| stack.to_rust_string_lossy(scope))
+        .filter(|stack| !stack.trim().is_empty() && stack != &summary);
+    stack.unwrap_or_else(|| exception_location(scope, summary))
+}
+
+fn exception_location(scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>, summary: String) -> String {
+    let context = scope.message().and_then(|message| {
+        let line = message.get_line_number(scope)?;
+        let column = message.get_start_column() + 1;
+        let resource = message
+            .get_script_resource_name(scope)
+            .map(|value| value.to_rust_string_lossy(scope))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "inline-script".to_string());
+        let source = message
+            .get_source_line(scope)
+            .map(|value| value.to_rust_string_lossy(scope))
+            .filter(|value| !value.trim().is_empty())
+            .map(|source| format!("\n  {source}"))
+            .unwrap_or_else(String::new);
+        Some(format!("  at {resource}:{line}:{column}{source}"))
+    });
+    context
+        .map(|context| format!("{summary}\n{context}"))
+        .unwrap_or(summary)
 }
 
 fn unknown_v8_exception_message() -> String {
@@ -225,7 +171,30 @@ mod tests {
     }
 
     #[test]
-    fn unknown_v8_exception_message_is_stable() {
-        assert_eq!(unknown_v8_exception_message(), "unknown V8 exception");
+    fn exception_message_reports_empty_try_catch() {
+        crate::markdown::diagram_js_runtime::DiagramV8Runtime::ensure_initialized();
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+        v8::tc_scope!(let scope, &mut **context_scope);
+
+        assert_eq!(exception_message(scope), "unknown V8 exception");
+    }
+
+    #[test]
+    fn compile_error_without_resource_name_uses_diagnostic_fallback() {
+        crate::markdown::diagram_js_runtime::DiagramV8Runtime::ensure_initialized();
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+        v8::tc_scope!(let scope, &mut **context_scope);
+
+        assert!(matches!(
+            evaluate(scope, "", "const = ;"),
+            Err(HtmlRuntimeError::JavaScriptException(message))
+                if message.contains("inline-script:1:") && message.contains("const = ;")
+        ));
     }
 }
