@@ -98,7 +98,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - KRR: KRR `0.4.5` is published and verified. The local `0.4.6` patch keeps the
   in-process Rust/V8 architecture and adds structured CSS parsing/cascade,
   browser-style event propagation, typed layout coverage, and frame scroll
-  metrics. `rtk just check`, strict `rtk just coverage` (12,542 / 12,542 lines,
+  metrics. `rtk just check`, strict `rtk just coverage` (12,561 / 12,561 lines,
   100%, 0 uncovered), `release-verify`, `release-openspec-archive`, and the full
   `release-check` pass. The packaged crate remains below the unchanged 10 MiB
   limit. Only public release and registry verification remain.
