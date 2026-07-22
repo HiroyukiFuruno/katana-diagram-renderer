@@ -1,16 +1,11 @@
 use super::super::html_document::HtmlDocument;
 use super::style::{kebab_case, property as style_property, set_property as set_style_property};
-use super::types::{DomValue, HtmlRuntimeEventKind};
+use super::types::DomValue;
 use std::cell::RefCell;
-use std::collections::HashMap;
-
-type HtmlListenerKey = (u64, HtmlRuntimeEventKind);
-type HtmlEventListeners = HashMap<HtmlListenerKey, Vec<v8::Global<v8::Function>>>;
 
 pub(super) struct HtmlDomBridgeState {
     pub(super) document: RefCell<HtmlDocument>,
     pub(super) error: RefCell<Option<String>>,
-    listeners: RefCell<HtmlEventListeners>,
 }
 
 impl HtmlDomBridgeState {
@@ -18,7 +13,6 @@ impl HtmlDomBridgeState {
         Self {
             document: RefCell::new(document),
             error: RefCell::new(None),
-            listeners: RefCell::new(HashMap::new()),
         }
     }
 
@@ -29,7 +23,9 @@ impl HtmlDomBridgeState {
     ) -> Result<DomValue, String> {
         match operation {
             "getElementById" | "querySelector" | "querySelectorAll" | "createElement"
-            | "textContent" | "innerHTML" | "getAttribute" => self.lookup(operation, arguments),
+            | "textContent" | "innerHTML" | "getAttribute" | "eventPath" => {
+                self.lookup(operation, arguments)
+            }
             "appendChild" | "remove" => self.mutate_tree(operation, arguments),
             "setTextContent" | "setInnerHTML" => self.mutate_content(operation, arguments),
             "setAttribute" | "removeAttribute" => self.set_attribute(operation, arguments),
@@ -39,6 +35,15 @@ impl HtmlDomBridgeState {
     }
 
     fn lookup(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
+        match operation {
+            "getElementById" | "querySelector" | "querySelectorAll" | "createElement" => {
+                self.lookup_node(operation, arguments)
+            }
+            _ => self.lookup_content(operation, arguments),
+        }
+    }
+
+    fn lookup_node(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
         let mut document = self.document.borrow_mut();
         match operation {
             "getElementById" => Ok(document
@@ -55,6 +60,15 @@ impl HtmlDomBridgeState {
             "createElement" => document
                 .create_element(argument(arguments, 0)?)
                 .map(DomValue::NodeId),
+            _ => Err(format!(
+                "unsupported HTML node lookup operation: {operation}"
+            )),
+        }
+    }
+
+    fn lookup_content(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
+        let document = self.document.borrow();
+        match operation {
             "textContent" => document
                 .text_content(node_id(argument(arguments, 0)?)?)
                 .map(DomValue::String),
@@ -65,7 +79,12 @@ impl HtmlDomBridgeState {
                 .attribute(node_id(argument(arguments, 0)?)?, argument(arguments, 1)?)?
                 .map(DomValue::String)
                 .unwrap_or(DomValue::Null)),
-            _ => Err(format!("unsupported HTML lookup operation: {operation}")),
+            "eventPath" => document
+                .event_path(node_id(argument(arguments, 0)?)?)
+                .map(DomValue::NodeIds),
+            _ => Err(format!(
+                "unsupported HTML content lookup operation: {operation}"
+            )),
         }
     }
 
@@ -139,30 +158,6 @@ impl HtmlDomBridgeState {
             _ => Err(format!("unsupported HTML style operation: {operation}")),
         }
     }
-
-    pub(super) fn add_listener(
-        &self,
-        node_id: u64,
-        event: HtmlRuntimeEventKind,
-        listener: v8::Global<v8::Function>,
-    ) {
-        self.listeners
-            .borrow_mut()
-            .entry((node_id, event))
-            .or_default()
-            .push(listener);
-    }
-
-    pub(super) fn listeners(
-        &self,
-        node_id: u64,
-        event: HtmlRuntimeEventKind,
-    ) -> Vec<v8::Global<v8::Function>> {
-        match self.listeners.borrow().get(&(node_id, event)) {
-            Some(listeners) => listeners.clone(),
-            None => Vec::new(),
-        }
-    }
 }
 
 fn argument(arguments: &[String], index: usize) -> Result<&str, String> {
@@ -204,5 +199,14 @@ mod tests {
                 .set_attribute("unsupported", &["1".to_string(), "state".to_string()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unsupported_lookup_node_operation_reports_contract_error() {
+        let state = state();
+        assert!(matches!(
+            state.lookup_node("not_supported", &[]),
+            Err(error) if error == "unsupported HTML node lookup operation: not_supported"
+        ));
     }
 }

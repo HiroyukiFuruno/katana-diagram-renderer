@@ -1,6 +1,8 @@
 use markup5ever_rcdom::{Handle, NodeData};
 use std::collections::HashMap;
 
+const INTERACTIVE_USER_AGENT_STYLES: &str = "body { margin: 8px; }\n";
+
 pub(super) fn inline_styles(document: &Handle) -> String {
     let mut source = String::new();
     collect_inline_styles(document, &mut source);
@@ -11,7 +13,7 @@ pub(super) fn interactive_styles(
     document: &Handle,
     external_stylesheets: &HashMap<String, String>,
 ) -> String {
-    let mut source = String::new();
+    let mut source = INTERACTIVE_USER_AGENT_STYLES.to_string();
     collect_interactive_styles(document, external_stylesheets, &mut source);
     source
 }
@@ -92,7 +94,9 @@ fn text_content(node: &Handle) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{inline_styles, interactive_styles, stylesheet_reference};
+    use super::{
+        INTERACTIVE_USER_AGENT_STYLES, inline_styles, interactive_styles, stylesheet_reference,
+    };
     use crate::renderer::backends::html_document::HtmlDocument;
     use std::collections::HashMap;
 
@@ -117,6 +121,9 @@ mod tests {
         assert!(inline_styles(&document.document).contains("color: red"));
 
         let non_stylesheet = HtmlDocument::parse("<link href=theme.css>");
-        assert!(interactive_styles(&non_stylesheet.document, &stylesheets).is_empty());
+        assert_eq!(
+            interactive_styles(&non_stylesheet.document, &stylesheets),
+            INTERACTIVE_USER_AGENT_STYLES
+        );
     }
 }

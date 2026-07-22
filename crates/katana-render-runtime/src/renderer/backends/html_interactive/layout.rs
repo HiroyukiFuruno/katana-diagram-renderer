@@ -1,6 +1,6 @@
 use super::super::html_browser::HtmlBrowserViewport;
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::{DEFAULT_MARGIN, MIN_LAYOUT_WIDTH};
+use super::constants::MIN_LAYOUT_WIDTH;
 use super::document::attribute;
 use super::style::CssStyle;
 use super::svg::svg_header;
@@ -15,6 +15,8 @@ pub(super) struct HtmlLayoutRenderer {
     pub(super) input_values: HashMap<u64, String>,
     pub(super) focused_input: Option<u64>,
     pub(super) layout_error: Option<String>,
+    pub(super) viewport_height: f32,
+    pub(super) next_clip_id: u64,
 }
 
 impl HtmlLayoutRenderer {
@@ -26,11 +28,11 @@ impl HtmlLayoutRenderer {
         focused_input: Option<u64>,
     ) -> Result<LayoutResult, String> {
         let mut renderer = Self::new(viewport, scroll_y, input_values, focused_input);
-        let width = (viewport.logical_width() - DEFAULT_MARGIN * 2.0).max(MIN_LAYOUT_WIDTH);
+        let width = viewport.logical_width().max(MIN_LAYOUT_WIDTH);
         let bottom = renderer.render_nodes(
             nodes,
-            DEFAULT_MARGIN,
-            DEFAULT_MARGIN,
+            0.0,
+            0.0,
             width,
             &CssStyle::browser_default(),
             DetailsContext::NONE,
@@ -41,7 +43,7 @@ impl HtmlLayoutRenderer {
             svg: renderer.svg,
             hit_targets: renderer.hit_targets,
             anchor_positions: renderer.anchor_positions,
-            content_height: bottom + DEFAULT_MARGIN,
+            content_height: bottom,
         })
     }
 
@@ -59,22 +61,9 @@ impl HtmlLayoutRenderer {
             input_values: input_values.clone(),
             focused_input,
             layout_error: None,
+            viewport_height: viewport.logical_height(),
+            next_clip_id: 0,
         }
-    }
-
-    pub(super) fn render_nodes(
-        &mut self,
-        nodes: &[HtmlDocumentNode],
-        x: f32,
-        mut y: f32,
-        width: f32,
-        inherited: &CssStyle,
-        details: DetailsContext,
-    ) -> f32 {
-        for node in nodes {
-            y = self.render_node(node, x, y, width, inherited, details);
-        }
-        y
     }
 
     pub(super) fn render_node(

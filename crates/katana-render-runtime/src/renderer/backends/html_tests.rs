@@ -17,9 +17,7 @@ body { color: red; }
     assert!(
         output.contains(r#"<p class="note" style="color: red; font-weight: bold">Visible</p>"#)
     );
-    assert!(output.contains(
-        r#"<p id="card" style="color: blue; font-style: italic; color: green">Card</p>"#
-    ));
+    assert!(output.contains(r#"<p id="card" style="color: green; font-style: italic">Card</p>"#));
     for hidden in ["Hidden metadata", "window.bad", "<script", "<style"] {
         assert!(!output.contains(hidden), "{output}");
     }
@@ -58,10 +56,7 @@ fn evaluates_inline_scripts_against_the_html5_dom() -> TestResult {
     )?;
 
     assert!(output.contains("mutated"), "{output}");
-    assert!(
-        output.contains(r#"style="color: red; color: blue""#),
-        "{output}"
-    );
+    assert!(output.contains(r#"style="color: blue""#), "{output}");
     Ok(())
 }
 
@@ -174,14 +169,7 @@ fn applies_inner_html_from_a_document_body_fragment() -> TestResult {
 #[test]
 fn rejects_invalid_native_dom_operations() {
     assert_dom_bridge_error("__krr_dom('unknownOperation')", "unknownOperation");
-    assert_dom_bridge_error(
-        "__krr_dom('addEventListener', '1', 'submit', () => {})",
-        "submit",
-    );
-    assert_dom_bridge_error(
-        "__krr_dom('addEventListener', '1', 'click', 'not a function')",
-        "must be a function",
-    );
+    assert_dom_bridge_error("__krr_dom('eventPath', 'invalid')", "invalid HTML node id");
     assert_dom_bridge_error("__krr_dom('getElementById')", "missing DOM argument");
     assert_dom_bridge_error(
         "__krr_dom('textContent', 'invalid')",

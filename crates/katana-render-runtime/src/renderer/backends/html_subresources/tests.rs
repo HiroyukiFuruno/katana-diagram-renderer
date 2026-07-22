@@ -40,13 +40,10 @@ fn local_resources_feed_css_v8_and_image_layout() -> TestResult {
 }
 
 #[test]
-fn cross_origin_http_resources_are_loaded_without_main_document_fetch() -> TestResult {
-    let (origin, server) = local_resource_server()?;
-    let source = HtmlBrowserSource::new(
-        http_document(&origin),
-        "http://example.test/site/index.html",
-    )
-    .map_err(to_string)?;
+fn loopback_http_relative_css_script_and_image_requests_reach_the_runtime() -> TestResult {
+    let (origin, requests, server) = local_resource_server()?;
+    let source = HtmlBrowserSource::new(http_document(), format!("{origin}/index.html"))
+        .map_err(to_string)?;
     let frame = HtmlRuntime
         .open(source, viewport()?)
         .map_err(to_string)?
@@ -58,8 +55,15 @@ fn cross_origin_http_resources_are_loaded_without_main_document_fetch() -> TestR
         .map_err(|_| "resource server panicked".to_string())?;
 
     assert!(joined.is_ok());
+    assert_eq!(
+        *requests
+            .lock()
+            .map_err(|_| "request log lock was poisoned".to_string())?,
+        ["/style.css", "/app.js", "/pixel.svg"]
+    );
     assert_frame_contains(&frame.pixels, [16, 185, 129]);
     assert_frame_contains(&frame.pixels, [239, 68, 68]);
+    assert_frame_contains(&frame.pixels, [49, 130, 206]);
     Ok(())
 }
 
@@ -225,10 +229,10 @@ fn policy_rejects_navigation_through_a_symlink_escape() -> TestResult {
     Ok(())
 }
 
-fn http_document(origin: &str) -> String {
-    format!(
-        "<link rel=stylesheet href={origin}/style.css><div id=styled>Styled</div>\
+fn http_document() -> String {
+    "<link rel=stylesheet href=style.css><div id=styled>Styled</div>\
          <div id=scripted style='width:80px;height:30px'>Scripted</div>\
-         <script src={origin}/app.js></script>"
-    )
+         <script src=app.js></script>\
+         <img src=pixel.svg style='width:40px;height:40px'>"
+        .to_string()
 }

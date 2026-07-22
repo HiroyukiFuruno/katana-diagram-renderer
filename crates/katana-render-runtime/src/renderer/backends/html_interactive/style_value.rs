@@ -1,8 +1,12 @@
 use super::super::constants::{BOLD_FONT_WEIGHT_MINIMUM, DEFAULT_FONT_SIZE, LINE_HEIGHT_FACTOR};
-use super::{CssGridTrack, CssLength};
+use super::CssLength;
+
+#[path = "style_grid_value.rs"]
+mod grid;
+
+pub(super) use grid::grid_tracks;
 
 const CSS_BOX_SIDE_COUNT: usize = 4;
-const MAX_GRID_TRACKS: usize = 64;
 
 impl CssLength {
     pub(super) fn parse(value: &str, em_base: f32) -> Option<Self> {
@@ -80,91 +84,6 @@ pub(super) fn css_number(value: &str) -> Option<f32> {
         .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
-pub(super) fn grid_tracks(value: &str, em_base: f32) -> Option<Vec<CssGridTrack>> {
-    let value = value.trim();
-    if let Some(arguments) = value
-        .strip_prefix("repeat(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        let (count, tracks) = split_top_level_once(arguments, ',')?;
-        let count = count.trim().parse::<usize>().ok()?;
-        let repeated = parse_grid_track_list(tracks, em_base)?;
-        let total = count.checked_mul(repeated.len())?;
-        if count == 0 || total > MAX_GRID_TRACKS {
-            return None;
-        }
-        return Some((0..count).flat_map(|_| repeated.iter().copied()).collect());
-    }
-    parse_grid_track_list(value, em_base)
-}
-
-fn parse_grid_track_list(value: &str, em_base: f32) -> Option<Vec<CssGridTrack>> {
-    let tokens = split_top_level_whitespace(value);
-    if tokens.is_empty() || tokens.len() > MAX_GRID_TRACKS {
-        return None;
-    }
-    tokens
-        .into_iter()
-        .map(|token| parse_grid_track(token, em_base))
-        .collect()
-}
-
-fn parse_grid_track(value: &str, em_base: f32) -> Option<CssGridTrack> {
-    let value = value.trim();
-    match value.to_ascii_lowercase().as_str() {
-        "auto" => return Some(CssGridTrack::Auto),
-        "min-content" => return Some(CssGridTrack::MinContent),
-        "max-content" => return Some(CssGridTrack::MaxContent),
-        _ => {}
-    }
-    if let Some(value) = value.strip_suffix("fr") {
-        return css_number(value).map(CssGridTrack::Fraction);
-    }
-    if let Some(value) = value.strip_suffix('%') {
-        return css_number(value).map(|value| CssGridTrack::Percent(value / 100.0));
-    }
-    css_relative_px(value, em_base, false).map(CssGridTrack::Length)
-}
-
-fn split_top_level_once(value: &str, separator: char) -> Option<(&str, &str)> {
-    let mut depth = 0usize;
-    for (index, character) in value.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => depth = depth.checked_sub(1)?,
-            _ if character == separator && depth == 0 => {
-                return Some((&value[..index], &value[index + character.len_utf8()..]));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn split_top_level_whitespace(value: &str) -> Vec<&str> {
-    let mut tokens = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (index, character) in value.char_indices() {
-        if character.is_whitespace() && depth == 0 {
-            if let Some(token_start) = start.take() {
-                tokens.push(&value[token_start..index]);
-            }
-            continue;
-        }
-        start.get_or_insert(index);
-        match character {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if let Some(token_start) = start {
-        tokens.push(&value[token_start..]);
-    }
-    tokens
-}
-
 pub(super) fn is_bold(value: &str) -> bool {
     value.eq_ignore_ascii_case("bold")
         || value
@@ -182,27 +101,45 @@ fn css_scalar(value: &str) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_GRID_TRACKS, grid_tracks, split_top_level_once, split_top_level_whitespace};
+    use super::{CssLength, box_sides, css_relative_px};
 
     #[test]
-    fn grid_parser_rejects_empty_invalid_and_oversized_repeat_values() {
-        assert!(grid_tracks("", 16.0).is_none());
-        assert!(grid_tracks("repeat(0, 1fr)", 16.0).is_none());
-        let oversized = format!("repeat({}, 1fr)", MAX_GRID_TRACKS + 1);
-        assert!(grid_tracks(&oversized, 16.0).is_none());
-        assert!(split_top_level_once(")", ',').is_none());
-        assert!(split_top_level_once("no separator", ',').is_none());
+    fn box_sides_accepts_all_supported_notations() {
+        assert_eq!(box_sides("3px", 16.0, false), Some([3.0; 4]));
+        assert_eq!(
+            box_sides("1px 2px", 16.0, false),
+            Some([1.0, 2.0, 1.0, 2.0])
+        );
+        assert_eq!(
+            box_sides("1px 2px 3px", 16.0, false),
+            Some([1.0, 2.0, 3.0, 2.0])
+        );
+        assert_eq!(
+            box_sides("1px 2px 3px 4px", 16.0, false),
+            Some([1.0, 2.0, 3.0, 4.0])
+        );
+        assert!(box_sides("1px 2px 3px 4px 5px", 16.0, false).is_none());
     }
 
     #[test]
-    fn grid_tokenizer_keeps_nested_function_whitespace_together() {
+    fn relative_px_parses_units_and_signing_rules() {
+        assert_eq!(css_relative_px("10px", 16.0, false), Some(10.0));
+        assert_eq!(css_relative_px("1.5rem", 16.0, false), Some(24.0));
+        assert_eq!(css_relative_px("2em", 16.0, false), Some(32.0));
+        assert_eq!(css_relative_px("-5px", 16.0, false), None);
+        assert_eq!(css_relative_px("-5px", 16.0, true), Some(-5.0));
+        assert_eq!(css_length_percent("40%"), Some(CssLength::Percent(0.4)));
+    }
+
+    #[test]
+    fn parse_percent_length_then_resolve() {
         assert_eq!(
-            split_top_level_once("fn(a,b), tail", ','),
-            Some(("fn(a,b)", " tail"))
+            CssLength::parse("12.5%", 10.0).map(|size| size.resolve(160.0)),
+            Some(20.0)
         );
-        assert_eq!(
-            split_top_level_whitespace(" repeat(2, 1fr) auto "),
-            ["repeat(2, 1fr)", "auto"]
-        );
+    }
+
+    fn css_length_percent(value: &str) -> Option<CssLength> {
+        CssLength::parse(value, 16.0)
     }
 }

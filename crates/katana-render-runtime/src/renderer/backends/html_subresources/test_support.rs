@@ -3,9 +3,13 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use url::Url;
 
 pub(super) type TestResult<T = ()> = Result<T, String>;
+type RequestLog = Arc<Mutex<Vec<String>>>;
+type ResourceServer = std::thread::JoinHandle<std::io::Result<()>>;
+type LocalResourceServer = (String, RequestLog, ResourceServer);
 
 static NEXT_FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -20,21 +24,31 @@ pub(super) fn assert_frame_contains(pixels: &[u8], expected: [u8; 3]) {
     );
 }
 
-pub(super) fn local_resource_server()
--> TestResult<(String, std::thread::JoinHandle<std::io::Result<()>>)> {
+pub(super) fn local_resource_server() -> TestResult<LocalResourceServer> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(to_string)?;
     let address = listener.local_addr().map_err(to_string)?;
-    let server = std::thread::spawn(move || serve_resources(listener));
-    Ok((format!("http://{address}"), server))
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    let server = std::thread::spawn(move || serve_resources(listener, &recorded));
+    Ok((format!("http://{address}"), requests, server))
 }
 
-fn serve_resources(listener: TcpListener) -> std::io::Result<()> {
-    for _ in 0..2 {
+fn serve_resources(listener: TcpListener, requests: &Mutex<Vec<String>>) -> std::io::Result<()> {
+    for _ in 0..3 {
         let (mut stream, _) = listener.accept()?;
         let path = request_path(&mut stream)?;
+        record_request(requests, path.clone())?;
         let body = resource_body(&path)?;
         write_response(&mut stream, body.as_bytes())?;
     }
+    Ok(())
+}
+
+fn record_request(requests: &Mutex<Vec<String>>, path: String) -> std::io::Result<()> {
+    requests
+        .lock()
+        .map_err(|_| std::io::Error::other("request log lock was poisoned"))?
+        .push(path);
     Ok(())
 }
 
@@ -42,6 +56,9 @@ fn resource_body(path: &str) -> std::io::Result<&'static str> {
     match path {
         "/style.css" => Ok("#styled { background: #10b981; width: 80px; height: 30px; }"),
         "/app.js" => Ok("document.getElementById('scripted').style.backgroundColor = '#ef4444';"),
+        "/pixel.svg" => Ok(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8' fill='#3182ce'/></svg>",
+        ),
         _ => Err(std::io::Error::other("unexpected subresource request")),
     }
 }
@@ -132,8 +149,9 @@ pub(super) fn to_string(error: impl ToString) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_url_error, missing_request_path, resource_body, to_string};
+    use super::{file_url_error, missing_request_path, record_request, resource_body, to_string};
     use crate::renderer::backends::html_browser::HtmlBrowserError;
+    use std::sync::{Arc, Mutex};
     use url::Url;
 
     #[test]
@@ -156,5 +174,22 @@ mod tests {
             "request path is missing"
         );
         assert_eq!(file_url_error(()), "fixture path is not a file URL");
+    }
+
+    #[test]
+    fn poisoned_request_log_is_reported_as_an_io_error() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let poisoned = Arc::clone(&requests);
+        let thread = std::thread::spawn(move || {
+            let _result = poisoned
+                .lock()
+                .map(|_guard| std::panic::resume_unwind(Box::new("poison request log")));
+        });
+        let _ = thread.join();
+
+        assert!(matches!(
+            record_request(&requests, "/style.css".to_string()),
+            Err(error) if error.to_string() == "request log lock was poisoned"
+        ));
     }
 }

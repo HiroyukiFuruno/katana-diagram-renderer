@@ -2,7 +2,11 @@ use super::CssDeclaration;
 
 const BOX_SHORTHAND_VALUE_COUNT: usize = 4;
 
-pub(super) fn expand_box_shorthand(name: &str, value: &str) -> Option<Vec<CssDeclaration>> {
+pub(super) fn expand_box_shorthand(
+    name: &str,
+    value: &str,
+    important: bool,
+) -> Option<Vec<CssDeclaration>> {
     let sides = match name {
         "padding" | "margin" => parse_box_sides(value)?,
         _ => return None,
@@ -15,6 +19,7 @@ pub(super) fn expand_box_shorthand(name: &str, value: &str) -> Option<Vec<CssDec
             .map(|(direction, value)| CssDeclaration {
                 name: format!("{name}-{direction}"),
                 value,
+                important,
             })
             .collect(),
     )

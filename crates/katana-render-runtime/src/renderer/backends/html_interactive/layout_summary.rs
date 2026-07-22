@@ -21,6 +21,18 @@ impl HtmlLayoutRenderer {
             layout.height,
             layout.style,
         );
+        let marker_x = self.paint_summary_marker(layout, open);
+        self.paint_control_text(
+            &node_text(children),
+            marker_x + SUMMARY_MARKER_SIZE + SUMMARY_MARKER_TEXT_GAP,
+            summary_text_width(layout),
+            layout.y + layout.style.padding_top,
+            layout.height,
+            layout.style,
+        );
+    }
+
+    fn paint_summary_marker(&mut self, layout: ControlLayout<'_>, open: bool) -> f32 {
         let marker_x = layout.x + layout.style.padding_left;
         let marker_y = layout.y + (layout.height - SUMMARY_MARKER_SIZE) / 2.0;
         self.svg.push_str(&format!(
@@ -28,14 +40,17 @@ impl HtmlLayoutRenderer {
             disclosure_marker_path(marker_x, marker_y, open),
             escape_xml(&layout.style.color),
         ));
-        self.paint_control_text(
-            &node_text(children),
-            marker_x + SUMMARY_MARKER_SIZE + SUMMARY_MARKER_TEXT_GAP,
-            layout.y + layout.style.padding_top,
-            layout.height,
-            layout.style,
-        );
+        marker_x
     }
+}
+
+fn summary_text_width(layout: ControlLayout<'_>) -> f32 {
+    (layout.width
+        - layout.style.padding_left
+        - layout.style.padding_right
+        - SUMMARY_MARKER_SIZE
+        - SUMMARY_MARKER_TEXT_GAP)
+        .max(0.0)
 }
 
 fn disclosure_marker_path(marker_x: f32, marker_y: f32, open: bool) -> String {

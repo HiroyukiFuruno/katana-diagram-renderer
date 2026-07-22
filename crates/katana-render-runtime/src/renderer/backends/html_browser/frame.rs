@@ -13,6 +13,10 @@ pub struct HtmlBrowserFrame {
     pub generation: u64,
     pub origin: HtmlBrowserOrigin,
     pub viewport: HtmlBrowserViewport,
+    #[serde(default)]
+    pub scroll_y: f32,
+    #[serde(default)]
+    pub content_height: f32,
     pub pixel_format: HtmlBrowserPixelFormat,
     pub pixels: Vec<u8>,
 }
@@ -40,9 +44,17 @@ impl HtmlBrowserFrame {
             generation,
             origin,
             viewport,
+            scroll_y: 0.0,
+            content_height: 0.0,
             pixel_format,
             pixels,
         })
+    }
+
+    pub(crate) fn with_layout_metrics(mut self, scroll_y: f32, content_height: f32) -> Self {
+        self.scroll_y = scroll_y;
+        self.content_height = content_height;
+        self
     }
 }
 
@@ -106,6 +118,24 @@ mod tests {
         );
 
         assert_eq!(frame, Err(HtmlBrowserError::InvalidViewport));
+    }
+
+    #[test]
+    fn frame_layout_metrics_default_and_update_without_changing_pixel_contract() {
+        let viewport = must(HtmlBrowserViewport::new(1, 1, 1.0));
+        let frame = must(HtmlBrowserFrame::new(
+            1,
+            origin(),
+            viewport,
+            HtmlBrowserPixelFormat::Rgba8,
+            vec![255; 4],
+        ));
+        assert_eq!(frame.scroll_y, 0.0);
+        assert_eq!(frame.content_height, 0.0);
+
+        let frame = frame.with_layout_metrics(25.0, 400.0);
+        assert_eq!(frame.scroll_y, 25.0);
+        assert_eq!(frame.content_height, 400.0);
     }
 
     #[test]

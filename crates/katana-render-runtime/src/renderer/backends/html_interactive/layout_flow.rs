@@ -2,11 +2,12 @@ use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
 use super::layout::HtmlLayoutRenderer;
 use super::layout_flow_measure::{is_layout_item, item_style, leaf_style, measured_widths};
-use super::style::{CssGridTrack, CssStyle};
+use super::layout_grid_track::taffy_grid_track;
+use super::style::CssStyle;
 use super::types::DetailsContext;
 use taffy::geometry::Size;
 use taffy::prelude::{AvailableSpace, Display, Style, TaffyTree};
-use taffy::style_helpers::{auto, fr, length, max_content, min_content, percent};
+use taffy::style_helpers::{auto, length};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_flow_children(
@@ -162,25 +163,13 @@ fn flow_style(style: &CssStyle, width: f32) -> Style {
     layout
 }
 
-fn taffy_grid_track(track: CssGridTrack) -> taffy::style::TrackSizingFunction {
-    match track {
-        CssGridTrack::Length(value) => length(value),
-        CssGridTrack::Percent(value) => percent(value),
-        CssGridTrack::Fraction(value) => fr(value),
-        CssGridTrack::Auto => auto(),
-        CssGridTrack::MinContent => min_content(),
-        CssGridTrack::MaxContent => max_content(),
-    }
-}
-
 fn layout_error(error: impl ToString) -> String {
     format!("CSS flow layout failed: {}", error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::taffy_grid_track;
-    use super::{CssGridTrack, CssStyle, DetailsContext, Display, HtmlDocumentNode};
+    use super::{CssStyle, DetailsContext, Display, HtmlDocumentNode};
     use super::{HtmlLayoutRenderer, layout_error};
     use crate::renderer::backends::html_browser::HtmlBrowserViewport;
     use std::collections::HashMap;
@@ -214,31 +203,5 @@ mod tests {
             Ok(9.0)
         );
         assert_eq!(layout_error("boom"), "CSS flow layout failed: boom");
-    }
-
-    #[test]
-    fn grid_track_conversion_preserves_supported_css_sizing_kinds() {
-        let percent = taffy_grid_track(CssGridTrack::Percent(0.25));
-        assert_eq!(
-            percent
-                .max_sizing_function()
-                .definite_value(Some(200.0), |_, _| 0.0),
-            Some(50.0)
-        );
-        assert!(
-            taffy_grid_track(CssGridTrack::Auto)
-                .max_sizing_function()
-                .is_auto()
-        );
-        assert!(
-            taffy_grid_track(CssGridTrack::MinContent)
-                .max_sizing_function()
-                .is_min_content()
-        );
-        assert!(
-            taffy_grid_track(CssGridTrack::MaxContent)
-                .max_sizing_function()
-                .is_max_content()
-        );
     }
 }

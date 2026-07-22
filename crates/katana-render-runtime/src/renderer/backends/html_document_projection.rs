@@ -8,12 +8,24 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 impl HtmlDocument {
+    #[cfg(test)]
     pub(in crate::renderer::backends) fn interactive_nodes_with_styles(
         &self,
         external_stylesheets: &HashMap<String, String>,
     ) -> Vec<HtmlDocumentNode> {
-        let css =
-            StaticCss::for_interactive_document_with_styles(&self.document, external_stylesheets);
+        self.interactive_nodes_with_styles_at_width(external_stylesheets, 1024.0)
+    }
+
+    pub(in crate::renderer::backends) fn interactive_nodes_with_styles_at_width(
+        &self,
+        external_stylesheets: &HashMap<String, String>,
+        viewport_width: f32,
+    ) -> Vec<HtmlDocumentNode> {
+        let css = StaticCss::for_interactive_document_with_styles_at_width(
+            &self.document,
+            external_stylesheets,
+            viewport_width,
+        );
         self.interactive_children(&self.document, &css, &[])
     }
 
@@ -66,7 +78,7 @@ impl HtmlDocument {
         }
         let attributes = css.apply_with_ancestors(&tag, &source_attributes, ancestors);
         let mut child_ancestors = ancestors.to_vec();
-        child_ancestors.push(CssAncestor::new(&tag, &source_attributes));
+        child_ancestors.push(CssAncestor::new(&tag, &attributes));
         let node_id = self.node_ids.get(&(Rc::as_ptr(node) as usize)).copied()?;
         if tag == "svg" {
             return Some(embedded_svg_node(node_id, tag, attributes, node));

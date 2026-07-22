@@ -116,7 +116,10 @@ impl HtmlInteractiveSession {
     }
 
     pub(super) fn layout(&mut self) -> Result<LayoutResult, HtmlBrowserError> {
-        let nodes = self.runtime.interactive_nodes().map_err(runtime_failure)?;
+        let nodes = self
+            .runtime
+            .interactive_nodes_at_width(self.viewport.logical_width())
+            .map_err(runtime_failure)?;
         seed_input_values(&nodes, &mut self.input_values);
         HtmlLayoutRenderer::render(
             &nodes,
@@ -169,7 +172,8 @@ impl HtmlInteractiveSession {
                 HtmlBrowserPixelFormat::Rgba8,
                 pixels,
             )
-            .map_err(|error| runtime_failure(error.to_string()))?,
+            .map_err(|error| runtime_failure(error.to_string()))?
+            .with_layout_metrics(self.scroll_y, render.content_height),
         );
         self.hit_targets = render.hit_targets;
         self.content_height = render.content_height;

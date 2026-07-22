@@ -5,6 +5,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub(super) struct TableCell {
     pub(super) tag: String,
+    pub(super) attributes: Vec<(String, String)>,
     pub(super) children: Vec<HtmlDocumentNode>,
 }
 
@@ -35,11 +36,18 @@ fn push_table_row(children: &[HtmlDocumentNode], rows: &mut Vec<Vec<TableCell>>)
 }
 
 fn table_cell(node: &HtmlDocumentNode) -> Option<TableCell> {
-    let HtmlDocumentNode::Element { tag, children, .. } = node else {
+    let HtmlDocumentNode::Element {
+        tag,
+        attributes,
+        children,
+        ..
+    } = node
+    else {
         return None;
     };
     (tag == "th" || tag == "td").then(|| TableCell {
         tag: tag.clone(),
+        attributes: attributes.clone(),
         children: children.clone(),
     })
 }
@@ -182,7 +190,25 @@ mod tests {
     }
 
     fn assert_table_rows_preserve_cells() {
-        let table = element(
+        let rows = table_rows(&[
+            HtmlDocumentNode::Text("ignored".to_string()),
+            table_fixture(),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0][0].tag, "th");
+        assert!(rows[0][0].attributes.is_empty());
+        assert_eq!(
+            node_text(&[element(
+                "span",
+                vec![HtmlDocumentNode::Text("Ready".to_string())],
+            )]),
+            "Ready"
+        );
+    }
+
+    fn table_fixture() -> HtmlDocumentNode {
+        element(
             "table",
             vec![
                 HtmlDocumentNode::Text("ignored table text".to_string()),
@@ -198,18 +224,7 @@ mod tests {
                     )],
                 ),
             ],
-        );
-        let rows = table_rows(&[HtmlDocumentNode::Text("ignored".to_string()), table]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].len(), 2);
-        assert_eq!(rows[0][0].tag, "th");
-        assert_eq!(
-            node_text(&[element(
-                "span",
-                vec![HtmlDocumentNode::Text("Ready".to_string())],
-            )]),
-            "Ready"
-        );
+        )
     }
 
     fn assert_input_defaults_are_seeded() {
