@@ -117,6 +117,14 @@ runtime-bundle-package-check:
         fi; \
       done
 
+# Verify the in-process HTML runtime source is included in the library crate package
+html-runtime-package-check:
+    @package_files="$({{CARGO}} package -p katana-render-runtime --locked --allow-dirty --list)"; \
+    if ! printf '%s\n' "$package_files" | grep -qx "src/renderer/backends/html_runtime/dom_bootstrap.js"; then \
+      echo "missing HTML runtime package file: dom_bootstrap.js" >&2; \
+      exit 1; \
+    fi
+
 # Verify the PlantUML checksum manifest is included without packaging the JAR body
 plantuml-runtime-package-check:
     @package_files="$({{CARGO}} package -p katana-render-runtime --locked --allow-dirty --list)"; \
@@ -134,7 +142,7 @@ runtime-asset-script-test:
     bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts
 
 # Run the local quality gate
-check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check plantuml-runtime-package-check
+check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
     @echo "checks passed"
 
 # Sweep old build artifacts locally (older than 7 days)

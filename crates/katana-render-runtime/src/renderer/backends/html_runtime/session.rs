@@ -1,7 +1,7 @@
 use super::dom_state::HtmlDomBridgeState;
 use super::script::{
-    check_bridge_error, dom_state_unavailable_error, evaluate, install_dom_bridge,
-    perform_microtask_checkpoint,
+    DOM_CONTENT_LOADED_DISPATCH, WINDOW_LOAD_DISPATCH, check_bridge_error,
+    dom_state_unavailable_error, evaluate, install_dom_bridge, perform_microtask_checkpoint,
 };
 use super::types::HtmlRuntimeError;
 use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
@@ -70,6 +70,16 @@ impl StaticHtmlRuntime {
             perform_microtask_checkpoint(scope)?;
             check_bridge_error(scope)?;
         }
+        evaluate(
+            scope,
+            "krr-html-dom-content-loaded",
+            DOM_CONTENT_LOADED_DISPATCH,
+        )?;
+        perform_microtask_checkpoint(scope)?;
+        check_bridge_error(scope)?;
+        evaluate(scope, "krr-html-window-load", WINDOW_LOAD_DISPATCH)?;
+        perform_microtask_checkpoint(scope)?;
+        check_bridge_error(scope)?;
         Ok(v8::Global::new(scope, context))
     }
 }

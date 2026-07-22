@@ -11,6 +11,7 @@ include = [
     "Cargo.toml",
     "assets/fonts/**",
     "src/**/*.rs",
+    "src/renderer/backends/html_runtime/*.js",
     "src/markdown/diagram_runtime/generated/*.js",
     "src/markdown/diagram_runtime/generated/*.sha256",
     "vendor/drawio/30.0.4/**",
