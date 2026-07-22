@@ -20,6 +20,7 @@ impl HtmlLayoutRenderer {
         self.paint_control_text(
             &node_text(element.children),
             layout.x + BUTTON_TEXT_LEFT_PADDING,
+            (layout.width - BUTTON_TEXT_LEFT_PADDING * 2.0).max(0.0),
             layout.y,
             layout.height,
             layout.style,
@@ -38,12 +39,13 @@ impl HtmlLayoutRenderer {
         &mut self,
         text: &str,
         x: f32,
+        width: f32,
         start: f32,
         height: f32,
         style: &CssStyle,
     ) {
         let baseline = start + (height + style.font_size) / 2.0 - 2.0;
-        self.paint_text_lines(&[text.to_string()], x, baseline, style);
+        self.paint_text_lines(&[text.to_string()], x, width, baseline, style);
     }
 
     pub(super) fn push_target(

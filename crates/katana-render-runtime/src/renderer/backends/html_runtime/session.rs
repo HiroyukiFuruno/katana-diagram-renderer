@@ -100,8 +100,17 @@ impl StaticHtmlRuntimeSession {
             .ok_or_else(dom_state_unavailable_error)
     }
 
+    #[cfg(test)]
     pub(in crate::renderer::backends) fn interactive_nodes(
         &self,
+    ) -> Result<Vec<crate::renderer::backends::html_document::HtmlDocumentNode>, HtmlRuntimeError>
+    {
+        self.interactive_nodes_at_width(1024.0)
+    }
+
+    pub(in crate::renderer::backends) fn interactive_nodes_at_width(
+        &self,
+        viewport_width: f32,
     ) -> Result<Vec<crate::renderer::backends::html_document::HtmlDocumentNode>, HtmlRuntimeError>
     {
         self.isolate
@@ -112,7 +121,10 @@ impl StaticHtmlRuntimeSession {
                 state
                     .document
                     .borrow()
-                    .interactive_nodes_with_styles(&self.external_stylesheets)
+                    .interactive_nodes_with_styles_at_width(
+                        &self.external_stylesheets,
+                        viewport_width,
+                    )
             })
             .ok_or_else(dom_state_unavailable_error)
     }

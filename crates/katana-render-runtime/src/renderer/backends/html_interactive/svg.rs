@@ -21,19 +21,38 @@ fn append_background(svg: &mut String, x: f32, y: f32, width: f32, height: f32, 
     let Some(background) = &style.background else {
         return;
     };
-    svg.push_str(&format!(
-        r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" fill="{}"/>"#,
-        escape_xml(background)
-    ));
+    if style.border_radius > 0.0 {
+        svg.push_str(&format!(
+            r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="{}" ry="{}" fill="{}"/>"#,
+            style.border_radius,
+            style.border_radius,
+            escape_xml(background)
+        ));
+    } else {
+        svg.push_str(&format!(
+            r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" fill="{}"/>"#,
+            escape_xml(background)
+        ));
+    }
 }
 
 fn append_border(svg: &mut String, x: f32, y: f32, width: f32, height: f32, style: &CssStyle) {
     let Some(border) = &style.border else {
         return;
     };
+    if style.border_width <= 0.0 {
+        return;
+    }
+    let inset = style.border_width / 2.0;
+    let painted_width = (width - style.border_width).max(0.0);
+    let painted_height = (height - style.border_width).max(0.0);
+    let radius = (style.border_radius - inset).max(0.0);
     svg.push_str(&format!(
-        r#"<rect x="{x}" y="{y}" width="{width}" height="{height}" fill="none" stroke="{}" stroke-width="1"/>"#,
-        escape_xml(border)
+        r#"<rect x="{}" y="{}" width="{painted_width}" height="{painted_height}" rx="{radius}" ry="{radius}" fill="none" stroke="{}" stroke-width="{}"/>"#,
+        x + inset,
+        y + inset,
+        escape_xml(border),
+        style.border_width
     ));
 }
 

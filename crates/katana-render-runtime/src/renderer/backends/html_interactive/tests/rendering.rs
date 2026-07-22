@@ -5,6 +5,29 @@ use crate::renderer::backends::html_browser::{
 
 const TEST_VIEWPORT_WIDTH: u32 = 320;
 const TEST_VIEWPORT_HEIGHT: u32 = 240;
+const STRUCTURED_CASCADE_DOCUMENT: &str = r#"<style>
+:root { --accent: #123456; }
+body { margin: 0; }
+.shell { display: flex; gap: 8px; }
+.card { width: 80px; height: 40px; background: var(--accent); }
+.card[data-tone="priority"] { width: 120px; background: #ef4444 !important; }
+#priority { background: #3b82f6; }
+@media screen and (min-width: 300px) {
+  .shell { display: grid; grid-template-columns: 80px 120px; }
+}
+</style>
+<main class=shell>
+  <section class=card>Variable</section>
+  <section id=priority class=card data-tone=priority>Important</section>
+</main>"#;
+const BOX_MODEL_DOCUMENT: &str = r#"<style>
+html, body { margin: 0; }
+.content-box { box-sizing: content-box; width: 100px; height: 20px; padding: 10px; border: 2px solid #123456; background: #abcdef; }
+.border-box { box-sizing: border-box; width: 100px; height: 40px; padding: 10px; border: 2px solid #654321; border-radius: 6px; overflow: hidden; background: #fedcba; font-family: Inter, sans-serif; font-style: italic; text-align: center; letter-spacing: 2px; }
+.overflowing { height: 100px; background: #ef4444; }
+</style>
+<div class=content-box></div>
+<div class=border-box>Hi<div class=overflowing>Clipped</div></div>"#;
 
 #[test]
 fn renders_css_and_hides_document_metadata() -> TestResult {
@@ -206,6 +229,66 @@ main > section.card[data-state="ready"] p.message.emphasis {
 }
 
 #[test]
+fn structured_cascade_applies_variables_important_grid_and_media_query() -> TestResult {
+    let mut session = start(STRUCTURED_CASCADE_DOCUMENT)?;
+    let layout = session.layout().map_err(to_string)?;
+    assert_structured_cascade_svg(&layout.svg);
+    Ok(())
+}
+
+#[test]
+fn author_body_margin_and_background_own_the_complete_viewport() -> TestResult {
+    let mut session = start(
+        r#"<style>html, body { margin: 0; background: #123456; }</style><p>Full viewport</p>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="0" y="0" width="320" height="240" fill="#123456"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_box_model_overflow_and_typography_reach_layout_and_paint() -> TestResult {
+    let mut session = start(BOX_MODEL_DOCUMENT)?;
+    let layout = session.layout().map_err(to_string)?;
+    assert_box_model_svg(&layout.svg);
+    Ok(())
+}
+
+fn assert_structured_cascade_svg(svg: &str) {
+    assert!(
+        svg.contains(r##"<rect x="0" y="0" width="80" height="40" fill="#123456"/>"##),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(r##"<rect x="88" y="0" width="120" height="40" fill="#ef4444"/>"##),
+        "{svg}"
+    );
+}
+
+fn assert_box_model_svg(svg: &str) {
+    assert!(svg.contains(r##"<rect x="0" y="0" width="124" height="44" fill="#abcdef"/>"##));
+    assert!(svg.contains(
+        r##"<rect x="0" y="44" width="100" height="40" rx="6" ry="6" fill="#fedcba"/>"##
+    ));
+    for expected in [
+        r#"<clipPath id="krr-clip-0">"#,
+        r#"font-family="Inter, sans-serif""#,
+        r#"font-style="italic""#,
+        r#"letter-spacing="2""#,
+        r#"<text x="40.2"#,
+    ] {
+        assert!(svg.contains(expected), "{svg}");
+    }
+}
+
+#[test]
 fn url_attribute_selector_controls_stylesheet_paint() -> TestResult {
     let session = start(
         r#"<style>
@@ -232,7 +315,7 @@ fn four_value_box_shorthands_control_painted_geometry() -> TestResult {
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="24" y="18" width="276" height="56" fill="#123456"/>"##),
+            .contains(r##"<rect x="16" y="10" width="292" height="56" fill="#123456"/>"##),
         "{}",
         layout.svg
     );
@@ -250,7 +333,7 @@ div { padding: 0; }
     )?;
     let layout = session.layout().map_err(to_string)?;
 
-    assert!(layout.svg.contains(r#"<text x="36""#), "{}", layout.svg);
+    assert!(layout.svg.contains(r#"<text x="28""#), "{}", layout.svg);
     Ok(())
 }
 
@@ -270,14 +353,14 @@ main { display: flex; gap: 10px; width: 280px; }
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#ef4444"/>"##),
+            .contains(r##"<rect x="8" y="8" width="100" height="40" fill="#ef4444"/>"##),
         "{}",
         layout.svg
     );
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="126" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="118" y="8" width="100" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -296,7 +379,7 @@ fn flex_flow_resolves_percentage_item_width_once() -> TestResult {
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="140" height="40" fill="#ef4444"/>"##),
+            .contains(r##"<rect x="8" y="8" width="140" height="40" fill="#ef4444"/>"##),
         "{}",
         layout.svg
     );
@@ -325,7 +408,7 @@ fn hidden_flex_item_does_not_consume_width_or_gap() -> TestResult {
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="8" y="8" width="100" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -346,7 +429,7 @@ fn hidden_grid_item_does_not_consume_a_track_or_gap() -> TestResult {
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="8" y="8" width="100" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -367,7 +450,7 @@ fn hidden_grid_item_preserves_first_track_position_for_following_items() -> Test
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="70" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="8" y="8" width="70" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -391,14 +474,14 @@ main { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 2
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="134" height="40" fill="#ef4444"/>"##),
+            .contains(r##"<rect x="8" y="8" width="134" height="40" fill="#ef4444"/>"##),
         "{}",
         layout.svg
     );
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="162" y="16" width="134" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="154" y="8" width="134" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -421,14 +504,44 @@ main { display: grid; grid-template-columns: 100px 1fr; gap: 12px; width: 280px;
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="100" height="40" fill="#ef4444"/>"##),
+            .contains(r##"<rect x="8" y="8" width="100" height="40" fill="#ef4444"/>"##),
         "{}",
         layout.svg
     );
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="128" y="16" width="168" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="120" y="8" width="168" height="40" fill="#3b82f6"/>"##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn grid_flow_positions_minmax_fraction_tracks_in_columns() -> TestResult {
+    let mut session = start(
+        r#"<style>
+main { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(120px, 1fr); gap: 10px; width: 310px; }
+.card { height: 40px; }
+#first { background: #ef4444; }
+#second { background: #3b82f6; }
+</style>
+<main><section id=first class=card>First</section><section id=second class=card>Second</section></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="8" y="8" width="147" height="40" fill="#ef4444"/>"##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(r##"<rect x="165" y="8" width="147" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
@@ -447,10 +560,31 @@ fn grid_flow_resolves_percentage_item_width_once() -> TestResult {
     assert!(
         layout
             .svg
-            .contains(r##"<rect x="16" y="16" width="140" height="40" fill="#3b82f6"/>"##),
+            .contains(r##"<rect x="8" y="8" width="140" height="40" fill="#3b82f6"/>"##),
         "{}",
         layout.svg
     );
+    Ok(())
+}
+
+#[test]
+fn consecutive_inline_block_links_share_a_row_and_keep_exact_hit_boxes() -> TestResult {
+    let mut session = start(
+        r##"<style>
+main { width: 280px; }
+a { display: inline-block; margin-right: 8px; padding: 6px; background: #b99aff; }
+</style>
+<main><a href="#one">First link</a> <a href="#two">Second link</a></main>"##,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert_eq!(layout.hit_targets.len(), 2);
+    let first = &layout.hit_targets[0];
+    let second = &layout.hit_targets[1];
+    assert!(second.x >= first.x + first.width + 8.0);
+    assert_eq!(second.y, first.y);
+    assert!(first.width < 120.0);
+    assert!(second.width < 120.0);
     Ok(())
 }
 
@@ -461,7 +595,7 @@ fn percentage_width_reflows_against_resized_viewport() -> TestResult {
     assert!(
         initial
             .svg
-            .contains(r##"<rect x="16" y="16" width="144" height="40" fill="#123456"/>"##),
+            .contains(r##"<rect x="8" y="8" width="152" height="40" fill="#123456"/>"##),
         "{}",
         initial.svg
     );
@@ -473,7 +607,7 @@ fn percentage_width_reflows_against_resized_viewport() -> TestResult {
     assert!(
         resized
             .svg
-            .contains(r##"<rect x="16" y="16" width="224" height="40" fill="#123456"/>"##),
+            .contains(r##"<rect x="8" y="8" width="232" height="40" fill="#123456"/>"##),
         "{}",
         resized.svg
     );

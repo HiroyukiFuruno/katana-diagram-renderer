@@ -54,20 +54,6 @@ pub(crate) enum HtmlRuntimeEventKind {
 }
 
 impl HtmlRuntimeEventKind {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "blur" => Some(Self::Blur),
-            "change" => Some(Self::Change),
-            "click" => Some(Self::Click),
-            "focus" => Some(Self::Focus),
-            "input" => Some(Self::Input),
-            "keydown" => Some(Self::KeyDown),
-            "keyup" => Some(Self::KeyUp),
-            "toggle" => Some(Self::Toggle),
-            _ => None,
-        }
-    }
-
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Blur => "blur",

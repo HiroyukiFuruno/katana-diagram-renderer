@@ -24,11 +24,11 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_only_v0_4_5() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_allows_only_v0_4_6() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.5")?);
+    assert!(release_target_check(root, "0.4.6")?);
     for version in [
-        "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.6", "0.5.0", "1.0.0", "2.0.0",
+        "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.5.0", "1.0.0", "2.0.0",
     ] {
         assert!(!release_target_check(root, version)?);
     }
@@ -267,7 +267,7 @@ fn release_target_check(
             "--target-version",
             target_version,
             "--latest-version",
-            "0.4.4",
+            "0.4.5",
         ])
         .current_dir(root)
         .output()?;

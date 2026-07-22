@@ -21,21 +21,36 @@ impl HtmlLayoutRenderer {
             layout.height,
             layout.style,
         );
-        let marker_x = layout.x + layout.style.padding_left;
-        let marker_y = layout.y + (layout.height - SUMMARY_MARKER_SIZE) / 2.0;
-        self.svg.push_str(&format!(
-            r#"<path d="{}" fill="{}"/>"#,
-            disclosure_marker_path(marker_x, marker_y, open),
-            escape_xml(&layout.style.color),
-        ));
+        let marker_x = self.paint_summary_marker(layout, open);
         self.paint_control_text(
             &node_text(children),
             marker_x + SUMMARY_MARKER_SIZE + SUMMARY_MARKER_TEXT_GAP,
+            summary_text_width(layout),
             layout.y + layout.style.padding_top,
             layout.height,
             layout.style,
         );
     }
+
+    fn paint_summary_marker(&mut self, layout: ControlLayout<'_>, open: bool) -> f32 {
+        let marker_x = layout.x + layout.style.padding_left;
+        let marker_y = layout.y + (layout.height - SUMMARY_MARKER_SIZE) / 2.0 - self.scroll_y;
+        self.svg.push_str(&format!(
+            r#"<path d="{}" fill="{}"/>"#,
+            disclosure_marker_path(marker_x, marker_y, open),
+            escape_xml(&layout.style.color),
+        ));
+        marker_x
+    }
+}
+
+fn summary_text_width(layout: ControlLayout<'_>) -> f32 {
+    (layout.width
+        - layout.style.padding_left
+        - layout.style.padding_right
+        - SUMMARY_MARKER_SIZE
+        - SUMMARY_MARKER_TEXT_GAP)
+        .max(0.0)
 }
 
 fn disclosure_marker_path(marker_x: f32, marker_y: f32, open: bool) -> String {
@@ -91,7 +106,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn disclosure_marker_tracks_the_summary_through_viewport_scroll() -> Result<(), String> {
+        let unscrolled = render_summary_svg_at_scroll(true, 0.0)?;
+        let scrolled = render_summary_svg_at_scroll(true, 12.0)?;
+        let unscrolled_origin = marker_origin(&unscrolled).ok_or("unscrolled marker missing")?;
+        let scrolled_origin = marker_origin(&scrolled).ok_or("scrolled marker missing")?;
+
+        assert_eq!(scrolled_origin.0, unscrolled_origin.0);
+        assert_eq!(scrolled_origin.1, unscrolled_origin.1 - 12.0);
+        Ok(())
+    }
+
     fn render_summary_svg(open: bool) -> Result<String, String> {
+        render_summary_svg_at_scroll(open, 0.0)
+    }
+
+    fn render_summary_svg_at_scroll(open: bool, scroll_y: f32) -> Result<String, String> {
         HtmlLayoutRenderer::render(
             &details_nodes(open),
             HtmlBrowserViewport {
@@ -99,7 +130,7 @@ mod tests {
                 height: 240,
                 device_scale_factor: 1.0,
             },
-            0.0,
+            scroll_y,
             &HashMap::new(),
             None,
         )
@@ -128,5 +159,12 @@ mod tests {
     fn summary_marker_path(svg: &str) -> Option<&str> {
         svg.split_once("<path d=\"")
             .and_then(|(_, path)| path.split_once('"').map(|(path, _)| path))
+    }
+
+    fn marker_origin(svg: &str) -> Option<(f32, f32)> {
+        let path = summary_marker_path(svg)?;
+        let mut parts = path.split_whitespace();
+        (parts.next()? == "M").then_some(())?;
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
     }
 }

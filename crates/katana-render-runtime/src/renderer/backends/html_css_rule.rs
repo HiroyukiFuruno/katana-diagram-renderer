@@ -2,11 +2,15 @@ use super::html_css::HtmlAttributes;
 use super::html_css_selector::{CssAncestor, CssSelector};
 #[path = "html_css_shorthand.rs"]
 mod html_css_shorthand;
+#[path = "html_css_parser.rs"]
+mod parser;
+use html_css_shorthand::expand_box_shorthand;
 
 #[derive(Debug)]
 pub(super) struct CssRule {
     selectors: Vec<CssSelector>,
     pub(super) declarations: Vec<CssDeclaration>,
+    media: Vec<String>,
 }
 
 impl CssRule {
@@ -15,7 +19,15 @@ impl CssRule {
         tag: &str,
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
+        viewport_width: f32,
     ) -> Option<u16> {
+        if !self
+            .media
+            .iter()
+            .all(|query| media_query_matches(query, viewport_width))
+        {
+            return None;
+        }
         self.selectors
             .iter()
             .filter(|selector| selector.matches(tag, attributes, ancestors))
@@ -40,125 +52,52 @@ impl CssRule {
 pub(super) struct CssDeclaration {
     pub(super) name: String,
     pub(super) value: String,
+    pub(super) important: bool,
 }
 
 pub(super) fn parse_rules(source: &str) -> Vec<CssRule> {
-    remove_comments(source)
-        .split('}')
-        .filter_map(|rule| rule.split_once('{'))
-        .filter_map(|(selectors, declarations)| {
-            let selectors = selectors
-                .split(',')
-                .filter_map(CssSelector::parse)
-                .collect::<Vec<_>>();
-            let declarations = parse_declarations(declarations);
-            (!selectors.is_empty() && !declarations.is_empty()).then_some(CssRule {
-                selectors,
-                declarations,
-            })
-        })
-        .collect()
+    parser::rules(source)
 }
 
-fn remove_comments(source: &str) -> String {
-    let mut output = String::new();
-    let mut remaining = source;
-    while let Some(start) = remaining.find("/*") {
-        output.push_str(&remaining[..start]);
-        let after_start = &remaining[start + 2..];
-        let Some(end) = after_start.find("*/") else {
-            return output;
-        };
-        remaining = &after_start[end + 2..];
-    }
-    output.push_str(remaining);
-    output
+pub(super) fn parse_declarations(source: &str) -> Vec<CssDeclaration> {
+    parser::declarations(source)
 }
 
-fn parse_declarations(source: &str) -> Vec<CssDeclaration> {
-    source
-        .split(';')
-        .filter_map(|declaration| declaration.split_once(':'))
-        .filter_map(|(name, value)| {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim();
-            (supported_property(&name) && !value.is_empty()).then(|| {
-                expand_box_shorthand(&name, value).unwrap_or_else(|| {
-                    vec![CssDeclaration {
-                        name: name.clone(),
-                        value: value.to_string(),
-                    }]
-                })
-            })
-        })
-        .flatten()
-        .collect()
+pub(super) fn declarations_for(
+    name: String,
+    value: String,
+    important: bool,
+) -> Vec<CssDeclaration> {
+    expand_box_shorthand(&name, &value, important).unwrap_or_else(|| {
+        vec![CssDeclaration {
+            name,
+            value,
+            important,
+        }]
+    })
 }
 
-fn expand_box_shorthand(name: &str, value: &str) -> Option<Vec<CssDeclaration>> {
-    html_css_shorthand::expand_box_shorthand(name, value)
+fn media_query_matches(query: &str, viewport_width: f32) -> bool {
+    query.split(',').any(|alternative| {
+        let normalized = alternative.trim().to_ascii_lowercase();
+        if normalized.contains("print") || normalized.contains("not screen") {
+            return false;
+        }
+        media_width(&normalized, "min-width").is_none_or(|minimum| viewport_width >= minimum)
+            && media_width(&normalized, "max-width").is_none_or(|maximum| viewport_width <= maximum)
+    })
 }
 
-fn supported_property(name: &str) -> bool {
-    is_paint_property(name) || is_box_property(name) || is_flow_property(name)
-}
-
-fn is_paint_property(name: &str) -> bool {
-    matches!(
-        name,
-        "background"
-            | "background-color"
-            | "color"
-            | "font-family"
-            | "font-style"
-            | "font-weight"
-            | "font-size"
-            | "line-height"
-            | "text-align"
-            | "text-decoration"
-    )
-}
-
-fn is_box_property(name: &str) -> bool {
-    matches!(
-        name,
-        "border"
-            | "border-color"
-            | "padding"
-            | "padding-top"
-            | "padding-right"
-            | "padding-bottom"
-            | "padding-left"
-            | "margin"
-            | "margin-top"
-            | "margin-right"
-            | "margin-bottom"
-            | "margin-left"
-            | "width"
-            | "max-width"
-            | "height"
-            | "min-height"
-    )
-}
-
-fn is_flow_property(name: &str) -> bool {
-    matches!(
-        name,
-        "display"
-            | "gap"
-            | "flex-direction"
-            | "flex-wrap"
-            | "flex-grow"
-            | "flex-shrink"
-            | "align-items"
-            | "justify-content"
-            | "grid-template-columns"
-    )
+fn media_width(query: &str, feature: &str) -> Option<f32> {
+    let start = query.find(feature)? + feature.len();
+    let value = query[start..].trim_start().strip_prefix(':')?.trim_start();
+    let value = value.split(')').next()?.trim().strip_suffix("px")?.trim();
+    value.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_declarations, parse_rules, supported_property};
+    use super::{media_query_matches, parse_declarations, parse_rules};
 
     #[test]
     fn rules_keep_layout_declarations_for_the_interactive_runtime() {
@@ -192,13 +131,12 @@ mod tests {
     }
 
     #[test]
-    fn display_is_an_interactive_css_property_but_unknown_names_are_not() {
-        assert!(supported_property("display"));
-        assert!(!supported_property("position"));
+    fn valid_declarations_are_preserved_for_typed_computed_style() {
         let rules = parse_rules("p { display: none; position: fixed; }");
 
-        assert_eq!(rules[0].declarations.len(), 1);
+        assert_eq!(rules[0].declarations.len(), 2);
         assert_eq!(rules[0].declarations[0].name, "display");
+        assert_eq!(rules[0].declarations[1].name, "position");
     }
 
     #[test]
@@ -227,5 +165,34 @@ mod tests {
             ("margin-top", "30px"),
             ("padding", "1px 2px 3px 4px 5px"),
         ]
+    }
+
+    #[test]
+    fn structured_parser_keeps_delimiters_in_strings_functions_and_important() {
+        let rules = parse_rules(
+            r#".card { --label: "a;b:c}"; color: var(--label); background: rgb(1, 2, 3) !important; }"#,
+        );
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].declarations[0].value, r#""a;b:c}""#);
+        assert_eq!(rules[0].declarations[1].value, "var(--label)");
+        assert!(rules[0].declarations[2].important);
+    }
+
+    #[test]
+    fn media_query_matches_the_logical_viewport_width() {
+        assert!(media_query_matches("screen and (min-width: 600px)", 800.0));
+        assert!(!media_query_matches("screen and (max-width: 600px)", 800.0));
+        assert!(!media_query_matches("print", 800.0));
+    }
+
+    #[test]
+    fn media_query_rules_are_respected_in_interactive_matching() {
+        let rules = parse_rules("@media (max-width: 500px) { .card { color: red; } }");
+        let selectors = vec![(String::from("class"), String::from("card"))];
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].matches("div", &selectors, &[], 600.0), None);
+        assert!(rules[0].matches("div", &selectors, &[], 400.0).is_some());
     }
 }

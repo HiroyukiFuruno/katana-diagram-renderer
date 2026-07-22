@@ -2,6 +2,7 @@ mod drawio;
 mod html;
 mod html_browser;
 mod html_css;
+mod html_css_cascade;
 mod html_css_rule;
 mod html_css_selector;
 mod html_css_sources;

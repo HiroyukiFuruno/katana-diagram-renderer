@@ -1,12 +1,6 @@
 use super::super::dom_state::HtmlDomBridgeState;
-use super::super::execution::ExecutionBudget;
-use super::super::interaction::{
-    element_reference, event, event_default_prevented, run_inline_handler,
-};
-use super::super::script::{
-    HtmlTryCatchScope, check_bridge_error, dom_state_unavailable_error, exception_message,
-    perform_microtask_checkpoint,
-};
+use super::super::interaction::{event, event_default_prevented};
+use super::super::script::{HtmlTryCatchScope, check_bridge_error, dom_state_unavailable_error};
 #[cfg(test)]
 use super::super::types::HtmlNodeId;
 use super::super::types::{
@@ -72,65 +66,13 @@ fn dispatch_event(
     kind: HtmlRuntimeEventKind,
     key: Option<&str>,
 ) -> Result<Option<HtmlNavigationIntent>, HtmlRuntimeError> {
-    let target = element_reference(scope, node_id)?;
-    let event = event(scope, target, kind.as_str(), key)?;
-    dispatch_registered_listeners(scope, node_id, kind, target, event)?;
-    dispatch_inline_handler(scope, node_id, kind, target, event)?;
+    let event = event(scope, node_id, kind.as_str(), key)?;
+    check_bridge_error(scope)?;
     if kind == HtmlRuntimeEventKind::Click {
         navigation_intent(scope, node_id, event)
     } else {
         Ok(None)
     }
-}
-
-fn dispatch_registered_listeners(
-    scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
-    node_id: u64,
-    kind: HtmlRuntimeEventKind,
-    target: v8::Local<v8::Object>,
-    event: v8::Local<v8::Object>,
-) -> Result<(), HtmlRuntimeError> {
-    let listeners = scope
-        .get_slot::<HtmlDomBridgeState>()
-        .ok_or_else(dom_state_unavailable_error)?
-        .listeners(node_id, kind);
-    for listener in listeners {
-        let listener = v8::Local::new(scope, listener);
-        let budget = ExecutionBudget::start(scope);
-        let result = listener
-            .call(scope, target.into(), &[event.into()])
-            .ok_or_else(|| HtmlRuntimeError::JavaScriptException(exception_message(scope)));
-        budget.finish()?;
-        result?;
-        perform_microtask_checkpoint(scope)?;
-        check_bridge_error(scope)?;
-    }
-    Ok(())
-}
-
-fn dispatch_inline_handler(
-    scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
-    node_id: u64,
-    kind: HtmlRuntimeEventKind,
-    target: v8::Local<v8::Object>,
-    event: v8::Local<v8::Object>,
-) -> Result<(), HtmlRuntimeError> {
-    let attribute = format!("on{}", kind.as_str());
-    let handler = {
-        let state = scope
-            .get_slot::<HtmlDomBridgeState>()
-            .ok_or_else(dom_state_unavailable_error)?;
-        state
-            .document
-            .borrow()
-            .attribute(node_id, &attribute)
-            .map_err(HtmlRuntimeError::DomBridge)?
-    };
-    if let Some(handler) = handler {
-        run_inline_handler(scope, &handler, target, event)?;
-        check_bridge_error(scope)?;
-    }
-    Ok(())
 }
 
 fn navigation_intent(

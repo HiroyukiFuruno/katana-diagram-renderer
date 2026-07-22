@@ -28,6 +28,30 @@ fn button_click_runs_v8_handler_and_repaints() -> TestResult {
 }
 
 #[test]
+fn host_click_uses_dom_event_capture_target_and_stopped_bubbling() -> TestResult {
+    let mut session = start(
+        r#"<div id=parent><button id=child>Run</button></div><p id=order></p><script>
+const parent = document.getElementById('parent');
+const child = document.getElementById('child');
+const order = document.getElementById('order');
+parent.addEventListener('click', () => { order.textContent += 'capture|'; }, true);
+child.addEventListener('click', (event) => {
+  order.textContent += 'target|';
+  event.stopPropagation();
+});
+parent.addEventListener('click', () => { order.textContent += 'bubble|'; });
+</script>"#,
+    )?;
+
+    click_element(&mut session, "child")?;
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(snapshot.contains("capture|target|"), "{snapshot}");
+    assert!(!snapshot.contains("bubble|"), "{snapshot}");
+    Ok(())
+}
+
+#[test]
 fn class_list_mutation_recascades_css_after_click() -> TestResult {
     let mut session = start(
         r#"<style>button.active { background: #35a853; color: #ffffff; }</style><button id=run>Run</button><script>document.getElementById('run').addEventListener('click', function () { this.classList.toggle('active'); });</script>"#,
@@ -45,6 +69,32 @@ fn class_list_mutation_recascades_css_after_click() -> TestResult {
     assert!(frame_contains_rgb(after, [53, 168, 83]));
     let snapshot = session.runtime.snapshot().map_err(to_string)?;
     assert!(snapshot.contains(r#"class="active""#), "{snapshot}");
+    Ok(())
+}
+
+#[test]
+fn custom_property_style_mutation_recascades_and_repaints_after_click() -> TestResult {
+    let mut session = start(
+        r#"<style>#card { --accent: #ef4444; background: var(--accent); width: 80px; height: 40px; }</style>
+<div id=card>Card</div><button id=run>Update</button><script>
+document.getElementById('run').addEventListener('click', () => {
+  document.getElementById('card').style['--accent'] = '#35a853';
+});
+</script>"#,
+    )?;
+    let before = session
+        .latest_frame()
+        .ok_or_else(|| "initial frame must exist".to_string())?;
+    assert!(frame_contains_rgb(before, [239, 68, 68]));
+    assert!(!frame_contains_rgb(before, [53, 168, 83]));
+
+    click_element(&mut session, "run")?;
+
+    let after = session
+        .latest_frame()
+        .ok_or_else(|| "updated frame must exist".to_string())?;
+    assert!(frame_contains_rgb(after, [53, 168, 83]));
+    assert!(!frame_contains_rgb(after, [239, 68, 68]));
     Ok(())
 }
 

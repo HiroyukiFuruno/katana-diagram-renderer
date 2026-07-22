@@ -9,7 +9,8 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
     ) -> f32 {
         match element.tag {
-            "html" | "body" | "main" => self.render_container_element(element.children, layout),
+            "html" | "body" => self.render_viewport_container(element, layout),
+            "main" => self.render_container_element(element.children, layout),
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" => {
                 self.render_label_element(element, layout)
             }
@@ -57,6 +58,25 @@ impl HtmlLayoutRenderer {
             layout.y,
             layout.width,
             layout.style,
+            layout.details,
+        )
+    }
+
+    fn render_viewport_container(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+    ) -> f32 {
+        let mut style = layout.style.clone();
+        style.min_height = style
+            .min_height
+            .max((self.viewport_height - style.margin_top - style.margin_bottom).max(0.0));
+        self.render_container(
+            element.children,
+            layout.x,
+            layout.y,
+            layout.width,
+            &style,
             layout.details,
         )
     }

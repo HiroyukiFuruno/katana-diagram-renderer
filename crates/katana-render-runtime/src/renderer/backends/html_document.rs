@@ -2,7 +2,7 @@ use super::html_css::HtmlAttributes;
 use super::html_dom_helpers::{attribute_value, collect_scripts, find_element};
 use super::html_snapshot::render_document;
 use html5ever::{parse_document, tendril::TendrilSink};
-use markup5ever_rcdom::{Handle, RcDom};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -96,6 +96,23 @@ impl HtmlDocument {
             .get(&node_id)
             .cloned()
             .ok_or_else(|| format!("HTML node {node_id} does not exist"))
+    }
+
+    pub(super) fn event_path(&self, node_id: u64) -> Result<Vec<u64>, String> {
+        let mut current = Some(self.node(node_id)?);
+        let mut path = Vec::new();
+        while let Some(node) = current {
+            if matches!(node.data, NodeData::Element { .. }) {
+                let pointer = Rc::as_ptr(&node) as usize;
+                if let Some(node_id) = self.node_ids.get(&pointer) {
+                    path.push(*node_id);
+                }
+            }
+            let parent = node.parent.take();
+            node.parent.set(parent.clone());
+            current = parent.and_then(|parent| parent.upgrade());
+        }
+        Ok(path)
     }
 
     pub(super) fn register_subtree(&mut self, node: &Handle) -> u64 {

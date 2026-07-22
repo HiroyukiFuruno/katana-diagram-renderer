@@ -26,7 +26,7 @@ pub(super) fn selector(raw: &str) -> Option<CssSelector> {
 fn compound(source: &str) -> Option<CssCompoundSelector> {
     let mut remaining = source.trim();
     let tag_end = remaining
-        .find(|character: char| ['.', '#', '['].contains(&character))
+        .find(|character: char| ['.', '#', '[', ':'].contains(&character))
         .unwrap_or(remaining.len());
     let raw_tag = &remaining[..tag_end];
     if !raw_tag.is_empty() && raw_tag != "*" && !raw_tag.chars().all(is_selector_character) {
@@ -39,6 +39,7 @@ fn compound(source: &str) -> Option<CssCompoundSelector> {
         classes: Vec::new(),
         id: None,
         attributes: Vec::new(),
+        root: false,
     };
     while !remaining.is_empty() {
         remaining = parse_suffix(&mut compound, remaining)?;
@@ -46,8 +47,9 @@ fn compound(source: &str) -> Option<CssCompoundSelector> {
     (compound.tag.is_some()
         || !compound.classes.is_empty()
         || compound.id.is_some()
-        || !compound.attributes.is_empty())
-    .then_some(compound)
+        || !compound.attributes.is_empty()
+        || compound.root)
+        .then_some(compound)
 }
 
 fn parse_suffix<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Option<&'a str> {
@@ -66,6 +68,12 @@ fn parse_suffix<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Opti
         '[' => parse_attribute(source).map(|(attribute, rest)| {
             compound.attributes.push(attribute);
             rest
+        }),
+        ':' => source.strip_prefix(":root").and_then(|rest| {
+            (!compound.root).then(|| {
+                compound.root = true;
+                rest
+            })
         }),
         _ => None,
     }

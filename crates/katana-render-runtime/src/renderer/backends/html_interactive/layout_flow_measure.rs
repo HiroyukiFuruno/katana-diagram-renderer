@@ -1,7 +1,8 @@
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::{MIN_LAYOUT_WIDTH, TEXT_CHARACTER_WIDTH_FACTOR};
 use super::document::node_text;
-use super::style::{CssGridTrack, CssLength, CssStyle};
+use super::layout_grid_measure::grid_track_widths;
+use super::style::{CssLength, CssStyle};
 use taffy::geometry::Size;
 use taffy::prelude::{Display, Style};
 use taffy::style_helpers::length;
@@ -78,101 +79,15 @@ fn non_grid_measured_widths(
         .collect()
 }
 
-fn grid_track_widths(
-    nodes: &[&HtmlDocumentNode],
-    styles: &[CssStyle],
-    width: f32,
-    parent: &CssStyle,
-) -> Vec<f32> {
-    let tracks = &parent.grid_template_columns;
-    let count = tracks.len().max(1);
-    let available = (width - parent.gap * count.saturating_sub(1) as f32).max(MIN_LAYOUT_WIDTH);
-    let intrinsic = intrinsic_track_widths(nodes, styles, tracks, count);
-    let mut widths = initial_grid_widths(tracks, &intrinsic, available);
-    if widths.is_empty() {
-        return vec![available];
-    }
-    distribute_grid_space(tracks, &mut widths, available);
-    widths
-}
-
-fn intrinsic_track_widths(
-    nodes: &[&HtmlDocumentNode],
-    styles: &[CssStyle],
-    tracks: &[CssGridTrack],
-    count: usize,
-) -> Vec<f32> {
-    let mut intrinsic = vec![MIN_LAYOUT_WIDTH; count];
-    for (index, (node, style)) in nodes.iter().zip(styles).enumerate() {
-        let column = index % count;
-        let measured = match tracks.get(column) {
-            Some(CssGridTrack::MinContent) => min_content_text_width(node, style),
-            _ => intrinsic_text_width(node, style),
-        };
-        intrinsic[column] = intrinsic[column].max(measured);
-    }
-    intrinsic
-}
-
-fn initial_grid_widths(tracks: &[CssGridTrack], intrinsic: &[f32], available: f32) -> Vec<f32> {
-    tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| match track {
-            CssGridTrack::Length(value) => *value,
-            CssGridTrack::Percent(value) => available * value,
-            CssGridTrack::Auto | CssGridTrack::MinContent | CssGridTrack::MaxContent => {
-                intrinsic[index]
-            }
-            CssGridTrack::Fraction(_) => 0.0,
-        })
-        .collect()
-}
-
-fn distribute_grid_space(tracks: &[CssGridTrack], widths: &mut [f32], available: f32) {
-    let allocated = widths.iter().sum::<f32>();
-    let remaining = (available - allocated).max(0.0);
-    let fraction_total = tracks
-        .iter()
-        .filter_map(|track| match track {
-            CssGridTrack::Fraction(value) => Some(*value),
-            _ => None,
-        })
-        .sum::<f32>();
-    if fraction_total > 0.0 {
-        for (track, track_width) in tracks.iter().zip(widths.iter_mut()) {
-            if let CssGridTrack::Fraction(value) = track {
-                *track_width = remaining * value / fraction_total;
-            }
-        }
-    } else {
-        let auto_count = tracks
-            .iter()
-            .filter(|track| matches!(track, CssGridTrack::Auto))
-            .count();
-        if auto_count > 0 {
-            distribute_auto_space(tracks, widths, remaining / auto_count as f32);
-        }
-    }
-}
-
-fn distribute_auto_space(tracks: &[CssGridTrack], widths: &mut [f32], extra: f32) {
-    for (track, track_width) in tracks.iter().zip(widths.iter_mut()) {
-        if matches!(track, CssGridTrack::Auto) {
-            *track_width += extra;
-        }
-    }
-}
-
 pub(super) fn is_layout_item(node: &HtmlDocumentNode) -> bool {
     !matches!(node, HtmlDocumentNode::Text(text) if text.trim().is_empty())
 }
 
-fn intrinsic_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
+pub(super) fn intrinsic_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
     text_width(node_text(std::slice::from_ref(node)).chars().count(), style)
 }
 
-fn min_content_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
+pub(super) fn min_content_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
     let text = node_text(std::slice::from_ref(node));
     let characters = text
         .split_whitespace()
@@ -191,7 +106,8 @@ fn text_width(characters: usize, style: &CssStyle) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssGridTrack, CssLength, CssStyle, Display, intrinsic_text_width, is_layout_item};
+    use super::super::style::{CssGridTrack, CssGridTrackBreadth};
+    use super::{CssLength, CssStyle, Display, intrinsic_text_width, is_layout_item};
     use super::{item_style, measured_widths};
     use crate::renderer::backends::html_document::HtmlDocumentNode;
 
@@ -243,6 +159,33 @@ mod tests {
         fixed.grid_template_columns = vec![CssGridTrack::MaxContent, CssGridTrack::Fraction(1.0)];
         let measured = measured_widths(&items, &styles, 280.0, &fixed);
         assert!(measured[0] < measured[1]);
+    }
+
+    #[test]
+    fn grid_measurements_respect_minmax_minimums_and_fraction_growth() {
+        let first = HtmlDocumentNode::Text("First".to_string());
+        let second = HtmlDocumentNode::Text("Second".to_string());
+        let style = CssStyle::browser_default();
+        let items = [&first, &second];
+        let styles = [style.clone(), style.clone()];
+        let mut grid = style;
+        grid.display = Display::Grid;
+        grid.gap = 10.0;
+        grid.grid_template_columns = vec![
+            CssGridTrack::MinMax {
+                min: CssGridTrackBreadth::Length(80.0),
+                max: CssGridTrackBreadth::Fraction(1.0),
+            },
+            CssGridTrack::MinMax {
+                min: CssGridTrackBreadth::Length(120.0),
+                max: CssGridTrackBreadth::Fraction(1.0),
+            },
+        ];
+
+        assert_eq!(
+            measured_widths(&items, &styles, 310.0, &grid),
+            [150.0, 150.0]
+        );
     }
 
     #[test]

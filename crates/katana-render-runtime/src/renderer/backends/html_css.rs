@@ -1,4 +1,7 @@
-use super::html_css_rule::{CssDeclaration, CssRule, parse_rules};
+use super::html_css_cascade::{
+    inherited_custom_properties, resolved_css_values, select_declaration, style_attribute,
+};
+use super::html_css_rule::{CssRule, parse_declarations, parse_rules};
 use super::html_css_selector::CssAncestor;
 use super::html_css_sources::{inline_styles, interactive_styles};
 use markup5ever_rcdom::Handle;
@@ -6,10 +9,13 @@ use std::collections::HashMap;
 
 pub(super) type HtmlAttributes = Vec<(String, String)>;
 
-#[derive(Debug, Default)]
+const DEFAULT_CSS_VIEWPORT_WIDTH: f32 = 1024.0;
+
+#[derive(Debug)]
 pub(super) struct StaticCss {
     rules: Vec<CssRule>,
     mode: CssResolutionMode,
+    viewport_width: f32,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -24,14 +30,28 @@ impl StaticCss {
         Self::with_mode(document, CssResolutionMode::StaticSnapshot)
     }
 
+    #[cfg(test)]
     pub(super) fn for_interactive_document_with_styles(
         document: &Handle,
         external_stylesheets: &HashMap<String, String>,
+    ) -> Self {
+        Self::for_interactive_document_with_styles_at_width(
+            document,
+            external_stylesheets,
+            DEFAULT_CSS_VIEWPORT_WIDTH,
+        )
+    }
+
+    pub(super) fn for_interactive_document_with_styles_at_width(
+        document: &Handle,
+        external_stylesheets: &HashMap<String, String>,
+        viewport_width: f32,
     ) -> Self {
         let source = interactive_styles(document, external_stylesheets);
         Self {
             rules: parse_rules(&source),
             mode: CssResolutionMode::InteractiveRuntime,
+            viewport_width,
         }
     }
 
@@ -40,6 +60,7 @@ impl StaticCss {
         Self {
             rules: parse_rules(&source),
             mode,
+            viewport_width: DEFAULT_CSS_VIEWPORT_WIDTH,
         }
     }
 
@@ -59,15 +80,10 @@ impl StaticCss {
             .cloned()
             .collect::<HtmlAttributes>();
         let stylesheet = self.resolved_declarations(tag, attributes, ancestors);
-        let inline = style_attribute(attributes);
-        if stylesheet.is_empty() && inline.trim().is_empty() {
+        if stylesheet.is_empty() {
             return rendered;
         }
-        let mut declarations = stylesheet;
-        if !inline.trim().is_empty() {
-            declarations.push(inline);
-        }
-        rendered.push(("style".to_string(), declarations.join("; ")));
+        rendered.push(("style".to_string(), stylesheet.join("; ")));
         rendered
     }
 
@@ -77,28 +93,71 @@ impl StaticCss {
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
     ) -> Vec<String> {
-        let mut selected = Vec::<SelectedDeclaration>::new();
+        let mut selected = inherited_custom_properties(ancestors);
+        self.select_rule_declarations(tag, attributes, ancestors, &mut selected);
+        select_inline_declarations(attributes, &mut selected);
+        resolved_css_values(selected)
+    }
+
+    fn select_rule_declarations(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        selected: &mut Vec<super::html_css_cascade::SelectedDeclaration>,
+    ) {
         for (rule_order, rule) in self.rules.iter().enumerate() {
-            let matches = match self.mode {
-                CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
-                CssResolutionMode::InteractiveRuntime => rule.matches(tag, attributes, ancestors),
-            };
-            let Some(specificity) = matches else {
+            let Some(specificity) = self.rule_specificity(rule, tag, attributes, ancestors) else {
                 continue;
             };
-            for declaration in &rule.declarations {
+            for (declaration_order, declaration) in rule.declarations.iter().enumerate() {
                 if self.mode == CssResolutionMode::StaticSnapshot
                     && !static_snapshot_property(&declaration.name)
                 {
                     continue;
                 }
-                select_declaration(&mut selected, declaration, specificity, rule_order);
+                select_declaration(
+                    selected,
+                    declaration,
+                    specificity,
+                    rule_order,
+                    declaration_order,
+                );
             }
         }
-        selected
-            .into_iter()
-            .map(|selected| format!("{}: {}", selected.name, selected.value))
-            .collect()
+    }
+
+    fn rule_specificity(
+        &self,
+        rule: &CssRule,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+    ) -> Option<u16> {
+        match self.mode {
+            CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
+            CssResolutionMode::InteractiveRuntime => {
+                rule.matches(tag, attributes, ancestors, self.viewport_width)
+            }
+        }
+    }
+}
+
+fn select_inline_declarations(
+    attributes: &HtmlAttributes,
+    selected: &mut Vec<super::html_css_cascade::SelectedDeclaration>,
+) {
+    for (declaration_order, declaration) in parse_declarations(style_attribute(attributes))
+        .iter()
+        .enumerate()
+    {
+        select_declaration(
+            selected,
+            declaration,
+            u16::MAX,
+            usize::MAX,
+            declaration_order,
+        );
     }
 }
 
@@ -118,49 +177,11 @@ fn static_snapshot_property(name: &str) -> bool {
     )
 }
 
-#[derive(Debug)]
-struct SelectedDeclaration {
-    name: String,
-    value: String,
-    specificity: u16,
-    rule_order: usize,
-}
-
-fn style_attribute(attributes: &HtmlAttributes) -> String {
-    attributes
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("style"))
-        .map_or_else(String::new, |(_, value)| value.clone())
-}
-
-fn select_declaration(
-    selected: &mut Vec<SelectedDeclaration>,
-    declaration: &CssDeclaration,
-    specificity: u16,
-    rule_order: usize,
-) {
-    let candidate = SelectedDeclaration {
-        name: declaration.name.clone(),
-        value: declaration.value.clone(),
-        specificity,
-        rule_order,
-    };
-    let Some(current) = selected
-        .iter_mut()
-        .find(|item| item.name == declaration.name)
-    else {
-        selected.push(candidate);
-        return;
-    };
-    if (candidate.specificity, candidate.rule_order) >= (current.specificity, current.rule_order) {
-        *current = candidate;
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::html_css_cascade::resolve_css_variables;
     use super::super::html_document::{HtmlDocument, HtmlDocumentNode};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn longhand_padding_is_resolved_before_shorthand() {
@@ -187,6 +208,43 @@ mod tests {
         assert_eq!(
             style.as_deref(),
             Some("padding-left: 10px; padding-top: 0; padding-right: 0; padding-bottom: 0")
+        );
+    }
+
+    #[test]
+    fn important_inline_and_custom_properties_follow_cascade_precedence() {
+        let document = HtmlDocument::parse(
+            "<style>:root { --accent: #123456; } .card { color: red !important; } #card { color: blue; }</style><div id=card class=card style='color: var(--accent)'>A</div>",
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+        let style = find_style_attribute(&nodes, "div");
+        assert!(
+            style.as_ref().is_some_and(|style| {
+                style.contains("color: red") && style.contains("--accent: #123456")
+            }),
+            "computed style did not preserve cascade precedence: {style:?}"
+        );
+    }
+
+    #[test]
+    fn css_variables_resolve_nested_values_fallbacks_and_cycles() {
+        let custom = HashMap::from([
+            ("--a".to_string(), "var(--b)".to_string()),
+            ("--b".to_string(), "12px".to_string()),
+            ("--cycle".to_string(), "var(--cycle)".to_string()),
+        ]);
+
+        assert_eq!(
+            resolve_css_variables("calc(var(--a) + 2px)", &custom, &mut HashSet::new()),
+            Some("calc(12px + 2px)".to_string())
+        );
+        assert_eq!(
+            resolve_css_variables("var(--missing, red)", &custom, &mut HashSet::new()),
+            Some("red".to_string())
+        );
+        assert_eq!(
+            resolve_css_variables("var(--cycle)", &custom, &mut HashSet::new()),
+            None
         );
     }
 

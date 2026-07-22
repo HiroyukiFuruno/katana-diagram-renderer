@@ -19,6 +19,10 @@ impl CssAncestor {
             attributes: attributes.clone(),
         }
     }
+
+    pub(super) fn attributes(&self) -> &HtmlAttributes {
+        &self.attributes
+    }
 }
 
 #[derive(Debug)]
@@ -34,6 +38,7 @@ struct CssCompoundSelector {
     classes: Vec<String>,
     id: Option<String>,
     attributes: Vec<CssAttributeSelector>,
+    root: bool,
 }
 
 #[derive(Debug)]
@@ -147,11 +152,13 @@ impl CssCompoundSelector {
                 .attributes
                 .iter()
                 .all(|selector| selector.matches(attributes))
+            && (!self.root || tag.eq_ignore_ascii_case("html"))
     }
 
     fn specificity(&self) -> u16 {
         self.tag.iter().count() as u16
-            + (self.classes.len() + self.attributes.len()) as u16 * CLASS_SPECIFICITY
+            + (self.classes.len() + self.attributes.len() + usize::from(self.root)) as u16
+                * CLASS_SPECIFICITY
             + self.id.iter().count() as u16 * ID_SPECIFICITY
     }
 }
@@ -196,6 +203,16 @@ mod tests {
         assert!(CssSelector::parse("a[href=\"https://example.com\"]:hover").is_none());
         assert!(CssSelector::parse("[data-state").is_none());
         assert!(CssSelector::parse("[data!=ready]").is_none());
+    }
+
+    #[test]
+    fn root_pseudo_class_matches_the_html_element_only() -> Result<(), String> {
+        let selector = CssSelector::parse(":root").ok_or(":root selector must parse")?;
+
+        assert!(selector.matches("html", &Vec::new(), &[]));
+        assert!(!selector.matches("body", &Vec::new(), &[]));
+        assert_eq!(selector.specificity(), 10);
+        Ok(())
     }
 
     #[test]

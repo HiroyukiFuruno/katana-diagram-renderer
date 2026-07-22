@@ -17,9 +17,10 @@ class __KrrEvent {
     this.__krrDispatching = false;
     this.__krrPropagationStopped = false;
     this.__krrImmediatePropagationStopped = false;
+    this.__krrPassiveListener = false;
   }
   preventDefault() {
-    if (this.cancelable) this.defaultPrevented = true;
+    if (this.cancelable && !this.__krrPassiveListener) this.defaultPrevented = true;
   }
   stopPropagation() {
     this.__krrPropagationStopped = true;
@@ -30,17 +31,37 @@ class __KrrEvent {
   }
 }
 globalThis.Event = __KrrEvent;
+Object.assign(__KrrEvent, {
+  NONE: 0,
+  CAPTURING_PHASE: 1,
+  AT_TARGET: 2,
+  BUBBLING_PHASE: 3,
+});
+Object.assign(__KrrEvent.prototype, {
+  NONE: 0,
+  CAPTURING_PHASE: 1,
+  AT_TARGET: 2,
+  BUBBLING_PHASE: 3,
+});
 const __krrListenerOptions = (options) => ({
   capture: typeof options === "boolean" ? options : Boolean(options?.capture),
   once: Boolean(typeof options === "object" && options?.once),
+  passive: Boolean(typeof options === "object" && options?.passive),
 });
-const __krrDispatchListeners = (listeners, target, event) => {
+const __krrEventTargetListeners = new WeakMap();
+const __krrDispatchListeners = (listeners, target, event, capture) => {
   const entries = listeners.get(String(event.type)) || [];
   for (const entry of [...entries]) {
     if (!entries.includes(entry)) continue;
+    if (entry.capture !== capture) continue;
     if (entry.once) entries.splice(entries.indexOf(entry), 1);
-    if (typeof entry.callback === "function") entry.callback.call(target, event);
-    else entry.callback.handleEvent.call(entry.callback, event);
+    event.__krrPassiveListener = entry.passive;
+    try {
+      if (typeof entry.callback === "function") entry.callback.call(target, event);
+      else entry.callback.handleEvent.call(entry.callback, event);
+    } finally {
+      event.__krrPassiveListener = false;
+    }
     if (event.__krrImmediatePropagationStopped) break;
   }
 };
@@ -66,8 +87,16 @@ const __krrEndDispatch = (event) => {
   event.eventPhase = 0;
   event.__krrDispatching = false;
 };
+const __krrDispatchTargetPhase = (target, event, capture, phase) => {
+  event.currentTarget = target;
+  event.eventPhase = phase;
+  const listeners = __krrEventTargetListeners.get(target) || new Map();
+  __krrDispatchListeners(listeners, target, event, capture);
+  if (!capture) __krrDispatchHandler(target, event);
+};
 const __krrInstallEventTarget = (target) => {
   const listeners = new Map();
+  __krrEventTargetListeners.set(target, listeners);
   Object.defineProperties(target, {
     addEventListener: {
       configurable: true,
@@ -86,7 +115,12 @@ const __krrInstallEventTarget = (target) => {
             (entry) => entry.callback === callback && entry.capture === normalized.capture,
           )
         ) {
-          entries.push({ callback, capture: normalized.capture, once: normalized.once });
+          entries.push({
+            callback,
+            capture: normalized.capture,
+            once: normalized.once,
+            passive: normalized.passive,
+          });
           listeners.set(type, entries);
         }
       },
@@ -106,10 +140,15 @@ const __krrInstallEventTarget = (target) => {
     dispatchEvent: {
       configurable: true,
       value(event) {
+        if (target.__krrNodeId) {
+          const dispatched = __krrDispatchElementEvent(target, event);
+          return !dispatched.defaultPrevented;
+        }
         __krrBeginDispatch(target, event);
         try {
-          __krrDispatchListeners(listeners, target, event);
-          __krrDispatchHandler(target, event);
+          __krrDispatchTargetPhase(target, event, true, Event.AT_TARGET);
+          if (!event.__krrImmediatePropagationStopped)
+            __krrDispatchTargetPhase(target, event, false, Event.AT_TARGET);
           return !event.defaultPrevented;
         } finally {
           __krrEndDispatch(event);
@@ -126,10 +165,15 @@ const __krrClassToken = (token) => {
   if (!token || /\s/.test(token)) throw new TypeError("Invalid class token");
   return token;
 };
+const __krrElements = new Map();
 const __krrElement = (nodeId) => {
   if (nodeId === null || nodeId === undefined || nodeId === "") return null;
-  const element = Object.create(__krrElementPrototype);
-  Object.defineProperty(element, "__krrNodeId", { value: String(nodeId) });
+  const normalizedId = String(nodeId);
+  const cached = __krrElements.get(normalizedId);
+  if (cached) return cached;
+  const element = __krrInstallEventTarget(Object.create(__krrElementPrototype));
+  Object.defineProperty(element, "__krrNodeId", { value: normalizedId });
+  __krrElements.set(normalizedId, element);
   return element;
 };
 const __krrElementPrototype = {
@@ -250,14 +294,49 @@ const __krrElementPrototype = {
   remove() {
     __krrNativeDom("remove", this.__krrNodeId);
   },
-  addEventListener(type, listener) {
-    if (
-      !["blur", "change", "click", "focus", "input", "keydown", "keyup", "toggle"].includes(type) ||
-      typeof listener !== "function"
-    )
-      throw new TypeError("Unsupported event listener");
-    __krrNativeDom("addEventListener", this.__krrNodeId, type, listener);
-  },
+};
+const __krrInlineHandler = (target, event) => {
+  const source = target.getAttribute?.(`on${event.type}`);
+  if (!source) return;
+  const result = Function("event", source).call(target, event);
+  if (result === false && event.cancelable) event.preventDefault();
+};
+const __krrDispatchElementPhase = (target, event, capture, phase) => {
+  __krrDispatchTargetPhase(target, event, capture, phase);
+  if (!capture && !event.__krrImmediatePropagationStopped) __krrInlineHandler(target, event);
+};
+const __krrDispatchElementEvent = (target, event) => {
+  __krrBeginDispatch(target, event);
+  try {
+    const nodeIds = __krrNativeDom("eventPath", target.__krrNodeId);
+    if (!Array.isArray(nodeIds)) return event;
+    const path = nodeIds.map(__krrElement);
+    const ancestors = path.slice(1);
+    const captures = [window, document, ...ancestors.slice().reverse()];
+    for (const currentTarget of captures) {
+      __krrDispatchElementPhase(currentTarget, event, true, Event.CAPTURING_PHASE);
+      if (event.__krrPropagationStopped) break;
+    }
+    if (!event.__krrPropagationStopped) {
+      __krrDispatchElementPhase(target, event, true, Event.AT_TARGET);
+      if (!event.__krrImmediatePropagationStopped)
+        __krrDispatchElementPhase(target, event, false, Event.AT_TARGET);
+    }
+    if (event.bubbles && !event.__krrPropagationStopped) {
+      for (const currentTarget of [...ancestors, document, window]) {
+        __krrDispatchElementPhase(currentTarget, event, false, Event.BUBBLING_PHASE);
+        if (event.__krrPropagationStopped) break;
+      }
+    }
+    return event;
+  } finally {
+    __krrEndDispatch(event);
+  }
+};
+globalThis.__krrDispatchHostEvent = (nodeId, type, key, bubbles, cancelable) => {
+  const event = new Event(type, { bubbles, cancelable });
+  if (key !== null && key !== undefined) event.key = String(key);
+  return __krrDispatchElementEvent(__krrElement(nodeId), event);
 };
 let __krrDocumentReadyState = "loading";
 globalThis.document = __krrInstallEventTarget({

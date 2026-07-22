@@ -1,12 +1,18 @@
-use super::constants::{
-    DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, H1_FONT_SIZE, H1_MARGIN, H2_FONT_SIZE, H2_MARGIN,
-    H3_FONT_SIZE, H3_MARGIN, PARAGRAPH_MARGIN,
-};
+use super::constants::{DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT};
 use super::document::attribute;
+use crate::renderer::backends::html_css_rule::parse_declarations;
 use taffy::style::{AlignItems, Display, FlexDirection, FlexWrap, JustifyContent};
 
 #[path = "style_declaration.rs"]
 mod declaration;
+#[path = "style_box.rs"]
+mod style_box;
+#[path = "style_box_declaration.rs"]
+mod style_box_declaration;
+#[path = "style_typography_declaration.rs"]
+mod style_typography_declaration;
+#[path = "style_tag_defaults.rs"]
+mod tag_defaults;
 #[path = "style_value.rs"]
 mod value;
 
@@ -24,6 +30,42 @@ pub(super) enum CssGridTrack {
     Auto,
     MinContent,
     MaxContent,
+    MinMax {
+        min: CssGridTrackBreadth,
+        max: CssGridTrackBreadth,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum CssGridTrackBreadth {
+    Length(f32),
+    Percent(f32),
+    Fraction(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum CssBoxSizing {
+    #[default]
+    ContentBox,
+    BorderBox,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum CssOverflow {
+    #[default]
+    Visible,
+    Clip,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum CssTextAlign {
+    #[default]
+    Start,
+    Center,
+    End,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -31,9 +73,17 @@ pub(super) struct CssStyle {
     pub(super) color: String,
     pub(super) background: Option<String>,
     pub(super) border: Option<String>,
+    pub(super) border_width: f32,
+    pub(super) border_radius: f32,
+    pub(super) box_sizing: CssBoxSizing,
+    pub(super) overflow: CssOverflow,
     pub(super) font_size: f32,
     pub(super) line_height: f32,
     pub(super) line_height_factor: Option<f32>,
+    pub(super) font_family: String,
+    pub(super) italic: bool,
+    pub(super) text_align: CssTextAlign,
+    pub(super) letter_spacing: f32,
     pub(super) padding_top: f32,
     pub(super) padding_right: f32,
     pub(super) padding_bottom: f32,
@@ -49,6 +99,7 @@ pub(super) struct CssStyle {
     pub(super) bold: bool,
     pub(super) underline: bool,
     pub(super) display: Display,
+    pub(super) inline_block: bool,
     pub(super) gap: f32,
     pub(super) flex_direction: FlexDirection,
     pub(super) flex_wrap: FlexWrap,
@@ -68,7 +119,9 @@ impl CssStyle {
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
             line_height_factor: Some(DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE),
+            font_family: "Noto Sans, sans-serif".to_string(),
             display: Display::Block,
+            inline_block: false,
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,
             flex_shrink: 1.0,
@@ -85,14 +138,13 @@ impl CssStyle {
         let Some(source) = attribute(attributes, "style") else {
             return style;
         };
+        let declarations = parse_declarations(source);
         let mut line_heights = Vec::new();
-        for declaration in source.split(';') {
-            if let Some((name, value)) = declaration.split_once(':')
-                && name.trim().eq_ignore_ascii_case("line-height")
-            {
-                line_heights.push(value.trim());
+        for declaration in &declarations {
+            if declaration.name.eq_ignore_ascii_case("line-height") {
+                line_heights.push(declaration.value.as_str());
             } else {
-                style.apply_declaration(declaration);
+                style.apply(&declaration.name, &declaration.value);
             }
         }
         style.resolve_inherited_line_height();
@@ -108,6 +160,12 @@ impl CssStyle {
             font_size: self.font_size,
             line_height: self.line_height,
             line_height_factor: self.line_height_factor,
+            font_family: self.font_family.clone(),
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            text_align: self.text_align,
+            letter_spacing: self.letter_spacing,
             ..Self::browser_default()
         }
     }
@@ -123,49 +181,14 @@ impl CssStyle {
             self.line_height = self.font_size * factor;
         }
     }
-
-    fn apply_tag_metrics(&mut self, tag: &str) {
-        match tag {
-            "h1" => self.apply_heading(H1_FONT_SIZE, H1_MARGIN),
-            "h2" => self.apply_heading(H2_FONT_SIZE, H2_MARGIN),
-            "h3" | "h4" | "h5" | "h6" => self.apply_heading(H3_FONT_SIZE, H3_MARGIN),
-            "p" => self.margin_bottom += PARAGRAPH_MARGIN,
-            _ => {}
-        }
-    }
-
-    fn apply_heading(&mut self, font_size: f32, margin: f32) {
-        self.font_size = self.font_size.max(font_size);
-        self.bold = true;
-        self.margin_top += margin;
-        self.margin_bottom += margin;
-    }
-
-    pub(super) fn explicit_width(&self, available: f32) -> Option<f32> {
-        self.width.map(|width| {
-            let resolved = width.resolve(available);
-            self.max_width
-                .map_or(resolved, |maximum| resolved.min(maximum.resolve(available)))
-        })
-    }
-
-    pub(super) fn box_width(&self, available: f32) -> f32 {
-        let width = self.explicit_width(available).unwrap_or(available);
-        self.max_width
-            .map_or(width, |maximum| width.min(maximum.resolve(available)))
-    }
-
-    pub(super) fn consume_assigned_flow_width(&mut self) {
-        if self.width.take().is_some() {
-            self.max_width = None;
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::constants::LINE_HEIGHT_FACTOR;
-    use super::{CssGridTrack, CssStyle, DEFAULT_FONT_SIZE};
+    use super::{
+        CssBoxSizing, CssGridTrack, CssOverflow, CssStyle, CssTextAlign, DEFAULT_FONT_SIZE,
+    };
 
     #[test]
     fn box_shorthands_expand_and_longhands_override_individual_edges() {
@@ -416,5 +439,49 @@ mod tests {
         let style = CssStyle::from_attributes(&attributes, &inherited);
 
         assert_eq!(style.grid_template_columns, inherited.grid_template_columns);
+    }
+
+    #[test]
+    fn typed_content_box_properties_preserve_browser_box_model() {
+        let attributes = vec![(
+            "style".to_string(),
+            "width: 100px; padding: 10px; border: 2px solid #123456; border-radius: 6px; overflow: hidden"
+                .to_string(),
+        )];
+        let content_box = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
+
+        assert_eq!(content_box.box_sizing, CssBoxSizing::ContentBox);
+        assert_eq!(content_box.explicit_width(300.0), Some(124.0));
+        assert_eq!(content_box.content_width(124.0), 100.0);
+        assert_eq!(content_box.border_width, 2.0);
+        assert_eq!(content_box.border_radius, 6.0);
+        assert_eq!(content_box.overflow, CssOverflow::Clip);
+    }
+
+    #[test]
+    fn typed_typography_properties_preserve_browser_values() {
+        let attributes = vec![(
+            "style".to_string(),
+            "font-family: Inter, sans-serif; font-style: italic; text-align: center; letter-spacing: 2px"
+                .to_string(),
+        )];
+        let style = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
+
+        assert_eq!(style.font_family, "Inter, sans-serif");
+        assert!(style.italic);
+        assert_eq!(style.text_align, CssTextAlign::Center);
+        assert_eq!(style.letter_spacing, 2.0);
+    }
+
+    #[test]
+    fn typed_border_box_dimensions_preserve_browser_box_model() {
+        let attributes = vec![(
+            "style".to_string(),
+            "box-sizing: border-box; width: 100px; padding: 10px; border-width: 2px".to_string(),
+        )];
+        let border_box = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
+        assert_eq!(border_box.box_sizing, CssBoxSizing::BorderBox);
+        assert_eq!(border_box.explicit_width(300.0), Some(100.0));
+        assert_eq!(border_box.content_width(100.0), 76.0);
     }
 }

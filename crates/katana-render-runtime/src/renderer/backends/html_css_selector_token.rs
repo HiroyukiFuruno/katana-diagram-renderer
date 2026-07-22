@@ -33,7 +33,6 @@ impl SelectorTokenizer {
         match character {
             '+' if self.bracket_depth == 0 => return None,
             '~' if self.bracket_depth == 0 => return None,
-            ':' if self.bracket_depth == 0 => return None,
             '\'' | '"' if self.bracket_depth > 0 => self.start_quote(character),
             '[' => self.open_attribute()?,
             ']' => self.close_attribute()?,

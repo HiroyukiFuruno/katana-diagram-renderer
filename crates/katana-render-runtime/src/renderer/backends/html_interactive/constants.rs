@@ -1,4 +1,3 @@
-pub(super) const DEFAULT_MARGIN: f32 = 16.0;
 pub(super) const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub(super) const DEFAULT_LINE_HEIGHT: f32 = 22.0;
 pub(super) const CONTROL_HEIGHT: f32 = 34.0;

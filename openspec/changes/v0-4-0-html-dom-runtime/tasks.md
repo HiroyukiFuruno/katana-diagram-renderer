@@ -39,11 +39,16 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 1.8 Release and verify KRR `0.4.3` with browser-style system-font
   fallback, deterministic bundled Latin fallback, and committed IME text
   rendering. The crates.io 10 MiB package gate must remain unchanged.
-- [/] 1.9 Release and verify KRR `0.4.4` with allowed cross-origin HTTP/HTTPS
+- [x] 1.9 Release and verify KRR `0.4.4` with allowed cross-origin HTTP/HTTPS
   stylesheet/script/image loading, non-fatal blocked or failed subresources,
   and embedded SVG projection/layout. HTTPS mixed content, credential-bearing
   network URLs, local file escape, unsupported schemes, and iframe fetching
   remain rejected. Strict coverage stays at 100% lines and 0 uncovered.
+- [/] 1.10 Release and verify KRR `0.4.6` with structured CSS parsing and
+  cascade precedence, typed flex/grid/table/box/overflow/typography layout,
+  browser-style capture/target/bubble event dispatch, and scroll/content frame
+  metrics. Local `release-check` passes with 100% line coverage and 0 uncovered;
+  crates.io publication and public artifact verification remain.
 
 ### 2. KDV Adapter
 
@@ -75,40 +80,32 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 
 - [x] 4.1 Pass all KRR quality/release gates, publish and verify KRR `0.4.0`.
 - [x] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
-- [ ] 4.3 Publish and verify KRR `0.4.3`, resolve it from crates.io in KatanA,
+- [x] 4.3 Publish and verify KRR `0.4.3`, resolve it from crates.io in KatanA,
   and rerun the complete headless acceptance matrix for `v0.22.33` only.
 - [ ] 4.4 Present final registry-only state-specific screenshots and automated
   evidence to the user. Local-candidate evidence has already been presented.
   Until explicit approval: no KatanA commit, push, PR, publish, or release.
-- [/] 4.5 Publish and verify KRR `0.4.4`, then allow KDV `0.3.2` and KatanA
+- [x] 4.5 Publish and verify KRR `0.4.4`, then allow KDV `0.3.2` and KatanA
   `v0.22.34` to consume only its crates.io artifact. KatanA evidence must cover
   remote resources, embedded Mermaid SVG, worker error recovery, and the full
   interactive HTML acceptance matrix without Chromium or WebView.
+- [/] 4.6 Publish and verify KRR `0.4.6`, then refresh KatanA `v0.22.36` to the
+  registry artifact and rerun strict coverage, release contracts, platform
+  checks, and the headless interactive HTML evidence before user review.
 
 ## Local Verification Evidence
 
-- KRR: KRR `0.4.2` is published and verified. The local `0.4.3` patch adds
-  browser-style system-font fallback after headless acceptance exposed tofu
-  glyphs for committed Japanese input. Its SVG tests reject repeated missing-glyph
-  cells, and local patched KatanA headless acceptance renders the committed text.
-  The public SVG rasterizer remains bundled-font-only while the interactive HTML
-  frame path owns system-font fallback. `rtk just check`, strict
-  `rtk just coverage` (600 workspace tests, 100% lines,
-  0 uncovered), `release-check`, package size, and publish dry-run pass; only
-  public release and registry verification remain.
-  The raster path still embeds Noto Sans with its SIL OFL 1.1 license as the
-  deterministic Latin fallback and uses platform fonts for additional scripts.
-- KDV: KDV `0.3.0` is published and verified. The local `0.3.1` patch coalesces
-  adjacent scroll and resize commands without crossing input or navigation
-  boundaries. Its 1,276-test release gate, adapter coverage, package verification,
-  and publish dry-run pass. The packaged dependency is crates.io KRR `^0.4.0`
-  with no path source; only public release and registry verification remain.
-- KatanA: headless acceptance captured CSS, accordion, JavaScript action,
-  text input, local navigation, reload, and resize. Registry-only preflight
-  correctly remains blocked until KRR and KDV are published. The optimized
-  KatanA binary reproduced the same initial, button-action, and navigation
-  screenshots byte-for-byte as the debug binary. Its user-entered HTTP main
-  document test also kept the raw origin through refresh and the KRR browser
-  session: `rtk cargo test -p katana-ui --locked
-  user_entered_http_document_keeps_origin_through_refresh_and_browser_session
-  -- --test-threads=1`.
+- KRR: KRR `0.4.5` is published and verified. The local `0.4.6` patch keeps the
+  in-process Rust/V8 architecture and adds structured CSS parsing/cascade,
+  browser-style event propagation, typed layout coverage, and frame scroll
+  metrics. `rtk just check`, strict `rtk just coverage` (12,561 / 12,561 lines,
+  100%, 0 uncovered), `release-verify`, `release-openspec-archive`, and the full
+  `release-check` pass. The packaged crate remains below the unchanged 10 MiB
+  limit. Only public release and registry verification remain.
+- KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
+  line without a local path or Git dependency.
+- KatanA: local `v0.22.36` acceptance covers CSS, accordion, JavaScript event
+  propagation, text input, HTTP main-document and subresource acquisition,
+  fragment and link navigation, reload, resize, worker diagnostics, and image
+  controls. Registry-only coverage and release gates remain pending until KRR
+  `0.4.6` is visible on crates.io; KatanA publication remains user-gated.
