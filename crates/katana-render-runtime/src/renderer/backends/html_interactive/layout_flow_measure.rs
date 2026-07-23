@@ -187,12 +187,12 @@ mod tests {
         let mut style = CssStyle::browser_default();
         style.flex_basis = Some(CssLength::Percent(0.0));
         let leaf = super::leaf_style(style, 80.0, 20.0, 200.0);
-        assert_eq!(leaf.flex_basis, taffy::style_helpers::percent(0.0));
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::percent(0.0_f32));
 
         let mut pixels = CssStyle::browser_default();
         pixels.flex_basis = Some(CssLength::Px(24.0));
         let leaf = super::leaf_style(pixels, 80.0, 20.0, 200.0);
-        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(24.0));
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(24.0_f32));
 
         let leaf = super::leaf_style(CssStyle::browser_default(), 80.0, 20.0, 200.0);
         assert_eq!(leaf.flex_basis, taffy::style_helpers::auto());
@@ -215,14 +215,14 @@ mod tests {
         let style = CssStyle::browser_default();
         let mut leaf = super::leaf_style(style.clone(), 80.0, 20.0, 200.0);
         super::assign_leaf_height(&mut leaf, &style, 64.0);
-        assert_eq!(leaf.size.height, taffy::style_helpers::length(64.0));
-        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(64.0));
+        assert_eq!(leaf.size.height, taffy::style_helpers::length(64.0_f32));
+        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(64.0_f32));
 
         let mut explicit = style;
         explicit.automatic_min_height = false;
         explicit.min_height = 12.0;
         super::assign_leaf_height(&mut leaf, &explicit, 64.0);
-        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(12.0));
+        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(12.0_f32));
     }
 
     #[test]
