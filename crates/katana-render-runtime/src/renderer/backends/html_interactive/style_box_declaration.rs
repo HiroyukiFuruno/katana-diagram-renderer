@@ -1,5 +1,5 @@
 use super::super::document::css_px;
-use super::value::{box_sides, css_relative_px};
+use super::value::{box_sides, css_resolved_px};
 use super::{CssBoxSizing, CssLength, CssOverflow, CssStyle};
 
 impl CssStyle {
@@ -9,23 +9,67 @@ impl CssStyle {
             "box-sizing" => self.apply_box_sizing(value),
             "overflow" | "overflow-x" | "overflow-y" => self.apply_overflow(value),
             "border-width" => {
-                self.border_width = css_px(value).unwrap_or(self.border_width);
+                self.apply_border_widths(value);
             }
-            "border-radius" => {
-                self.border_radius = self.box_length(value, false).unwrap_or(self.border_radius);
-            }
+            "border-top-width"
+            | "border-right-width"
+            | "border-bottom-width"
+            | "border-left-width" => self.apply_border_side_width(&name, value),
+            "border-radius" => self.apply_border_radius(value),
             "padding" | "padding-top" | "padding-right" | "padding-bottom" | "padding-left" => {
                 self.apply_padding_property(&name, value)
             }
             "margin" | "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
                 self.apply_margin_property(&name, value);
             }
-            "width" | "max-width" | "height" | "min-height" => {
+            "width" | "min-width" | "max-width" | "height" | "min-height" | "max-height" => {
                 self.apply_dimensions(&name, value);
+            }
+            "inset" | "top" | "right" | "bottom" | "left" => {
+                self.apply_inset(&name, value);
             }
             _ => return false,
         }
         true
+    }
+
+    fn apply_border_radius(&mut self, value: &str) {
+        self.border_radius = CssLength::parse(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+        )
+        .unwrap_or(self.border_radius);
+    }
+
+    fn apply_border_widths(&mut self, value: &str) {
+        let Some([top, right, bottom, left]) = box_sides(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+            false,
+        ) else {
+            return;
+        };
+        self.border_width = top;
+        self.border_top_width = None;
+        self.border_right_width = (right != top).then_some(right);
+        self.border_bottom_width = (bottom != top).then_some(bottom);
+        self.border_left_width = (left != top).then_some(left);
+    }
+
+    fn apply_border_side_width(&mut self, name: &str, value: &str) {
+        let Some(width) = css_px(value) else {
+            return;
+        };
+        let side = name
+            .strip_prefix("border-")
+            .and_then(|value| value.strip_suffix("-width"));
+        if let Some(side) = side {
+            self.set_border_side_width(side, width);
+        }
     }
 
     fn apply_box_sizing(&mut self, value: &str) {
@@ -82,20 +126,14 @@ impl CssStyle {
         }
     }
 
-    fn apply_dimensions(&mut self, name: &str, value: &str) {
-        match name {
-            "width" => self.width = CssLength::parse(value, self.font_size),
-            "max-width" => self.max_width = CssLength::parse(value, self.font_size),
-            "height" => self.height = self.box_length(value, false),
-            "min-height" => {
-                self.min_height = self.box_length(value, false).unwrap_or(self.min_height);
-            }
-            _ => {}
-        }
-    }
-
     fn apply_padding(&mut self, value: &str) {
-        let Some([top, right, bottom, left]) = box_sides(value, self.font_size, false) else {
+        let Some([top, right, bottom, left]) = box_sides(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+            false,
+        ) else {
             return;
         };
         self.padding_top = top;
@@ -105,7 +143,13 @@ impl CssStyle {
     }
 
     fn apply_margin(&mut self, value: &str) {
-        let Some([top, right, bottom, left]) = box_sides(value, self.font_size, true) else {
+        let Some([top, right, bottom, left]) = box_sides(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+            true,
+        ) else {
             return;
         };
         self.margin_top = top;
@@ -114,8 +158,14 @@ impl CssStyle {
         self.margin_left = left;
     }
 
-    fn box_length(&self, value: &str, signed: bool) -> Option<f32> {
-        css_relative_px(value, self.font_size, signed)
+    pub(super) fn box_length(&self, value: &str, signed: bool) -> Option<f32> {
+        css_resolved_px(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+            signed,
+        )
     }
 }
 
@@ -243,5 +293,25 @@ mod tests {
 
         style.apply_dimensions("line-height", "42px");
         assert_eq!(style.min_height, 16.0);
+    }
+
+    #[test]
+    fn border_width_shorthand_ignores_invalid_component_count() {
+        let mut style = CssStyle::browser_default();
+        style.border_width = 3.0;
+
+        style.apply_box_property("border-width", "1px 2px 3px 4px 5px");
+
+        assert_eq!(style.border_width, 3.0);
+    }
+
+    #[test]
+    fn border_side_width_accepts_lengths_and_ignores_invalid_values() {
+        let mut style = CssStyle::browser_default();
+        style.apply_box_property("border-left-width", "7px");
+        assert_eq!(style.border_left_width, Some(7.0));
+
+        style.apply_box_property("border-left-width", "invalid");
+        assert_eq!(style.border_left_width, Some(7.0));
     }
 }

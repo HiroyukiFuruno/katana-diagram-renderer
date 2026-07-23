@@ -1,10 +1,9 @@
 use super::super::html_browser::HtmlBrowserViewport;
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
-use super::document::attribute;
 use super::style::CssStyle;
 use super::svg::svg_header;
-use super::types::{DetailsContext, ElementRenderContext, HitTarget, LayoutContext, LayoutResult};
+use super::types::{DetailsContext, HitTarget, LayoutResult};
 use std::collections::HashMap;
 
 pub(super) struct HtmlLayoutRenderer {
@@ -16,10 +15,32 @@ pub(super) struct HtmlLayoutRenderer {
     pub(super) focused_input: Option<u64>,
     pub(super) layout_error: Option<String>,
     pub(super) viewport_height: f32,
+    pub(super) viewport_width: f32,
     pub(super) next_clip_id: u64,
+    pub(super) next_gradient_id: u64,
+    pub(super) containing_blocks: Vec<ContainingBlock>,
+    pub(super) clickable_nodes: std::collections::HashSet<u64>,
+    pub(super) document_paint_start: usize,
+    pub(super) deferred_paint: Vec<DeferredPaint>,
+    pub(super) next_paint_order: u64,
+}
+
+pub(super) struct DeferredPaint {
+    pub(super) z_index: i32,
+    pub(super) order: u64,
+    pub(super) svg: String,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ContainingBlock {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
 }
 
 impl HtmlLayoutRenderer {
+    #[cfg(test)]
     pub(super) fn render(
         nodes: &[HtmlDocumentNode],
         viewport: HtmlBrowserViewport,
@@ -27,23 +48,50 @@ impl HtmlLayoutRenderer {
         input_values: &HashMap<u64, String>,
         focused_input: Option<u64>,
     ) -> Result<LayoutResult, String> {
-        let mut renderer = Self::new(viewport, scroll_y, input_values, focused_input);
-        let width = viewport.logical_width().max(MIN_LAYOUT_WIDTH);
-        let bottom = renderer.render_nodes(
+        Self::render_with_clickable_nodes(
             nodes,
-            0.0,
-            0.0,
-            width,
-            &CssStyle::browser_default(),
-            DetailsContext::NONE,
+            viewport,
+            scroll_y,
+            input_values,
+            focused_input,
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    pub(super) fn render_with_clickable_nodes(
+        nodes: &[HtmlDocumentNode],
+        viewport: HtmlBrowserViewport,
+        scroll_y: f32,
+        input_values: &HashMap<u64, String>,
+        focused_input: Option<u64>,
+        clickable_nodes: &std::collections::HashSet<u64>,
+    ) -> Result<LayoutResult, String> {
+        let mut renderer = Self::new_with_clickable_nodes(
+            viewport,
+            scroll_y,
+            input_values,
+            focused_input,
+            clickable_nodes,
         );
-        renderer.ensure_layout_succeeded()?;
-        renderer.svg.push_str("</svg>");
+        let width = viewport.logical_width().max(MIN_LAYOUT_WIDTH);
+        let root_style = CssStyle::browser_default_for_viewport(
+            viewport.logical_width(),
+            viewport.logical_height(),
+        );
+        let bottom =
+            renderer.render_nodes(nodes, 0.0, 0.0, width, &root_style, DetailsContext::NONE);
+        renderer.into_layout_result(bottom)
+    }
+
+    fn into_layout_result(mut self, content_height: f32) -> Result<LayoutResult, String> {
+        self.ensure_layout_succeeded()?;
+        self.finish_deferred_paint();
+        self.svg.push_str("</svg>");
         Ok(LayoutResult {
-            svg: renderer.svg,
-            hit_targets: renderer.hit_targets,
-            anchor_positions: renderer.anchor_positions,
-            content_height: bottom,
+            svg: self.svg,
+            hit_targets: self.hit_targets,
+            anchor_positions: self.anchor_positions,
+            content_height,
         })
     }
 
@@ -53,99 +101,41 @@ impl HtmlLayoutRenderer {
         input_values: &HashMap<u64, String>,
         focused_input: Option<u64>,
     ) -> Self {
+        Self::new_with_clickable_nodes(
+            viewport,
+            scroll_y,
+            input_values,
+            focused_input,
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    fn new_with_clickable_nodes(
+        viewport: HtmlBrowserViewport,
+        scroll_y: f32,
+        input_values: &HashMap<u64, String>,
+        focused_input: Option<u64>,
+        clickable_nodes: &std::collections::HashSet<u64>,
+    ) -> Self {
+        let svg = svg_header(viewport);
+        let document_paint_start = svg.len();
         Self {
             scroll_y,
-            svg: svg_header(viewport),
+            svg,
             hit_targets: Vec::new(),
             anchor_positions: HashMap::new(),
             input_values: input_values.clone(),
             focused_input,
             layout_error: None,
             viewport_height: viewport.logical_height(),
+            viewport_width: viewport.logical_width(),
             next_clip_id: 0,
-        }
-    }
-
-    pub(super) fn render_node(
-        &mut self,
-        node: &HtmlDocumentNode,
-        x: f32,
-        y: f32,
-        width: f32,
-        inherited: &CssStyle,
-        details: DetailsContext,
-    ) -> f32 {
-        match node {
-            HtmlDocumentNode::Text(text) => self.render_text(text, x, y, width, inherited),
-            HtmlDocumentNode::Element {
-                node_id,
-                tag,
-                attributes,
-                children,
-            } => self.render_element_node(
-                *node_id,
-                tag,
-                attributes,
-                children,
-                LayoutContext::new(x, y, width, inherited, details),
-            ),
-        }
-    }
-
-    fn render_element_node(
-        &mut self,
-        node_id: u64,
-        tag: &str,
-        attributes: &[(String, String)],
-        children: &[HtmlDocumentNode],
-        layout: LayoutContext<'_>,
-    ) -> f32 {
-        self.render_element(
-            ElementRenderContext {
-                node_id,
-                tag,
-                attributes,
-                children,
-            },
-            layout,
-        )
-    }
-
-    fn render_element(
-        &mut self,
-        element: ElementRenderContext<'_>,
-        layout: LayoutContext<'_>,
-    ) -> f32 {
-        let style = CssStyle::from_attributes(element.attributes, layout.style);
-        self.render_styled_element(
-            element,
-            LayoutContext {
-                style: &style,
-                ..layout
-            },
-        )
-    }
-
-    pub(super) fn render_styled_element(
-        &mut self,
-        element: ElementRenderContext<'_>,
-        layout: LayoutContext<'_>,
-    ) -> f32 {
-        if layout.style.display == taffy::style::Display::None {
-            return layout.y;
-        }
-        self.record_anchor(element, layout.y);
-        self.render_tag(element, layout)
-    }
-
-    fn record_anchor(&mut self, element: ElementRenderContext<'_>, y: f32) {
-        let anchor = attribute(element.attributes, "id").or_else(|| {
-            (element.tag == "a")
-                .then(|| attribute(element.attributes, "name"))
-                .flatten()
-        });
-        if let Some(anchor) = anchor.filter(|anchor| !anchor.is_empty()) {
-            self.anchor_positions.entry(anchor.to_string()).or_insert(y);
+            next_gradient_id: 0,
+            containing_blocks: Vec::new(),
+            clickable_nodes: clickable_nodes.clone(),
+            document_paint_start,
+            deferred_paint: Vec::new(),
+            next_paint_order: 0,
         }
     }
 

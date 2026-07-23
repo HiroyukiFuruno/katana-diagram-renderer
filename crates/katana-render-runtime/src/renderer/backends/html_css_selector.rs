@@ -39,6 +39,7 @@ struct CssCompoundSelector {
     id: Option<String>,
     attributes: Vec<CssAttributeSelector>,
     root: bool,
+    disabled: bool,
 }
 
 #[derive(Debug)]
@@ -153,11 +154,15 @@ impl CssCompoundSelector {
                 .iter()
                 .all(|selector| selector.matches(attributes))
             && (!self.root || tag.eq_ignore_ascii_case("html"))
+            && (!self.disabled || attribute_value(attributes, "disabled").is_some())
     }
 
     fn specificity(&self) -> u16 {
         self.tag.iter().count() as u16
-            + (self.classes.len() + self.attributes.len() + usize::from(self.root)) as u16
+            + (self.classes.len()
+                + self.attributes.len()
+                + usize::from(self.root)
+                + usize::from(self.disabled)) as u16
                 * CLASS_SPECIFICITY
             + self.id.iter().count() as u16 * ID_SPECIFICITY
     }
@@ -212,6 +217,17 @@ mod tests {
         assert!(selector.matches("html", &Vec::new(), &[]));
         assert!(!selector.matches("body", &Vec::new(), &[]));
         assert_eq!(selector.specificity(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_pseudo_class_matches_the_boolean_attribute() -> Result<(), String> {
+        let selector =
+            CssSelector::parse("button:disabled").ok_or(":disabled selector must parse")?;
+
+        assert!(selector.matches("button", &attributes(&[("disabled", "")]), &[]));
+        assert!(!selector.matches("button", &attributes(&[]), &[]));
+        assert_eq!(selector.specificity(), 11);
         Ok(())
     }
 

@@ -1,6 +1,6 @@
-use super::super::document::{border_color, css_px};
-use super::CssStyle;
+use super::super::document::css_px;
 use super::value::{css_line_height, css_number, grid_tracks};
+use super::{CssPosition, CssStyle};
 
 impl CssStyle {
     pub(super) fn apply(&mut self, name: &str, value: &str) {
@@ -8,17 +8,91 @@ impl CssStyle {
             "display" => self.apply_display(value),
             "color" => self.apply_color(value),
             "background" | "background-color" => self.apply_background(value),
+            "box-shadow" => self.apply_box_shadow(value),
+            "opacity" => self.apply_opacity(value),
             "border" => self.apply_border(value),
-            "border-color" => self.border = border_color(value),
+            "border-color" => self.apply_border_color(value),
+            "border-top" | "border-right" | "border-bottom" | "border-left" => {
+                self.apply_border_side(name, value)
+            }
+            "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
+            | "border-left-color" => self.apply_border_side_color(name, value),
+            "position" => self.apply_position(value),
+            "z-index" => self.apply_z_index(value),
+            "list-style" | "list-style-type" => self.apply_list_style(value),
             _ => self.apply_layout_or_font(name, value),
         }
     }
 
-    fn apply_display(&mut self, value: &str) {
-        if value.trim().eq_ignore_ascii_case("inline-block") {
-            self.display = taffy::style::Display::Block;
-            self.inline_block = true;
+    fn apply_list_style(&mut self, value: &str) {
+        let mut recognized = false;
+        for token in value.split_whitespace() {
+            match token.to_ascii_lowercase().as_str() {
+                "none" => {
+                    self.list_style_none = true;
+                    recognized = true;
+                }
+                "disc" | "circle" | "square" | "decimal" => {
+                    self.list_style_none = false;
+                    recognized = true;
+                }
+                _ => {}
+            }
+        }
+        if !recognized && value.trim().eq_ignore_ascii_case("initial") {
+            self.list_style_none = false;
+        }
+    }
+
+    fn apply_opacity(&mut self, value: &str) {
+        if let Ok(opacity) = value.trim().parse::<f32>()
+            && opacity.is_finite()
+        {
+            self.opacity = opacity.clamp(0.0, 1.0);
+        }
+    }
+
+    fn apply_z_index(&mut self, value: &str) {
+        if value.trim().eq_ignore_ascii_case("auto") {
+            self.z_index = None;
             return;
+        }
+        let Ok(z_index) = value.trim().parse::<i32>() else {
+            return;
+        };
+        self.z_index = Some(z_index);
+    }
+
+    fn apply_position(&mut self, value: &str) {
+        self.position = match value.trim().to_ascii_lowercase().as_str() {
+            "static" => CssPosition::Static,
+            "relative" => CssPosition::Relative,
+            "absolute" => CssPosition::Absolute,
+            "fixed" => CssPosition::Fixed,
+            _ => self.position,
+        };
+    }
+
+    fn apply_display(&mut self, value: &str) {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "inline" | "inline-block" => {
+                self.display = taffy::style::Display::Block;
+                self.inline_block = true;
+                return;
+            }
+            "inline-flex" => {
+                self.display = taffy::style::Display::Flex;
+                self.inline_block = true;
+                return;
+            }
+            "inline-grid" => {
+                self.display = taffy::style::Display::Grid;
+                self.inline_block = true;
+                return;
+            }
+            _ => {}
         }
         let Ok(display) = value.parse() else {
             return;
@@ -37,25 +111,6 @@ impl CssStyle {
         self.explicit_background = true;
     }
 
-    fn apply_border(&mut self, value: &str) {
-        if value.trim().eq_ignore_ascii_case("none") {
-            self.border = None;
-            self.border_width = 0.0;
-            return;
-        }
-        self.border = border_color(value).or_else(|| self.border.clone());
-        self.border_width = value
-            .split_whitespace()
-            .find_map(css_px)
-            .unwrap_or_else(|| {
-                if self.border.is_some() {
-                    1.0
-                } else {
-                    self.border_width
-                }
-            });
-    }
-
     fn apply_layout_or_font(&mut self, name: &str, value: &str) {
         if self.apply_box_property(name, value) || self.apply_typography_property(name, value) {
             return;
@@ -69,6 +124,8 @@ impl CssStyle {
             "flex-wrap" => self.flex_wrap = value.parse().unwrap_or(self.flex_wrap),
             "flex-grow" => self.flex_grow = css_number(value).unwrap_or(self.flex_grow),
             "flex-shrink" => self.flex_shrink = css_number(value).unwrap_or(self.flex_shrink),
+            "flex-basis" => self.apply_flex_basis(value),
+            "flex" => self.apply_flex(value),
             "align-items" => self.align_items = value.parse().ok().or(self.align_items),
             "justify-content" => {
                 self.justify_content = value.parse().ok().or(self.justify_content);
@@ -82,7 +139,12 @@ impl CssStyle {
     }
 
     pub(super) fn apply_line_height(&mut self, value: &str) {
-        let Some((resolved, inherited_factor)) = css_line_height(value, self.font_size) else {
+        let Some((resolved, inherited_factor)) = css_line_height(
+            value,
+            self.font_size,
+            self.viewport_width,
+            self.viewport_height,
+        ) else {
             return;
         };
         self.line_height = resolved;
@@ -92,7 +154,7 @@ impl CssStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::CssOverflow, CssStyle};
+    use super::{super::CssOverflow, CssPosition, CssStyle};
 
     #[test]
     fn border_none_clears_border_state() {
@@ -146,12 +208,81 @@ mod tests {
     }
 
     #[test]
+    fn outer_box_shadow_keeps_offsets_blur_spread_and_function_color() {
+        let mut style = CssStyle::browser_default();
+        style.apply("box-shadow", "2px 10px 28px 3px rgba(15, 40, 89, 0.14)");
+
+        assert_eq!(
+            style.box_shadow.as_ref().map(|shadow| (
+                shadow.offset_x,
+                shadow.offset_y,
+                shadow.blur_radius,
+                shadow.spread_radius,
+                shadow.color.as_str(),
+            )),
+            Some((2.0, 10.0, 28.0, 3.0, "rgba(15, 40, 89, 0.14)"))
+        );
+
+        style.apply("box-shadow", "inset 0 0 2px red");
+        assert!(style.box_shadow.is_some());
+        style.apply("box-shadow", "none");
+        assert!(style.box_shadow.is_none());
+    }
+
+    #[test]
+    fn list_style_none_is_inherited_and_can_be_restored() {
+        let mut parent = CssStyle::browser_default();
+        parent.apply("list-style", "none");
+        assert!(parent.list_style_none);
+
+        let child = CssStyle::from_attributes(&[], &parent);
+        assert!(child.list_style_none);
+
+        parent.apply("list-style-type", "disc");
+        assert!(!parent.list_style_none);
+        parent.apply("list-style", "invalid");
+        assert!(!parent.list_style_none);
+        parent.apply("list-style", "initial");
+        assert!(!parent.list_style_none);
+    }
+
+    #[test]
+    fn positioning_declarations_handle_auto_invalid_and_inline_grid() {
+        let mut style = CssStyle::browser_default();
+        style.apply("z-index", "4");
+        style.apply("z-index", "auto");
+        assert!(style.z_index.is_none());
+
+        style.apply("z-index", "invalid");
+        style.apply("position", "invalid");
+        assert_eq!(style.position, CssPosition::Static);
+
+        style.apply("display", "inline-grid");
+        assert_eq!(style.display, taffy::style::Display::Grid);
+        assert!(style.inline_block);
+    }
+
+    #[test]
     fn inline_block_preserves_shrink_to_fit_display_semantics() {
         let mut style = CssStyle::browser_default();
 
         style.apply("display", "inline-block");
         assert_eq!(style.display, taffy::style::Display::Block);
         assert!(style.inline_block);
+
+        style.apply("display", "inline");
+        assert_eq!(style.display, taffy::style::Display::Block);
+        assert!(style.inline_block);
+
+        style.apply("display", "inline-flex");
+        assert_eq!(style.display, taffy::style::Display::Flex);
+        assert!(style.inline_block);
+    }
+
+    #[test]
+    fn block_display_clears_inline_shrink_to_fit_semantics() {
+        let mut style = CssStyle::browser_default();
+        style.apply("display", "inline-flex");
 
         style.apply("display", "grid");
         assert_eq!(style.display, taffy::style::Display::Grid);

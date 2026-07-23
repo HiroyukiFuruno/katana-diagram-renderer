@@ -1,40 +1,66 @@
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::{MIN_LAYOUT_WIDTH, TEXT_CHARACTER_WIDTH_FACTOR};
-use super::document::node_text;
+use super::constants::MIN_LAYOUT_WIDTH;
 use super::layout_grid_measure::grid_track_widths;
 use super::style::{CssLength, CssStyle};
 use taffy::geometry::Size;
 use taffy::prelude::{Display, Style};
-use taffy::style_helpers::length;
+use taffy::style_helpers::{auto, length, percent};
 
-pub(super) fn leaf_style(style: CssStyle, width: f32, height: f32) -> Style {
+#[path = "layout_intrinsic.rs"]
+mod intrinsic;
+
+use intrinsic::intrinsic_layout_width;
+pub(super) use intrinsic::{intrinsic_text_width, is_layout_item, min_content_text_width};
+
+pub(super) fn leaf_style(style: CssStyle, width: f32, height: f32, available_width: f32) -> Style {
     Style {
         display: Display::Block,
         size: Size {
             width: length(width),
             height: length(height),
         },
+        min_size: Size {
+            width: style
+                .minimum_outer_width(available_width)
+                .map_or_else(auto, length),
+            height: length(leaf_minimum_height(&style, height)),
+        },
         flex_grow: style.flex_grow,
         flex_shrink: style.flex_shrink,
+        flex_basis: match style.flex_basis {
+            Some(CssLength::Px(value)) => length(value),
+            Some(CssLength::Percent(value)) => percent(value),
+            None => auto(),
+        },
         ..Style::default()
     }
+}
+
+pub(super) fn assign_leaf_height(style: &mut Style, css_style: &CssStyle, height: f32) {
+    style.size.height = length(height);
+    style.min_size.height = length(leaf_minimum_height(css_style, height));
+}
+
+fn leaf_minimum_height(style: &CssStyle, measured_height: f32) -> f32 {
+    if style.automatic_min_height {
+        measured_height
+    } else {
+        style.minimum_outer_height() + style.margin_top + style.margin_bottom
+    }
+    .max(0.0)
 }
 
 pub(super) fn item_style(
     node: &HtmlDocumentNode,
     inherited: &CssStyle,
-    width: f32,
-    count: usize,
+    _width: f32,
+    _count: usize,
 ) -> CssStyle {
     match node {
-        HtmlDocumentNode::Element { attributes, .. } => {
-            CssStyle::from_attributes(attributes, inherited)
-        }
-        HtmlDocumentNode::Text(_) => {
-            let mut style = inherited.clone();
-            style.width = Some(CssLength::Px(width / count.max(1) as f32));
-            style
-        }
+        HtmlDocumentNode::Element {
+            tag, attributes, ..
+        } => CssStyle::from_element(tag, attributes, inherited),
+        HtmlDocumentNode::Text(_) => inherited.clone(),
     }
 }
 
@@ -44,6 +70,9 @@ pub(super) fn measured_widths(
     width: f32,
     parent: &CssStyle,
 ) -> Vec<f32> {
+    if stretches_flex_columns(parent) {
+        return stretched_column_widths(styles, width);
+    }
     if parent.display != Display::Grid {
         return non_grid_measured_widths(nodes, styles, width);
     }
@@ -53,12 +82,32 @@ pub(super) fn measured_widths(
         .iter()
         .enumerate()
         .map(|(index, style)| {
-            style
+            let measured = style
                 .explicit_width(width)
                 .unwrap_or(track_widths[index % track_widths.len()])
-                .min(width)
-                .max(MIN_LAYOUT_WIDTH)
+                .min(width);
+            enforce_min_width(style, measured, width).max(MIN_LAYOUT_WIDTH)
         })
+        .collect()
+}
+
+fn stretches_flex_columns(style: &CssStyle) -> bool {
+    style.display == Display::Flex
+        && matches!(
+            style.flex_direction,
+            taffy::style::FlexDirection::Column | taffy::style::FlexDirection::ColumnReverse
+        )
+        && matches!(
+            style.align_items,
+            None | Some(taffy::style::AlignItems::STRETCH)
+        )
+}
+
+fn stretched_column_widths(styles: &[CssStyle], width: f32) -> Vec<f32> {
+    styles
+        .iter()
+        .map(|style| enforce_min_width(style, style.explicit_width(width).unwrap_or(width), width))
+        .map(|measured| measured.min(width).max(MIN_LAYOUT_WIDTH))
         .collect()
 }
 
@@ -71,37 +120,19 @@ fn non_grid_measured_widths(
         .iter()
         .zip(styles)
         .map(|(node, style)| {
-            style.explicit_width(width).unwrap_or_else(|| {
-                intrinsic_text_width(node, style).min(width / nodes.len().max(1) as f32)
-            })
+            let measured = style
+                .explicit_width(width)
+                .unwrap_or_else(|| intrinsic_layout_width(node, style, width));
+            enforce_min_width(style, measured, width)
         })
         .map(|measured| measured.min(width).max(MIN_LAYOUT_WIDTH))
         .collect()
 }
 
-pub(super) fn is_layout_item(node: &HtmlDocumentNode) -> bool {
-    !matches!(node, HtmlDocumentNode::Text(text) if text.trim().is_empty())
-}
-
-pub(super) fn intrinsic_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
-    text_width(node_text(std::slice::from_ref(node)).chars().count(), style)
-}
-
-pub(super) fn min_content_text_width(node: &HtmlDocumentNode, style: &CssStyle) -> f32 {
-    let text = node_text(std::slice::from_ref(node));
-    let characters = text
-        .split_whitespace()
-        .map(str::chars)
-        .map(Iterator::count)
-        .max()
-        .map_or(0, |characters| characters);
-    text_width(characters, style)
-}
-
-fn text_width(characters: usize, style: &CssStyle) -> f32 {
-    characters as f32 * style.font_size * TEXT_CHARACTER_WIDTH_FACTOR
-        + style.padding_left
-        + style.padding_right
+fn enforce_min_width(style: &CssStyle, measured: f32, available: f32) -> f32 {
+    style
+        .minimum_outer_width(available)
+        .map_or(measured, |minimum| measured.max(minimum))
 }
 
 #[cfg(test)]
@@ -115,10 +146,15 @@ mod tests {
     fn flow_helpers_ignore_formatting_whitespace_and_measure_text() {
         let whitespace = HtmlDocumentNode::Text("  \n ".to_string());
         let text = HtmlDocumentNode::Text("abcd".to_string());
+        let japanese = HtmlDocumentNode::Text("案件概要".to_string());
 
         assert!(!is_layout_item(&whitespace));
         assert!(is_layout_item(&text));
         assert!(intrinsic_text_width(&text, &CssStyle::browser_default()) > 30.0);
+        assert!(
+            intrinsic_text_width(&japanese, &CssStyle::browser_default())
+                > intrinsic_text_width(&text, &CssStyle::browser_default())
+        );
     }
 
     #[test]
@@ -126,7 +162,7 @@ mod tests {
         let text = HtmlDocumentNode::Text("item".to_string());
         let inherited = CssStyle::browser_default();
         let text_style = item_style(&text, &inherited, 100.0, 2);
-        assert_eq!(text_style.width, Some(CssLength::Px(50.0)));
+        assert_eq!(text_style.width, None);
 
         let mut grid = CssStyle::browser_default();
         grid.display = Display::Grid;
@@ -136,6 +172,57 @@ mod tests {
         let styles = [inherited.clone(), inherited.clone()];
         assert_eq!(measured_widths(&items, &styles, 100.0, &grid), [45.0, 45.0]);
         assert!(measured_widths(&items, &styles, 100.0, &inherited)[0] > 30.0);
+
+        let mut column = inherited.clone();
+        column.display = Display::Flex;
+        column.flex_direction = taffy::style::FlexDirection::Column;
+        assert_eq!(
+            measured_widths(&items, &styles, 100.0, &column),
+            [100.0, 100.0]
+        );
+    }
+
+    #[test]
+    fn leaf_style_forwards_typed_flex_basis_to_taffy() {
+        let mut style = CssStyle::browser_default();
+        style.flex_basis = Some(CssLength::Percent(0.0));
+        let leaf = super::leaf_style(style, 80.0, 20.0, 200.0);
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::percent(0.0_f32));
+
+        let mut pixels = CssStyle::browser_default();
+        pixels.flex_basis = Some(CssLength::Px(24.0));
+        let leaf = super::leaf_style(pixels, 80.0, 20.0, 200.0);
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(24.0_f32));
+
+        let leaf = super::leaf_style(CssStyle::browser_default(), 80.0, 20.0, 200.0);
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::auto());
+    }
+
+    #[test]
+    fn explicit_stretch_alignment_expands_flex_column_items() {
+        let text = HtmlDocumentNode::Text("item".to_string());
+        let styles = [CssStyle::browser_default()];
+        let mut column = CssStyle::browser_default();
+        column.display = Display::Flex;
+        column.flex_direction = taffy::style::FlexDirection::Column;
+        column.align_items = Some(taffy::style::AlignItems::STRETCH);
+
+        assert_eq!(measured_widths(&[&text], &styles, 120.0, &column), [120.0]);
+    }
+
+    #[test]
+    fn reassigned_leaf_height_updates_size_and_automatic_minimum() {
+        let style = CssStyle::browser_default();
+        let mut leaf = super::leaf_style(style.clone(), 80.0, 20.0, 200.0);
+        super::assign_leaf_height(&mut leaf, &style, 64.0);
+        assert_eq!(leaf.size.height, taffy::style_helpers::length(64.0_f32));
+        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(64.0_f32));
+
+        let mut explicit = style;
+        explicit.automatic_min_height = false;
+        explicit.min_height = 12.0;
+        super::assign_leaf_height(&mut leaf, &explicit, 64.0);
+        assert_eq!(leaf.min_size.height, taffy::style_helpers::length(12.0_f32));
     }
 
     #[test]

@@ -1,0 +1,142 @@
+use super::super::html_document::HtmlDocumentNode;
+use super::document::attribute;
+use super::layout::HtmlLayoutRenderer;
+use super::style::{CssPosition, CssStyle};
+use super::types::{DetailsContext, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext};
+
+impl HtmlLayoutRenderer {
+    pub(super) fn render_node(
+        &mut self,
+        node: &HtmlDocumentNode,
+        x: f32,
+        y: f32,
+        width: f32,
+        inherited: &CssStyle,
+        details: DetailsContext,
+    ) -> f32 {
+        match node {
+            HtmlDocumentNode::Text(text) => self.render_text(text, x, y, width, inherited),
+            HtmlDocumentNode::Element {
+                node_id,
+                tag,
+                attributes,
+                children,
+            } => self.render_element(
+                ElementRenderContext {
+                    node_id: *node_id,
+                    tag,
+                    attributes,
+                    children,
+                },
+                LayoutContext::new(x, y, width, inherited, details),
+            ),
+        }
+    }
+
+    fn render_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+    ) -> f32 {
+        let mut style = CssStyle::from_element(element.tag, element.attributes, layout.style);
+        let paint_start = self.svg.len();
+        let bottom = self.render_positioned_or_flow_element(element, layout, &mut style);
+        self.finish_element_paint(paint_start, &style);
+        bottom
+    }
+
+    fn render_positioned_or_flow_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+        style: &mut CssStyle,
+    ) -> f32 {
+        if matches!(style.position, CssPosition::Absolute | CssPosition::Fixed) {
+            let (x, y, width) = self.positioned_geometry(style);
+            self.render_styled_element(
+                element,
+                LayoutContext::new(x, y, width, style, layout.details),
+            );
+            layout.y
+        } else {
+            self.render_styled_element(element, LayoutContext { style, ..layout })
+        }
+    }
+
+    fn finish_element_paint(&mut self, paint_start: usize, style: &CssStyle) {
+        if style.opacity < 1.0 {
+            self.wrap_painted_range(paint_start, style.opacity);
+        }
+        if style.position != CssPosition::Static
+            && let Some(z_index) = style.z_index
+        {
+            self.defer_painted_range(paint_start, z_index);
+        }
+    }
+
+    pub(super) fn render_styled_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+    ) -> f32 {
+        if layout.style.display == taffy::style::Display::None {
+            return layout.y;
+        }
+        let target_index = self.start_click_target(element);
+        self.record_anchor(element, layout.y);
+        let bottom = self.render_tag(element, layout);
+        if let Some(index) = target_index {
+            self.finish_click_target(index, element.node_id, layout, bottom);
+        }
+        bottom
+    }
+
+    fn start_click_target(&mut self, element: ElementRenderContext<'_>) -> Option<usize> {
+        let clickable = self.clickable_nodes.contains(&element.node_id)
+            || attribute(element.attributes, "onclick").is_some();
+        clickable.then(|| {
+            let index = self.hit_targets.len();
+            self.hit_targets.push(HitTarget {
+                node_id: element.node_id,
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+                kind: HitTargetKind::Click,
+            });
+            index
+        })
+    }
+
+    fn finish_click_target(
+        &mut self,
+        index: usize,
+        node_id: u64,
+        layout: LayoutContext<'_>,
+        bottom: f32,
+    ) {
+        let x = layout.x + layout.style.margin_left;
+        let y = layout.y + layout.style.margin_top;
+        let available =
+            (layout.width - layout.style.margin_left - layout.style.margin_right).max(0.0);
+        self.hit_targets[index] = HitTarget {
+            node_id,
+            x,
+            y,
+            width: layout.style.box_width(available).min(available),
+            height: (bottom - y - layout.style.margin_bottom).max(0.0),
+            kind: HitTargetKind::Click,
+        };
+    }
+
+    fn record_anchor(&mut self, element: ElementRenderContext<'_>, y: f32) {
+        let anchor = attribute(element.attributes, "id").or_else(|| {
+            (element.tag == "a")
+                .then(|| attribute(element.attributes, "name"))
+                .flatten()
+        });
+        if let Some(anchor) = anchor.filter(|anchor| !anchor.is_empty()) {
+            self.anchor_positions.entry(anchor.to_string()).or_insert(y);
+        }
+    }
+}

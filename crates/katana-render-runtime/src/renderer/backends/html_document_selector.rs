@@ -2,6 +2,35 @@ use super::attributes;
 use crate::renderer::backends::html_css_selector::{CssAncestor, CssSelector};
 use markup5ever_rcdom::{Handle, NodeData};
 
+pub(super) fn matches_selector(node: &Handle, selector: &CssSelector) -> bool {
+    let NodeData::Element { name, attrs, .. } = &node.data else {
+        return false;
+    };
+    let tag = name.local.to_string().to_ascii_lowercase();
+    let attributes = attributes(&attrs.borrow());
+    selector.matches(&tag, &attributes, &selector_ancestors(node))
+}
+
+fn selector_ancestors(node: &Handle) -> Vec<CssAncestor> {
+    let mut current = parent(node);
+    let mut ancestors = Vec::new();
+    while let Some(node) = current {
+        if let NodeData::Element { name, attrs, .. } = &node.data {
+            let tag = name.local.to_string().to_ascii_lowercase();
+            ancestors.push(CssAncestor::new(&tag, &attributes(&attrs.borrow())));
+        }
+        current = parent(&node);
+    }
+    ancestors.reverse();
+    ancestors
+}
+
+fn parent(node: &Handle) -> Option<Handle> {
+    let parent = node.parent.take();
+    node.parent.set(parent.clone());
+    parent.and_then(|parent| parent.upgrade())
+}
+
 pub(super) fn find_selector(
     node: &Handle,
     selector: &CssSelector,

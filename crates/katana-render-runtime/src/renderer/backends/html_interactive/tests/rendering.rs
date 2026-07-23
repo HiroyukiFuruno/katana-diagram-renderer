@@ -1,7 +1,8 @@
-use super::support::{TestResult, frame_contains_rgb, start, to_string};
+use super::support::{TestResult, frame_contains_rgb, start, start_with_viewport, to_string};
 use crate::renderer::backends::html_browser::{
     HTML_BROWSER_MAX_SOURCE_BYTES, HtmlBrowserError, HtmlBrowserSource, HtmlBrowserViewport,
 };
+use crate::renderer::backends::html_document::HtmlDocumentNode;
 
 const TEST_VIEWPORT_WIDTH: u32 = 320;
 const TEST_VIEWPORT_HEIGHT: u32 = 240;
@@ -28,6 +29,53 @@ html, body { margin: 0; }
 </style>
 <div class=content-box></div>
 <div class=border-box>Hi<div class=overflowing>Clipped</div></div>"#;
+const FIXED_SLIDESHOW_NAVIGATION_DOCUMENT: &str = r#"<style>
+html, body { margin: 0; }
+.nav-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 60px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 28px; font-family: Arial, sans-serif;
+}
+.nav-left, .nav-right { display: flex; align-items: center; gap: 12px; }
+.nav-bar button {
+  box-sizing: border-box; width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+}
+.page-indicator { font-size: 15px; letter-spacing: 0.02em; }
+.page-indicator b { font-weight: 700; }
+.appendix-tag { display: none; }
+.hint { font-size: 13px; }
+</style>
+<div class="nav-bar">
+  <div class="nav-left">
+    <button>‹</button><button>›</button>
+    <span class="page-indicator"><b>4</b> / <span>14</span></span>
+    <span class="appendix-tag">APPENDIX</span>
+  </div>
+  <div class="nav-right"><span class="hint">← → でページ送り ／ Home・End で先頭・末尾 ／ 図はクリックで拡大</span></div>
+</div>"#;
+const FLEX_AUTO_MIN_HEIGHT_DOCUMENT: &str = r#"<style>
+body { margin: 0; }
+h1 { margin: 0; padding: 0; }
+.column { display: flex; flex-direction: column; width: 200px; height: 120px; }
+.heading { font-size: 32px; line-height: 40px; margin-bottom: 20px; background: #2457d6; }
+.content { flex: 1; min-height: 0; background: #ef4444; }
+</style>
+<main class="column"><h1 class="heading">Title</h1><div class="content"></div></main>"#;
+const SLIDE_HEADING_DOCUMENT: &str = r#"<style>
+html, body { margin: 0; }
+.slide { display: flex; flex-direction: column; width: 100vw; padding: 44px 76px 80px; box-sizing: border-box; }
+h1 { margin: 0; padding: 0; }
+.title {
+  font-family: "Noto Sans";
+  font-size: 42.842px;
+  font-weight: 700;
+  line-height: 55.6946px;
+  letter-spacing: 0.42842px;
+  font-feature-settings: "palt" 1;
+}
+</style>
+<main class="slide"><h1 class="title">LibreChat fork to MCP Hub to Code Sandbox in three layers architecture</h1></main>"#;
 
 #[test]
 fn renders_css_and_hides_document_metadata() -> TestResult {
@@ -282,7 +330,7 @@ fn assert_box_model_svg(svg: &str) {
         r#"font-family="Inter, sans-serif""#,
         r#"font-style="italic""#,
         r#"letter-spacing="2""#,
-        r#"<text x="40.2"#,
+        r#"lengthAdjust="spacingAndGlyphs""#,
     ] {
         assert!(svg.contains(expected), "{svg}");
     }
@@ -383,6 +431,37 @@ fn flex_flow_resolves_percentage_item_width_once() -> TestResult {
         "{}",
         layout.svg
     );
+    Ok(())
+}
+
+#[test]
+fn flex_one_uses_zero_basis_and_distributes_equal_card_widths() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex;width:280px;gap:8px;align-items:stretch">
+<section style="box-sizing:border-box;flex:1;padding:8px;background:#ef4444">Short</section>
+<span style="flex-shrink:0">→</span>
+<section style="box-sizing:border-box;flex:1;padding:8px;background:#35a853">A much longer card label</section>
+<span style="flex-shrink:0">→</span>
+<section style="box-sizing:border-box;flex:1;padding:8px;background:#2457d6">Medium label</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let (widths, heights) = colored_card_dimensions(&layout.svg)?;
+
+    assert!(
+        (widths[0] - widths[1]).abs() <= 1.0,
+        "{:?}\n{}",
+        widths,
+        layout.svg
+    );
+    assert!(
+        (widths[1] - widths[2]).abs() <= 1.0,
+        "{:?}\n{}",
+        widths,
+        layout.svg
+    );
+    assert_eq!(heights, [heights[0]; 3], "{}", layout.svg);
+    assert!(heights[0] > 60.0, "{:?}\n{}", heights, layout.svg);
     Ok(())
 }
 
@@ -589,6 +668,472 @@ a { display: inline-block; margin-right: 8px; padding: 6px; background: #b99aff;
 }
 
 #[test]
+fn nested_phrasing_content_shares_one_inline_line_inside_a_flex_item() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex;align-items:center;width:280px">
+<span><b>2</b> / <span>14</span></span>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let first_y = text_baseline_for(&layout.svg, "2")?;
+    let separator_y = text_baseline_for(&layout.svg, "/")?;
+    let total_y = text_baseline_for(&layout.svg, "14")?;
+
+    assert_eq!(separator_y, first_y, "{}", layout.svg);
+    assert_eq!(total_y, first_y, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn long_text_after_inline_code_uses_the_remaining_line_before_wrapping() -> TestResult {
+    let mut session = start(
+        r#"<main style="width:180px"><code style="font-family:monospace">/d sdd</code> next remaining words</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let code_y = text_baseline_for(&layout.svg, "/d sdd")?;
+    let first_text_y = text_baseline_for(&layout.svg, "next remaining")?;
+    let wrapped_text_y = text_baseline_for(&layout.svg, "words")?;
+
+    assert_eq!(first_text_y, code_y, "{}", layout.svg);
+    assert!(wrapped_text_y > first_text_y, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn nested_flex_intrinsic_width_keeps_page_indicator_inline_with_appendix_tag() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex;justify-content:space-between;width:300px">
+<div style="display:flex;align-items:center;gap:4px">
+<button style="box-sizing:border-box;width:40px">‹</button>
+<button style="box-sizing:border-box;width:40px">›</button>
+<span><b>12</b> / <span>14</span></span>
+<span style="display:inline-flex;padding:3px 6px">APPENDIX</span>
+</div>
+<div>Hint</div>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let current_y = text_baseline_for(&layout.svg, "12")?;
+    assert_eq!(
+        text_baseline_for(&layout.svg, "/")?,
+        current_y,
+        "{}",
+        layout.svg
+    );
+    assert_eq!(
+        text_baseline_for(&layout.svg, "14")?,
+        current_y,
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn fixed_slideshow_navigation_keeps_page_indicator_on_one_line() -> TestResult {
+    let mut session = start_with_viewport(FIXED_SLIDESHOW_NAVIGATION_DOCUMENT, 1_382, 744)?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let current_y = text_baseline_for(&layout.svg, "4")?;
+    assert_eq!(
+        text_baseline_for(&layout.svg, "/")?,
+        current_y,
+        "{}",
+        layout.svg
+    );
+    assert_eq!(
+        text_baseline_for(&layout.svg, "14")?,
+        current_y,
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn markerless_flex_list_applies_its_declared_column_gap() -> TestResult {
+    let mut session = start(
+        r#"<ul style="list-style:none;display:flex;flex-direction:column;gap:16px;margin:0;padding:0;font-size:20px;line-height:30px">
+<li>First row</li><li>Second row</li>
+</ul>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let first_y = text_baseline_for(&layout.svg, "First row")?;
+    let second_y = text_baseline_for(&layout.svg, "Second row")?;
+    assert!((second_y - first_y - 46.0).abs() < 0.01, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn anonymous_flex_text_uses_its_intrinsic_width_when_space_is_available() -> TestResult {
+    let mut session = start(
+        r#"<div style="display:flex;align-items:baseline;gap:10px;width:300px;font-size:16px">
+<span style="font-size:20px">①</span>OSS fork の upstream 追従運用
+</div>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(">OSS fork の upstream 追従運用</text>"),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn per_edge_borders_override_uniform_border_and_contribute_to_box_geometry() -> TestResult {
+    let mut session = start(
+        r#"<main style="width:100px;height:40px;border:1px solid #999999;border-left:6px solid #111111;border-left-color:#2457d6;border-top:3px solid #e11d48;background:#ffffff">Edge content</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(r##"stroke="#2457d6" stroke-width="6""##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(r##"stroke="#e11d48" stroke-width="3""##),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout.svg.contains(r#"<text x="14""#),
+        "left border must offset content: {}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn percentage_border_radius_resolves_against_both_box_axes() -> TestResult {
+    let mut session = start(
+        r#"<div style="width:40px;height:40px;border-radius:50%;background:#2457d6"></div>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(
+            r##"<rect x="8" y="8" width="40" height="40" rx="20" ry="20" fill="#2457d6"/>"##
+        ),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn positive_z_index_paints_positioned_content_above_later_normal_flow() -> TestResult {
+    let mut session = start(
+        r#"<div style="position:fixed;inset:0;height:3px;background:#2457d6;z-index:900"></div>
+<main style="height:120px;background:#f4f5f7"></main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let normal = layout
+        .svg
+        .find(r##"fill="#f4f5f7""##)
+        .ok_or_else(|| format!("missing normal layer: {}", layout.svg))?;
+    let overlay = layout
+        .svg
+        .find(r##"fill="#2457d6""##)
+        .ok_or_else(|| format!("missing positioned layer: {}", layout.svg))?;
+    assert!(overlay > normal, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn flex_wrap_honors_item_min_width() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex;flex-wrap:wrap;gap:10px;width:280px">
+<section style="flex:1;min-width:220px;height:30px;background:#ef4444"></section>
+<section style="flex:1;min-width:220px;height:30px;background:#3b82f6"></section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    let first_y = rect_y_for_fill(&layout.svg, "#ef4444")?;
+    let second_y = rect_y_for_fill(&layout.svg, "#3b82f6")?;
+    assert!(second_y >= first_y + 40.0, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn block_children_inside_flex_column_keep_the_assigned_content_width() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:flex;flex-direction:column;width:280px">
+<section style="padding:20px 24px;border:1px solid #dddddd;border-left:4px solid #2457d6">
+<div style="font-size:22px;font-weight:700;margin-bottom:10px">ゴール</div>
+<div style="font-size:20px">自然言語で横断分析する</div>
+</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(layout.svg.contains(">ゴール</text>"), "{}", layout.svg);
+    assert!(!layout.svg.contains(">ゴ</text>"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn flex_figure_constrains_an_image_to_its_assigned_content_height() -> TestResult {
+    let mut session = start(
+        r#"<style>
+body { margin: 0; }
+.slide-body { display: flex; flex-direction: column; width: 200px; height: 100px; }
+.fig { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; }
+.fig-img { max-width: 100%; max-height: 100%; }
+</style>
+<div class="slide-body"><div class="fig"><img class="fig-img" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAABiAQAAAACOwEvkAAAAGUlEQVQ4y2P4jwQ+MIzyRnmjvFHeKI8KPAAhJu+FXHMNjwAAAABJRU5ErkJggg=="></div></div>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(r#"width="82" height="80""#),
+        "{}",
+        layout.svg
+    );
+    assert!((82.0_f32 / 80.0 - 100.0 / 98.0).abs() < 0.005);
+    Ok(())
+}
+
+#[test]
+fn flex_auto_min_height_keeps_heading_and_margin_outside_flexible_content() -> TestResult {
+    let mut session = start(FLEX_AUTO_MIN_HEIGHT_DOCUMENT)?;
+    let nodes = session
+        .runtime
+        .interactive_nodes_at_width(320.0)
+        .map_err(to_string)?;
+    let heading_style = heading_style(&nodes).ok_or_else(|| "missing heading style".to_string())?;
+    assert!(heading_style.contains("margin-top: 0"), "{heading_style}");
+    assert!(
+        heading_style.contains("margin-bottom: 20px"),
+        "{heading_style}"
+    );
+    let layout = session.layout().map_err(to_string)?;
+
+    assert_eq!(
+        rect_y_for_fill(&layout.svg, "#2457d6")?,
+        0.0,
+        "{}",
+        layout.svg
+    );
+    assert!(
+        rect_y_for_fill(&layout.svg, "#ef4444")? >= 60.0,
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn slide_heading_wraps_with_browser_font_shaping_at_the_declared_content_width() -> TestResult {
+    let mut session = start_with_viewport(SLIDE_HEADING_DOCUMENT, 1_382, 744)?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout
+            .svg
+            .contains(">LibreChat fork to MCP Hub to Code Sandbox in three layers</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout.svg.contains(">architecture</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        !layout.svg.contains(
+            ">LibreChat fork to MCP Hub to Code Sandbox in three layers architecture</text>"
+        ),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn list_style_none_suppresses_markers_and_keeps_flex_item_children_aligned() -> TestResult {
+    let mut session = start(
+        r#"<ul style="list-style:none;width:280px">
+<li style="display:flex;gap:14px"><span>①</span><span>Summary text</span></li>
+</ul>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(!layout.svg.contains(">•</text>"), "{}", layout.svg);
+    assert_eq!(
+        text_baseline_for(&layout.svg, "①")?,
+        text_baseline_for(&layout.svg, "Summary text")?,
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn nested_bold_inline_content_uses_its_own_intrinsic_flex_width() -> TestResult {
+    let mut session = start(
+        r#"<ul style="display:flex;flex-direction:column;gap:8px;list-style:none;width:280px">
+<li style="display:flex;gap:14px"><span style="flex-shrink:0">③</span><span><b>Excel 帳票出力</b></span></li>
+<li style="display:flex;gap:14px"><span style="flex-shrink:0">④</span><span><b>市場レポート・キャンペーン情報等の横断参照</b></span></li>
+</ul>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(">Excel 帳票出力</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout
+            .svg
+            .contains(">市場レポート・キャンペーン情報</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout.svg.contains(">等の横断参照</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(!layout.svg.contains(">力</text>"), "{}", layout.svg);
+    assert!(!layout.svg.contains(">照</text>"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn opacity_wraps_the_complete_element_paint() -> TestResult {
+    let mut session =
+        start(r#"<div style="width:40px;height:40px;background:#2457d6;opacity:0.3">Dim</div>"#)?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(r#"<g opacity="0.3"><rect"#),
+        "{}",
+        layout.svg
+    );
+    assert!(layout.svg.contains("</text></g>"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn disabled_pseudo_class_applies_stateful_control_style() -> TestResult {
+    let mut session = start(
+        r#"<style>button:disabled { opacity: 0.3; }</style><button disabled>Previous</button>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(r#"<g opacity="0.3">"#),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+fn rect_y_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
+    let marker = format!(r#" fill="{fill}""#);
+    let marker_start = svg
+        .find(&marker)
+        .ok_or_else(|| format!("missing fill {fill}: {svg}"))?;
+    let rect_start = svg[..marker_start]
+        .rfind("<rect ")
+        .ok_or_else(|| format!("missing rect for {fill}: {svg}"))?;
+    let element = &svg[rect_start..marker_start];
+    let y_start = element
+        .find(" y=\"")
+        .ok_or_else(|| format!("missing y for {fill}: {element}"))?
+        + 4;
+    let y_end = element[y_start..]
+        .find('"')
+        .ok_or_else(|| format!("unterminated y for {fill}: {element}"))?
+        + y_start;
+    element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+fn rect_width_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
+    rect_attribute_for_fill(svg, fill, "width")
+}
+
+fn rect_height_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
+    rect_attribute_for_fill(svg, fill, "height")
+}
+
+fn colored_card_dimensions(svg: &str) -> TestResult<([f32; 3], [f32; 3])> {
+    let fills = ["#ef4444", "#35a853", "#2457d6"];
+    let widths = fills
+        .map(|fill| rect_width_for_fill(svg, fill))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let heights = fills
+        .map(|fill| rect_height_for_fill(svg, fill))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        widths
+            .try_into()
+            .map_err(|_| "expected three card widths".to_string())?,
+        heights
+            .try_into()
+            .map_err(|_| "expected three card heights".to_string())?,
+    ))
+}
+
+fn rect_attribute_for_fill(svg: &str, fill: &str, attribute: &str) -> TestResult<f32> {
+    let marker = format!(r#" fill="{fill}""#);
+    let marker_start = svg
+        .find(&marker)
+        .ok_or_else(|| format!("missing fill {fill}: {svg}"))?;
+    let rect_start = svg[..marker_start]
+        .rfind("<rect ")
+        .ok_or_else(|| format!("missing rect for {fill}: {svg}"))?;
+    let element = &svg[rect_start..marker_start];
+    let attribute_marker = format!(r#" {attribute}=""#);
+    let value_start = element
+        .find(&attribute_marker)
+        .ok_or_else(|| format!("missing {attribute} for {fill}: {element}"))?
+        + attribute_marker.len();
+    let value_end = element[value_start..]
+        .find('"')
+        .ok_or_else(|| format!("unterminated {attribute} for {fill}: {element}"))?
+        + value_start;
+    element[value_start..value_end]
+        .parse::<f32>()
+        .map_err(to_string)
+}
+
+fn text_baseline_for(svg: &str, text: &str) -> TestResult<f32> {
+    let marker = format!(">{text}</text>");
+    let marker_start = svg
+        .find(&marker)
+        .ok_or_else(|| format!("missing text marker {marker}: {svg}"))?;
+    let text_start = svg[..marker_start]
+        .rfind("<text ")
+        .ok_or_else(|| format!("missing text element for {text}: {svg}"))?;
+    let element = &svg[text_start..marker_start];
+    let y_start = element
+        .find(" y=\"")
+        .ok_or_else(|| format!("missing y attribute for {text}: {element}"))?
+        + 4;
+    let y_end = element[y_start..]
+        .find('"')
+        .ok_or_else(|| format!("unterminated y attribute for {text}: {element}"))?
+        + y_start;
+    element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+#[test]
 fn percentage_width_reflows_against_resized_viewport() -> TestResult {
     let mut session = start(r#"<main style="width:50%; height:40px; background:#123456"></main>"#)?;
     let initial = session.layout().map_err(to_string)?;
@@ -706,6 +1251,27 @@ fn oversized_source() -> TestResult<HtmlBrowserSource> {
 
 fn test_viewport() -> TestResult<HtmlBrowserViewport> {
     HtmlBrowserViewport::new(TEST_VIEWPORT_WIDTH, TEST_VIEWPORT_HEIGHT, 1.0).map_err(to_string)
+}
+
+fn heading_style(nodes: &[HtmlDocumentNode]) -> Option<&str> {
+    nodes.iter().find_map(|node| match node {
+        HtmlDocumentNode::Element {
+            tag,
+            attributes,
+            children,
+            ..
+        } => {
+            if tag == "h1" {
+                attributes
+                    .iter()
+                    .find(|(name, _)| name == "style")
+                    .map(|(_, value)| value.as_str())
+            } else {
+                heading_style(children)
+            }
+        }
+        HtmlDocumentNode::Text(_) => None,
+    })
 }
 
 fn assert_target_exists(

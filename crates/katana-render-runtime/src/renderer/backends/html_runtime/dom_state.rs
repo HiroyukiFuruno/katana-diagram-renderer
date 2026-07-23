@@ -1,11 +1,15 @@
 use super::super::html_document::HtmlDocument;
-use super::style::{kebab_case, property as style_property, set_property as set_style_property};
 use super::types::DomValue;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+#[path = "dom_state_mutation.rs"]
+mod mutation;
 
 pub(super) struct HtmlDomBridgeState {
     pub(super) document: RefCell<HtmlDocument>,
     pub(super) error: RefCell<Option<String>>,
+    event_targets: RefCell<HashMap<String, HashSet<u64>>>,
 }
 
 impl HtmlDomBridgeState {
@@ -13,6 +17,7 @@ impl HtmlDomBridgeState {
         Self {
             document: RefCell::new(document),
             error: RefCell::new(None),
+            event_targets: RefCell::new(HashMap::new()),
         }
     }
 
@@ -23,15 +28,42 @@ impl HtmlDomBridgeState {
     ) -> Result<DomValue, String> {
         match operation {
             "getElementById" | "querySelector" | "querySelectorAll" | "createElement"
-            | "textContent" | "innerHTML" | "getAttribute" | "eventPath" => {
+            | "textContent" | "innerHTML" | "getAttribute" | "eventPath" | "closest" => {
                 self.lookup(operation, arguments)
             }
             "appendChild" | "remove" => self.mutate_tree(operation, arguments),
             "setTextContent" | "setInnerHTML" => self.mutate_content(operation, arguments),
             "setAttribute" | "removeAttribute" => self.set_attribute(operation, arguments),
             "styleGet" | "styleSet" => self.style(operation, arguments),
+            "setEventTarget" => self.set_event_target(arguments),
             _ => Err(format!("unsupported DOM operation: {operation}")),
         }
+    }
+
+    pub(super) fn event_target_ids(&self, event_type: &str) -> HashSet<u64> {
+        self.event_targets
+            .borrow()
+            .get(event_type)
+            .cloned()
+            .unwrap_or_else(HashSet::new)
+    }
+
+    fn set_event_target(&self, arguments: &[String]) -> Result<DomValue, String> {
+        let node_id = node_id(argument(arguments, 0)?)?;
+        self.document.borrow().node(node_id)?;
+        let event_type = argument(arguments, 1)?.to_string();
+        let enabled = argument(arguments, 2)? == "true";
+        let mut targets = self.event_targets.borrow_mut();
+        let nodes = targets.entry(event_type.clone()).or_default();
+        if enabled {
+            nodes.insert(node_id);
+        } else {
+            nodes.remove(&node_id);
+            if nodes.is_empty() {
+                targets.remove(&event_type);
+            }
+        }
+        Ok(DomValue::Undefined)
     }
 
     fn lookup(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
@@ -82,80 +114,12 @@ impl HtmlDomBridgeState {
             "eventPath" => document
                 .event_path(node_id(argument(arguments, 0)?)?)
                 .map(DomValue::NodeIds),
+            "closest" => document
+                .closest_selector(node_id(argument(arguments, 0)?)?, argument(arguments, 1)?)
+                .map(|node| node.map(DomValue::NodeId).unwrap_or(DomValue::Null)),
             _ => Err(format!(
                 "unsupported HTML content lookup operation: {operation}"
             )),
-        }
-    }
-
-    fn mutate_tree(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let mut document = self.document.borrow_mut();
-        match operation {
-            "appendChild" => {
-                let parent = node_id(argument(arguments, 0)?)?;
-                let child = node_id(argument(arguments, 1)?)?;
-                document.append_child(parent, child)?;
-                Ok(DomValue::Undefined)
-            }
-            "remove" => {
-                document.remove(node_id(argument(arguments, 0)?)?)?;
-                Ok(DomValue::Undefined)
-            }
-            _ => Err(format!("unsupported HTML mutation operation: {operation}")),
-        }
-    }
-
-    fn mutate_content(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let mut document = self.document.borrow_mut();
-        let node_id = node_id(argument(arguments, 0)?)?;
-        let value = argument(arguments, 1)?;
-        match operation {
-            "setTextContent" => document.set_text_content(node_id, value)?,
-            "setInnerHTML" => document.set_inner_html(node_id, value)?,
-            _ => return Err(format!("unsupported HTML content operation: {operation}")),
-        }
-        Ok(DomValue::Undefined)
-    }
-
-    fn set_attribute(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let node_id = node_id(argument(arguments, 0)?)?;
-        let name = argument(arguments, 1)?;
-        match operation {
-            "setAttribute" => {
-                self.document
-                    .borrow_mut()
-                    .set_attribute(node_id, name, argument(arguments, 2)?)?
-            }
-            "removeAttribute" => self.document.borrow_mut().remove_attribute(node_id, name)?,
-            _ => return Err(format!("unsupported HTML attribute operation: {operation}")),
-        }
-        Ok(DomValue::Undefined)
-    }
-
-    fn style(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let mut document = self.document.borrow_mut();
-        match operation {
-            "styleGet" => {
-                let node_id = node_id(argument(arguments, 0)?)?;
-                let property = argument(arguments, 1)?;
-                Ok(document
-                    .attribute(node_id, "style")?
-                    .and_then(|style| style_property(&style, property))
-                    .map(DomValue::String)
-                    .unwrap_or(DomValue::Null))
-            }
-            "styleSet" => {
-                let node_id = node_id(argument(arguments, 0)?)?;
-                let property = kebab_case(argument(arguments, 1)?);
-                let value = argument(arguments, 2)?;
-                let current = document
-                    .attribute(node_id, "style")?
-                    .unwrap_or_else(String::new);
-                let style = set_style_property(&current, &property, value);
-                document.set_attribute(node_id, "style", &style)?;
-                Ok(DomValue::Undefined)
-            }
-            _ => Err(format!("unsupported HTML style operation: {operation}")),
         }
     }
 }

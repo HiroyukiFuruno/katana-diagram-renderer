@@ -3,7 +3,7 @@ use super::constants::{LIST_MARKER_WIDTH, MIN_LAYOUT_WIDTH, RULE_VERTICAL_INSET}
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
 use super::svg::escape_xml;
-use super::types::DetailsContext;
+use super::types::{DetailsContext, LayoutContext};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_rule(&mut self, x: f32, y: f32, width: f32, style: &CssStyle) -> f32 {
@@ -27,25 +27,45 @@ impl HtmlLayoutRenderer {
         style: &CssStyle,
         ordered: bool,
     ) -> f32 {
-        let mut current = y + style.margin_top;
+        if style.list_style_none
+            && matches!(
+                style.display,
+                taffy::style::Display::Flex | taffy::style::Display::Grid
+            )
+        {
+            return self.render_container(children, x, y, width, style, DetailsContext::NONE);
+        }
+        let current = y + style.margin_top;
         let x = x + style.margin_left;
         let width = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
+        self.render_list_children(children, x, current, width, style, ordered) + style.margin_bottom
+    }
+
+    fn render_list_children(
+        &mut self,
+        children: &[HtmlDocumentNode],
+        x: f32,
+        mut current: f32,
+        width: f32,
+        style: &CssStyle,
+        ordered: bool,
+    ) -> f32 {
         let mut index = 1usize;
         for child in children {
-            if let Some(items) = list_item_children(child) {
-                self.paint_list_marker(ordered, index, x, current, style);
-                current = self.render_nodes(
+            if let Some((attributes, items)) = list_item(child) {
+                let item_style = CssStyle::from_element("li", attributes, style);
+                current = self.render_list_item_contents(
                     items,
-                    x + LIST_MARKER_WIDTH,
+                    x,
                     current,
-                    width - LIST_MARKER_WIDTH,
-                    style,
-                    DetailsContext::NONE,
+                    width,
+                    &item_style,
+                    Some((ordered, index)),
                 );
                 index += 1;
             }
         }
-        current + style.margin_bottom
+        current
     }
 
     pub(super) fn render_list_item(
@@ -56,21 +76,47 @@ impl HtmlLayoutRenderer {
         width: f32,
         style: &CssStyle,
     ) -> f32 {
-        self.paint_text_lines(
-            &["•".to_string()],
-            x,
-            LIST_MARKER_WIDTH,
-            y + style.font_size,
-            style,
-        );
-        self.render_nodes(
+        self.render_list_item_contents(children, x, y, width, style, Some((false, 1)))
+    }
+
+    fn render_list_item_contents(
+        &mut self,
+        children: &[HtmlDocumentNode],
+        x: f32,
+        y: f32,
+        width: f32,
+        style: &CssStyle,
+        marker: Option<(bool, usize)>,
+    ) -> f32 {
+        let marker_width = self.list_marker_width(marker, x, y, style);
+        let result = self.render_flow_children(
             children,
-            x + LIST_MARKER_WIDTH,
-            y,
-            width - LIST_MARKER_WIDTH,
-            style,
-            DetailsContext::NONE,
-        )
+            LayoutContext::new(
+                x + marker_width,
+                y,
+                (width - marker_width).max(MIN_LAYOUT_WIDTH),
+                style,
+                DetailsContext::NONE,
+            ),
+            style.children_height(),
+        );
+        accept_list_flow_result(&mut self.layout_error, result, y)
+    }
+
+    fn list_marker_width(
+        &mut self,
+        marker: Option<(bool, usize)>,
+        x: f32,
+        y: f32,
+        style: &CssStyle,
+    ) -> f32 {
+        if style.list_style_none {
+            return 0.0;
+        }
+        if let Some((ordered, index)) = marker {
+            self.paint_list_marker(ordered, index, x, y, style);
+        }
+        LIST_MARKER_WIDTH
     }
 
     fn paint_list_marker(&mut self, ordered: bool, index: usize, x: f32, y: f32, style: &CssStyle) {
@@ -84,11 +130,30 @@ impl HtmlLayoutRenderer {
     }
 }
 
-fn list_item_children(node: &HtmlDocumentNode) -> Option<&[HtmlDocumentNode]> {
-    let HtmlDocumentNode::Element { tag, children, .. } = node else {
+fn accept_list_flow_result(
+    layout_error: &mut Option<String>,
+    result: Result<f32, String>,
+    start: f32,
+) -> f32 {
+    result.unwrap_or_else(|error| {
+        *layout_error = Some(error);
+        start
+    })
+}
+
+type ListItem<'a> = (&'a [(String, String)], &'a [HtmlDocumentNode]);
+
+fn list_item(node: &HtmlDocumentNode) -> Option<ListItem<'_>> {
+    let HtmlDocumentNode::Element {
+        tag,
+        attributes,
+        children,
+        ..
+    } = node
+    else {
         return None;
     };
-    (tag == "li").then_some(children)
+    (tag == "li").then_some((attributes, children))
 }
 
 fn list_marker(ordered: bool, index: usize) -> String {
@@ -96,5 +161,20 @@ fn list_marker(ordered: bool, index: usize) -> String {
         format!("{index}.")
     } else {
         "•".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accept_list_flow_result;
+
+    #[test]
+    fn list_flow_errors_are_recorded_at_the_item_start() {
+        let mut layout_error = None;
+
+        let bottom = accept_list_flow_result(&mut layout_error, Err("layout failed".into()), 12.0);
+
+        assert_eq!(bottom, 12.0);
+        assert_eq!(layout_error.as_deref(), Some("layout failed"));
     }
 }

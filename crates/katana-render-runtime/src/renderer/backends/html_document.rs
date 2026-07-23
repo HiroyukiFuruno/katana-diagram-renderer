@@ -91,6 +91,27 @@ impl HtmlDocument {
             .collect()
     }
 
+    pub(super) fn closest_selector(
+        &self,
+        node_id: u64,
+        selector: &str,
+    ) -> Result<Option<u64>, String> {
+        let Some(selector) = super::html_css_selector::CssSelector::parse(selector) else {
+            return Ok(None);
+        };
+        let mut current = Some(self.node(node_id)?);
+        while let Some(node) = current {
+            if selector::matches_selector(&node, &selector) {
+                let pointer = Rc::as_ptr(&node) as usize;
+                return Ok(self.node_ids.get(&pointer).copied());
+            }
+            let parent = node.parent.take();
+            node.parent.set(parent.clone());
+            current = parent.and_then(|parent| parent.upgrade());
+        }
+        Ok(None)
+    }
+
     pub(super) fn node(&self, node_id: u64) -> Result<Handle, String> {
         self.nodes
             .get(&node_id)
@@ -227,6 +248,14 @@ mod tests {
         assert_eq!(document.query_selector(".missing"), None);
         assert!(document.query_selector_all("main + p").is_empty());
         assert_eq!(document.get_element_by_id("missing"), None);
+    }
+
+    #[test]
+    fn closest_selector_returns_no_match_for_invalid_selector_syntax() {
+        let mut document = HtmlDocument::parse("<main id=target>Visible</main>");
+        let target = must_some(document.get_element_by_id("target"), "target must exist");
+
+        assert_eq!(document.closest_selector(target, "main +"), Ok(None));
     }
 
     #[test]

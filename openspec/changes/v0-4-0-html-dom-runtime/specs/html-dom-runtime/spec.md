@@ -39,6 +39,13 @@
 - **THEN** KRR は変更された領域だけの damage image ではなく、viewport 全体の pixel frame を返す
 - **THEN** 後続 frame は action 前から不変の content と action 後の content を同時に含む
 
+#### Scenario: HTML slide deck が viewport と script state に追従する
+
+- **WHEN** HTML が viewport-relative length、`clamp()`、linear gradient、明示的な `<br>`、class による slide visibility を使用する
+- **THEN** KRR は active viewport に対して CSS 値を解決し、gradient、寸法、強制改行、active slide だけを browser-equivalent frame に描画する
+- **WHEN** pointer または keyboard handler が `Element.closest()` を使って対象を判定し、active class と page indicator を変更する
+- **THEN** KRR は selector matching と ancestor traversal を評価し、JavaScript exception なしに次の slide を全面再描画する
+
 ### Requirement: KRR in-process runtime は外部 browser asset なしに検証可能でなければならない
 
 システムは、KRR crate に含まれる Rust/V8 runtime だけで interactive session を起動できなければならない（MUST）。release workflow は dependency graph、package contents、runtime configuration を検証し、Chromium binary/archive/manifest、browser download、external helper、`KRR_CHROME_BIN` のような browser override が含まれないことを確認しなければならない（MUST）。

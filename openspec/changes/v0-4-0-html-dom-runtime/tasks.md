@@ -44,11 +44,16 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   and embedded SVG projection/layout. HTTPS mixed content, credential-bearing
   network URLs, local file escape, unsupported schemes, and iframe fetching
   remain rejected. Strict coverage stays at 100% lines and 0 uncovered.
-- [/] 1.10 Release and verify KRR `0.4.6` with structured CSS parsing and
+- [x] 1.10 Release and verify KRR `0.4.6` with structured CSS parsing and
   cascade precedence, typed flex/grid/table/box/overflow/typography layout,
   browser-style capture/target/bubble event dispatch, and scroll/content frame
   metrics. Local `release-check` passes with 100% line coverage and 0 uncovered;
   crates.io publication and public artifact verification remain.
+- [/] 1.11 Release and verify KRR `0.4.7` against a real self-contained HTML
+  slide deck. Preserve explicit `<br>` line breaks, resolve viewport-relative
+  lengths and `clamp()`, paint CSS linear gradients, implement selector-based
+  ancestor lookup through `Element.closest()`, and repaint after slide class
+  changes without introducing Chromium, WebView, or an external helper.
 
 ### 2. KDV Adapter
 
@@ -73,7 +78,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 3.5 Reproduce Japanese committed text end-to-end, reject the tofu-glyph
   frame, and verify the local KRR `0.4.3` candidate renders `日本語 IME入力` in
   the input, JavaScript result, and status regions.
-- [ ] 3.6 Run KatanA compile/unit/release contract gates with registry-only KDV
+- [x] 3.6 Run KatanA compile/unit/release contract gates with registry-only KDV
   after KDV publication; no path/git dependency may remain in committed files.
 
 ### 4. Release Order And User Review
@@ -82,30 +87,67 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 4.2 Pass all KDV quality/release gates, publish and verify KDV `0.3.0`.
 - [x] 4.3 Publish and verify KRR `0.4.3`, resolve it from crates.io in KatanA,
   and rerun the complete headless acceptance matrix for `v0.22.33` only.
-- [ ] 4.4 Present final registry-only state-specific screenshots and automated
+- [x] 4.4 Present final registry-only state-specific screenshots and automated
   evidence to the user. Local-candidate evidence has already been presented.
   Until explicit approval: no KatanA commit, push, PR, publish, or release.
 - [x] 4.5 Publish and verify KRR `0.4.4`, then allow KDV `0.3.2` and KatanA
   `v0.22.34` to consume only its crates.io artifact. KatanA evidence must cover
   remote resources, embedded Mermaid SVG, worker error recovery, and the full
   interactive HTML acceptance matrix without Chromium or WebView.
-- [/] 4.6 Publish and verify KRR `0.4.6`, then refresh KatanA `v0.22.36` to the
+- [x] 4.6 Publish and verify KRR `0.4.6`, then refresh KatanA `v0.22.36` to the
   registry artifact and rerun strict coverage, release contracts, platform
   checks, and the headless interactive HTML evidence before user review.
+- [/] 4.7 Pass KRR strict 100% line coverage and package/release gates for
+  `0.4.7`, publish and verify the adjacent patch, then validate KatanA
+  `v0.22.37` with registry-only dependencies. Before any KatanA commit, push,
+  PR, or release, present headless initial/next-slide screenshots and machine
+  assertions from the real `slides.html` document for fresh user approval.
+
+### 5. v0.4.7 Slide Deck Compatibility Follow-up
+
+- [x] 5.1 Preserve explicit line-break nodes during text extraction and wrapping,
+  continue to collapse ordinary HTML whitespace, and apply Unicode line-break
+  opportunities and display widths so Japanese text stays inside its CSS box.
+- [x] 5.2 Resolve `vw`, `vh`, `vmin`, `vmax`, and nested `min()` / `max()` /
+  `clamp()` length expressions against the active viewport in typography and
+  box geometry.
+- [x] 5.3 Parse and paint standards-style linear gradients with deterministic
+  SVG definitions, angles/directions, color stops, and safe fallback for an
+  unsupported background image.
+- [x] 5.4 Implement `Element.matches()` and `Element.closest()` through KRR's
+  existing selector engine and DOM ancestry, including detached/no-match paths.
+- [x] 5.5 Add a reduced slide-deck contract covering gradient, viewport sizing,
+  forced line breaks, class-driven visibility, pointer/keyboard navigation,
+  page indicator mutation, and post-action repaint.
+- [x] 5.6 Run the actual Google Drive `slides.html` through KatanA's headless
+  native UI, compare the initial composition with a browser oracle, and prove a
+  user action changes the active slide without a JavaScript exception.
+- [x] 5.7 Pass focused tests, the full KRR suite, AST lint, strict coverage at
+  100% with 0 uncovered lines, package verification, and publish dry-run without
+  exclusions or threshold changes.
+- [x] 5.8 Resolve definite viewport/container heights, `position`, edge insets,
+  out-of-flow absolute/fixed boxes, and flex-column sizing so slide surfaces,
+  fixed controls, and multi-column cards use their declared geometry.
+- [x] 5.9 Implement browser-compatible inline formatting for nested phrasing
+  content, per-edge border shorthands/longhands and cascade overrides,
+  percentage border radii, `min-width`, and positioned `z-index` paint order.
+  Prove these as generic CSS contracts and compare the real deck at the exact
+  KRR frame dimensions so slide controls, progress, and card accents match the
+  browser oracle without fixture-specific selectors or layout exceptions.
 
 ## Local Verification Evidence
 
-- KRR: KRR `0.4.5` is published and verified. The local `0.4.6` patch keeps the
-  in-process Rust/V8 architecture and adds structured CSS parsing/cascade,
-  browser-style event propagation, typed layout coverage, and frame scroll
-  metrics. `rtk just check`, strict `rtk just coverage` (12,561 / 12,561 lines,
-  100%, 0 uncovered), `release-verify`, `release-openspec-archive`, and the full
-  `release-check` pass. The packaged crate remains below the unchanged 10 MiB
-  limit. Only public release and registry verification remain.
+- KRR: KRR `0.4.6` is published and verified. The local `0.4.7` patch keeps the
+  in-process Rust/V8 architecture and adds browser-compatible slide layout,
+  per-character cross-platform font fallback, CSS math/gradient/position/flex
+  behavior, DOM selector methods, and input-driven repaint. The full
+  `release-check` passes with 786 tests, strict coverage at 15,482 / 15,482
+  lines (100%, 0 uncovered), package size verification, and publish dry-run.
+  Public release and registry verification remain.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
   line without a local path or Git dependency.
-- KatanA: local `v0.22.36` acceptance covers CSS, accordion, JavaScript event
-  propagation, text input, HTTP main-document and subresource acquisition,
-  fragment and link navigation, reload, resize, worker diagnostics, and image
-  controls. Registry-only coverage and release gates remain pending until KRR
-  `0.4.6` is visible on crates.io; KatanA publication remains user-gated.
+- KatanA: `v0.22.36` is published. The local `v0.22.37` candidate renders all
+  14 slides from the actual Google Drive `slides.html`, passes 43 / 43 scripted
+  actions, and changes slides by click and keyboard without a worker stop or
+  JavaScript exception. Registry-only rerun remains pending until KRR `0.4.7`
+  is visible on crates.io; KatanA publication remains user-gated.

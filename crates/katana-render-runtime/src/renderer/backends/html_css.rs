@@ -212,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn comma_separated_tag_reset_participates_in_the_author_cascade() {
+        let document = HtmlDocument::parse(
+            "<style>h1, h2, p { margin: 0; } .heading { margin-bottom: 20px; }</style><h1 class=heading>Title</h1>",
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+        let style = find_style_attribute(&nodes, "h1");
+
+        assert!(
+            style.as_ref().is_some_and(|style| {
+                style.contains("margin-top: 0")
+                    && style.contains("margin-right: 0")
+                    && style.contains("margin-bottom: 20px")
+                    && style.contains("margin-left: 0")
+            }),
+            "tag reset was missing from computed style: {style:?}"
+        );
+    }
+
+    #[test]
     fn important_inline_and_custom_properties_follow_cascade_precedence() {
         let document = HtmlDocument::parse(
             "<style>:root { --accent: #123456; } .card { color: red !important; } #card { color: blue; }</style><div id=card class=card style='color: var(--accent)'>A</div>",

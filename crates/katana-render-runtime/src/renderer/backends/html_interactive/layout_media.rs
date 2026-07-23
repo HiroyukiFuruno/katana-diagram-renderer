@@ -1,4 +1,5 @@
 use super::constants::{CONTROL_HEIGHT, MIN_LAYOUT_WIDTH};
+use super::document::attribute;
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
 use super::svg::escape_xml;
@@ -7,6 +8,9 @@ use crate::renderer::backends::html_document::{
     EMBEDDED_SVG_HEIGHT_PLACEHOLDER, EMBEDDED_SVG_MARKUP_ATTRIBUTE, EMBEDDED_SVG_WIDTH_PLACEHOLDER,
     EMBEDDED_SVG_X_PLACEHOLDER, EMBEDDED_SVG_Y_PLACEHOLDER,
 };
+
+#[path = "layout_media_png.rs"]
+mod png;
 
 const DEFAULT_IMAGE_MAX_HEIGHT: f32 = 240.0;
 const VIEW_BOX_VALUE_COUNT: usize = 4;
@@ -26,17 +30,10 @@ impl HtmlLayoutRenderer {
         let x = x + style.margin_left;
         let available_width =
             (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
-        let Some(source) = image_source(attributes) else {
+        let Some(source) = attribute(attributes, "src") else {
             return start + style.margin_bottom;
         };
-        let image_width = style
-            .box_width(available_width)
-            .min(available_width)
-            .max(MIN_LAYOUT_WIDTH);
-        let image_height = style
-            .height
-            .unwrap_or(image_width.min(DEFAULT_IMAGE_MAX_HEIGHT))
-            .max(CONTROL_HEIGHT);
+        let (image_width, image_height) = image_box_size(source, available_width, style);
         let image_y = start - self.scroll_y;
         self.svg.push_str(&format!(
             r#"<image href="{}" x="{x}" y="{image_y}" width="{image_width}" height="{image_height}" preserveAspectRatio="xMidYMid meet"/>"#,
@@ -64,11 +61,58 @@ impl HtmlLayoutRenderer {
     }
 }
 
-fn image_source(attributes: &[(String, String)]) -> Option<&str> {
-    attributes
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("src"))
-        .map(|(_, value)| value.as_str())
+pub(super) fn intrinsic_image_width(
+    node: &crate::renderer::backends::html_document::HtmlDocumentNode,
+    available_width: f32,
+    style: &CssStyle,
+) -> Option<f32> {
+    let crate::renderer::backends::html_document::HtmlDocumentNode::Element {
+        tag, attributes, ..
+    } = node
+    else {
+        return None;
+    };
+    (tag == "img")
+        .then(|| attribute(attributes, "src"))
+        .flatten()
+        .map(|source| image_box_size(source, available_width, style).0)
+}
+
+fn image_box_size(source: &str, available_width: f32, style: &CssStyle) -> (f32, f32) {
+    let natural = png::data_dimensions(source).unwrap_or((
+        available_width,
+        available_width.min(DEFAULT_IMAGE_MAX_HEIGHT),
+    ));
+    let mut width = style
+        .width
+        .map(|width| width.resolve(available_width))
+        .unwrap_or(natural.0);
+    let mut height = style
+        .height
+        .unwrap_or_else(|| natural.1 * width / natural.0);
+    let maximum_width = style
+        .max_width
+        .map(|maximum| maximum.resolve(available_width))
+        .unwrap_or(available_width)
+        .min(available_width);
+    scale_image_to_maximum(&mut width, &mut height, maximum_width, f32::INFINITY);
+    if let Some(maximum_height) = style.max_height {
+        scale_image_to_maximum(&mut width, &mut height, f32::INFINITY, maximum_height);
+    }
+    (width.max(MIN_LAYOUT_WIDTH), height.max(MIN_LAYOUT_WIDTH))
+}
+
+fn scale_image_to_maximum(
+    width: &mut f32,
+    height: &mut f32,
+    maximum_width: f32,
+    maximum_height: f32,
+) {
+    let scale = (maximum_width / *width)
+        .min(maximum_height / *height)
+        .min(1.0);
+    *width *= scale;
+    *height *= scale;
 }
 
 fn embedded_svg_size(
@@ -146,13 +190,6 @@ fn position_embedded_svg(markup: &str, x: f32, y: f32, width: f32, height: f32) 
         .replace(EMBEDDED_SVG_Y_PLACEHOLDER, &y.to_string())
         .replace(EMBEDDED_SVG_WIDTH_PLACEHOLDER, &width.to_string())
         .replace(EMBEDDED_SVG_HEIGHT_PLACEHOLDER, &height.to_string())
-}
-
-fn attribute<'a>(attributes: &'a [(String, String)], expected: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(expected))
-        .map(|(_, value)| value.as_str())
 }
 
 #[cfg(test)]

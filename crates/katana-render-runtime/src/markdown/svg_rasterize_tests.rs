@@ -60,6 +60,37 @@ fn rasterize_svg_renders_distinct_japanese_glyphs_with_system_font_fallback() ->
     Ok(())
 }
 
+#[test]
+fn html_text_measurement_uses_the_same_shaping_as_rasterization() -> Result<(), String> {
+    let family = "Noto Sans";
+    let prefix = "LibreChat fork to MCP Hub to Code Sandbox in three layers";
+    let full = "LibreChat fork to MCP Hub to Code Sandbox in three layers architecture";
+    let prefix_width = SvgRasterizeOps::measure_html_text(
+        prefix,
+        family,
+        42.842,
+        true,
+        false,
+        0.42842,
+        Some(r#""palt" 1"#),
+    )
+    .map_err(|error| error.to_string())?;
+    let full_width = SvgRasterizeOps::measure_html_text(
+        full,
+        family,
+        42.842,
+        true,
+        false,
+        0.42842,
+        Some(r#""palt" 1"#),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(prefix_width <= 1230.0, "prefix width: {prefix_width}");
+    assert!(full_width > 1230.0, "full width: {full_width}");
+    Ok(())
+}
+
 fn distinct_cell_count(
     image: &[u8],
     image_height: u32,

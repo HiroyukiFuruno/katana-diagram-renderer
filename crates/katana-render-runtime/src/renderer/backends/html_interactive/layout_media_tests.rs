@@ -1,5 +1,7 @@
 use super::super::layout::HtmlLayoutRenderer;
-use super::{embedded_svg_size, parse_svg_length, parse_view_box, position_embedded_svg};
+use super::{
+    embedded_svg_size, image_box_size, parse_svg_length, parse_view_box, position_embedded_svg,
+};
 use crate::renderer::backends::html_browser::HtmlBrowserViewport;
 use crate::renderer::backends::html_document::HtmlDocumentNode;
 use crate::renderer::backends::html_document::{
@@ -26,6 +28,52 @@ fn image_without_a_source_does_not_emit_svg_image_content() -> TestResult {
 
     assert!(!layout.svg.contains("<image"));
     Ok(())
+}
+
+#[test]
+fn data_png_uses_natural_dimensions_instead_of_the_default_image_box() -> TestResult {
+    let viewport = HtmlBrowserViewport::new(TEST_VIEWPORT_WIDTH, TEST_VIEWPORT_HEIGHT, 1.0)
+        .map_err(|error| error.to_string())?;
+    let nodes = vec![HtmlDocumentNode::Element {
+        node_id: 1,
+        tag: "img".to_string(),
+        attributes: vec![(
+            "src".to_string(),
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".to_string(),
+        )],
+        children: Vec::new(),
+    }];
+    let layout = HtmlLayoutRenderer::render(&nodes, viewport, 0.0, &HashMap::new(), None)?;
+
+    assert!(
+        layout.svg.contains(r#"width="1" height="1""#),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn data_png_preserves_natural_ratio_under_width_and_height_constraints() {
+    let browser_default =
+        crate::renderer::backends::html_interactive::style::CssStyle::browser_default();
+    let constrained = crate::renderer::backends::html_interactive::style::CssStyle::from_attributes(
+        &[(
+            "style".to_string(),
+            "max-width: 100%; max-height: 400px".to_string(),
+        )],
+        &browser_default,
+    );
+
+    let (width, height) = image_box_size(
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAACBAAAAfd",
+        1_200.0,
+        &constrained,
+    );
+
+    assert!((width - 410.134_12).abs() < 0.001, "{width}");
+    assert_eq!(height, 400.0);
+    assert!((width / height - 2_064.0 / 2_013.0).abs() < 0.0001);
 }
 
 #[test]

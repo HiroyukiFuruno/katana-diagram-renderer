@@ -49,6 +49,17 @@ const __krrListenerOptions = (options) => ({
   passive: Boolean(typeof options === "object" && options?.passive),
 });
 const __krrEventTargetListeners = new WeakMap();
+const __krrEventHandlers = new WeakMap();
+const __krrSyncEventTarget = (target, type, entries) => {
+  if (!target.__krrNodeId) return;
+  const handler = __krrEventHandlers.get(target)?.get(String(type));
+  __krrNativeDom(
+    "setEventTarget",
+    target.__krrNodeId,
+    String(type),
+    String(entries.length > 0 || typeof handler === "function"),
+  );
+};
 const __krrDispatchListeners = (listeners, target, event, capture) => {
   const entries = listeners.get(String(event.type)) || [];
   for (const entry of [...entries]) {
@@ -64,6 +75,7 @@ const __krrDispatchListeners = (listeners, target, event, capture) => {
     }
     if (event.__krrImmediatePropagationStopped) break;
   }
+  __krrSyncEventTarget(target, event.type, entries);
 };
 const __krrDispatchHandler = (target, event) => {
   if (event.__krrImmediatePropagationStopped) return;
@@ -123,6 +135,7 @@ const __krrInstallEventTarget = (target) => {
           });
           listeners.set(type, entries);
         }
+        __krrSyncEventTarget(target, type, entries);
       },
     },
     removeEventListener: {
@@ -135,6 +148,7 @@ const __krrInstallEventTarget = (target) => {
           (entry) => entry.callback === callback && entry.capture === capture,
         );
         if (index >= 0) entries.splice(index, 1);
+        __krrSyncEventTarget(target, type, entries);
       },
     },
     dispatchEvent: {
@@ -177,6 +191,20 @@ const __krrElement = (nodeId) => {
   return element;
 };
 const __krrElementPrototype = {
+  get onclick() {
+    return __krrEventHandlers.get(this)?.get("click") ?? null;
+  },
+  set onclick(value) {
+    let handlers = __krrEventHandlers.get(this);
+    if (!handlers) {
+      handlers = new Map();
+      __krrEventHandlers.set(this, handlers);
+    }
+    if (value === null || value === undefined) handlers.delete("click");
+    else handlers.set("click", value);
+    const listeners = __krrEventTargetListeners.get(this) || new Map();
+    __krrSyncEventTarget(this, "click", listeners.get("click") || []);
+  },
   get textContent() {
     return __krrNativeDom("textContent", this.__krrNodeId);
   },
@@ -293,6 +321,12 @@ const __krrElementPrototype = {
   },
   remove() {
     __krrNativeDom("remove", this.__krrNodeId);
+  },
+  matches(selector) {
+    return __krrNativeDom("closest", this.__krrNodeId, String(selector)) === this.__krrNodeId;
+  },
+  closest(selector) {
+    return __krrElement(__krrNativeDom("closest", this.__krrNodeId, String(selector)));
   },
 };
 const __krrInlineHandler = (target, event) => {

@@ -35,6 +35,7 @@ jni = { workspace = true }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 resvg = { workspace = true }
+rustybuzz = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -48,6 +49,8 @@ xmltree = { workspace = true }
 percent-encoding = { workspace = true }
 taffy = { workspace = true }
 cssparser = { workspace = true }
+unicode-linebreak = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

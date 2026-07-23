@@ -2,7 +2,7 @@ use super::super::html_document::HtmlDocumentNode;
 use super::constants::{
     CONTROL_HEIGHT, MIN_LAYOUT_WIDTH, TABLE_CELL_CONTENT_INSET, TABLE_CELL_PADDING,
 };
-use super::document::{TableCell, node_text, table_rows, wrap_text};
+use super::document::{TableCell, node_text, table_rows, wrap_text_with_style};
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
 use super::types::TableCellLayout;
@@ -69,10 +69,10 @@ impl HtmlLayoutRenderer {
     fn render_table_cell(&mut self, cell: &TableCell, layout: TableCellLayout<'_>) {
         let style = table_cell_style(cell, layout.row_index, layout.style);
         self.paint_box(layout.x, layout.y, layout.width, layout.height, &style);
-        let lines = wrap_text(
+        let lines = wrap_text_with_style(
             &node_text(&cell.children),
             layout.width - TABLE_CELL_CONTENT_INSET,
-            style.font_size,
+            &style,
         );
         self.paint_text_lines(
             &lines,
@@ -91,10 +91,10 @@ fn table_row_height(row: &[TableCell], column_width: f32, style: &CssStyle) -> f
 }
 
 fn table_cell_height(cell: &TableCell, column_width: f32, style: &CssStyle) -> f32 {
-    wrap_text(
+    wrap_text_with_style(
         &node_text(&cell.children),
         column_width - TABLE_CELL_CONTENT_INSET,
-        style.font_size,
+        style,
     )
     .len() as f32
         * style.line_height
@@ -103,14 +103,14 @@ fn table_cell_height(cell: &TableCell, column_width: f32, style: &CssStyle) -> f
 
 fn table_cell_style(cell: &TableCell, row_index: usize, style: &CssStyle) -> CssStyle {
     let is_header = row_index == 0 && cell.tag == "th";
-    let mut style = CssStyle::from_attributes(&cell.attributes, style);
+    let mut style = CssStyle::from_element(&cell.tag, &cell.attributes, style);
     if !style.explicit_background && is_header {
         style.background = Some("#0b74c7".to_string());
     }
     if !style.explicit_color && is_header {
         style.color = "#ffffff".to_string();
     }
-    if style.border.is_none() {
+    if !style.has_any_border() {
         style.border = Some("#c8cdd2".to_string());
         style.border_width = 1.0;
     }

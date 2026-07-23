@@ -25,8 +25,18 @@ impl HtmlInteractiveSession {
     }
 
     fn press_target(&mut self, x: f32, y: f32, button: u8) {
+        let hit = self.hit_target_at(x, y).cloned();
+        let target_count = self.hit_targets.len();
+        tracing::debug!(
+            physical_x = x,
+            physical_y = y,
+            device_scale_factor = self.viewport.device_scale_factor,
+            target_count,
+            target = ?hit,
+            "HTML pointer down hit-test"
+        );
         self.pressed_target = (button == LEFT_MOUSE_BUTTON)
-            .then(|| self.hit_target_at(x, y).map(|target| target.node_id))
+            .then(|| hit.map(|target| target.node_id))
             .flatten();
     }
 
@@ -46,7 +56,15 @@ impl HtmlInteractiveSession {
     }
 
     fn activate_target_at(&mut self, x: f32, y: f32) -> Result<(), HtmlBrowserError> {
-        let Some(target) = self.hit_target_at(x, y).cloned() else {
+        let hit = self.hit_target_at(x, y).cloned();
+        tracing::debug!(
+            physical_x = x,
+            physical_y = y,
+            pressed_target = ?self.pressed_target,
+            target = ?hit,
+            "HTML pointer up hit-test"
+        );
+        let Some(target) = hit else {
             if self.pressed_target.is_none() {
                 self.blur_focused_input()?;
             }

@@ -8,14 +8,13 @@ impl HtmlLayoutRenderer {
     pub(super) fn render_flow_node(
         &mut self,
         node: &HtmlDocumentNode,
-        x: f32,
-        y: f32,
-        width: f32,
-        inherited: &CssStyle,
-        details: DetailsContext,
+        layout: LayoutContext<'_>,
+        assigned_height: Option<f32>,
     ) -> f32 {
         match node {
-            HtmlDocumentNode::Text(text) => self.render_text(text, x, y, width, inherited),
+            HtmlDocumentNode::Text(text) => {
+                self.render_text(text, layout.x, layout.y, layout.width, layout.style)
+            }
             HtmlDocumentNode::Element {
                 node_id,
                 tag,
@@ -28,7 +27,8 @@ impl HtmlLayoutRenderer {
                     attributes,
                     children,
                 },
-                LayoutContext::new(x, y, width, inherited, details),
+                layout,
+                assigned_height,
             ),
         }
     }
@@ -37,9 +37,13 @@ impl HtmlLayoutRenderer {
         &mut self,
         element: ElementRenderContext<'_>,
         layout: LayoutContext<'_>,
+        assigned_height: Option<f32>,
     ) -> f32 {
-        let mut style = CssStyle::from_attributes(element.attributes, layout.style);
-        style.consume_assigned_flow_width();
+        let mut style = CssStyle::from_element(element.tag, element.attributes, layout.style);
+        style.assign_outer_width(layout.width);
+        if let Some(height) = assigned_height {
+            style.assign_margin_box_height(height);
+        }
         self.render_styled_element(
             element,
             LayoutContext {
@@ -62,7 +66,11 @@ impl HtmlLayoutRenderer {
             device_scale_factor: 1.0,
         };
         let mut renderer = Self::new(viewport, 0.0, &self.input_values, self.focused_input);
-        let bottom = renderer.render_flow_node(node, 0.0, 0.0, width, inherited, details);
+        let bottom = renderer.render_flow_node(
+            node,
+            LayoutContext::new(0.0, 0.0, width, inherited, details),
+            None,
+        );
         renderer.ensure_layout_succeeded()?;
         Ok(bottom.max(1.0))
     }

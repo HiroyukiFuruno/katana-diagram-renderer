@@ -1,14 +1,21 @@
-use super::value::{css_font_size, css_relative_px, is_bold};
+use super::value::{css_font_size, css_resolved_px, is_bold};
 use super::{CssStyle, CssTextAlign};
 
 impl CssStyle {
     pub(super) fn apply_typography_property(&mut self, name: &str, value: &str) -> bool {
         match name.to_ascii_lowercase().as_str() {
             "font-size" => {
-                self.font_size = css_font_size(value, self.font_size).unwrap_or(self.font_size);
+                self.font_size = css_font_size(
+                    value,
+                    self.font_size,
+                    self.viewport_width,
+                    self.viewport_height,
+                )
+                .unwrap_or(self.font_size);
             }
             "font-weight" => self.bold = is_bold(value),
             "font-family" => self.apply_font_family(value),
+            "font-feature-settings" => self.apply_font_feature_settings(value),
             "font-style" => {
                 self.italic = matches!(
                     value.trim().to_ascii_lowercase().as_str(),
@@ -30,6 +37,16 @@ impl CssStyle {
         }
     }
 
+    fn apply_font_feature_settings(&mut self, value: &str) {
+        let settings = value.trim();
+        self.font_feature_settings =
+            if settings.is_empty() || settings.eq_ignore_ascii_case("normal") {
+                None
+            } else {
+                Some(settings.to_string())
+            };
+    }
+
     fn apply_text_align(&mut self, value: &str) {
         self.text_align = match value.trim().to_ascii_lowercase().as_str() {
             "center" => CssTextAlign::Center,
@@ -43,8 +60,14 @@ impl CssStyle {
         if value.trim().eq_ignore_ascii_case("normal") {
             self.letter_spacing = 0.0;
         } else {
-            self.letter_spacing =
-                css_relative_px(value, self.font_size, true).unwrap_or(self.letter_spacing);
+            self.letter_spacing = css_resolved_px(
+                value,
+                self.font_size,
+                self.viewport_width,
+                self.viewport_height,
+                true,
+            )
+            .unwrap_or(self.letter_spacing);
         }
     }
 }
@@ -74,6 +97,21 @@ mod tests {
         style.apply_typography_property("font-family", "  ");
 
         assert_eq!(style.font_family, "Noto Sans, sans-serif");
+    }
+
+    #[test]
+    fn font_feature_settings_are_parsed_reset_and_inherited() {
+        let mut style = CssStyle::browser_default();
+        style.apply_typography_property("font-feature-settings", r#""palt" 1"#);
+        assert_eq!(style.font_feature_settings.as_deref(), Some(r#""palt" 1"#));
+
+        let inherited = CssStyle::from_attributes(&[], &style);
+        assert_eq!(inherited.font_feature_settings, style.font_feature_settings);
+
+        style.apply_typography_property("font-feature-settings", "normal");
+        assert_eq!(style.font_feature_settings, None);
+        style.apply_typography_property("font-feature-settings", "  ");
+        assert_eq!(style.font_feature_settings, None);
     }
 
     #[test]
