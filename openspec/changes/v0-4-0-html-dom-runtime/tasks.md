@@ -139,11 +139,11 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 
 - KRR: KRR `0.4.6` is published and verified. The local `0.4.7` patch keeps the
   in-process Rust/V8 architecture and adds browser-compatible slide layout,
-  font shaping, CSS math/gradient/position/flex behavior, DOM selector methods,
-  and input-driven repaint. The full `release-check` passes with 780 tests,
-  strict coverage at 15,312 / 15,312 lines (100%, 0 uncovered), package size
-  verification, and publish dry-run. Public release and registry verification
-  remain.
+  per-character cross-platform font fallback, CSS math/gradient/position/flex
+  behavior, DOM selector methods, and input-driven repaint. The full
+  `release-check` passes with 786 tests, strict coverage at 15,482 / 15,482
+  lines (100%, 0 uncovered), package size verification, and publish dry-run.
+  Public release and registry verification remain.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
   line without a local path or Git dependency.
 - KatanA: `v0.22.36` is published. The local `v0.22.37` candidate renders all

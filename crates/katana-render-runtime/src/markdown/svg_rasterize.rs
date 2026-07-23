@@ -9,6 +9,8 @@ use tiny_skia::Pixmap;
 mod font;
 #[path = "svg_rasterize_text.rs"]
 mod text;
+#[path = "svg_rasterize_text_shaping.rs"]
+mod text_shaping;
 #[path = "svg_rasterize_types.rs"]
 mod types;
 

@@ -1,5 +1,6 @@
 use super::SvgRasterizeError;
-use super::font::{html_font_db, html_rasterizer_options};
+use super::font::html_rasterizer_options;
+use super::text_shaping::shaped_text_width;
 use resvg::usvg;
 
 const BOLD_FONT_WEIGHT: u16 = 700;
@@ -33,114 +34,6 @@ pub(super) fn measure_html_text(
         || fallback_text_width(text, font_family, font_size, bold, italic, letter_spacing),
         Ok,
     )
-}
-
-fn shaped_text_width(
-    text: &str,
-    font_family: &str,
-    font_size: f32,
-    bold: bool,
-    italic: bool,
-    letter_spacing: f32,
-    font_feature_settings: Option<&str>,
-) -> Option<f32> {
-    let database = html_font_db();
-    let face_id = matching_font_face(&database, font_family, bold, italic)?;
-    shape_text_with_face(
-        &database,
-        face_id,
-        text,
-        font_size,
-        letter_spacing,
-        font_feature_settings,
-    )
-}
-
-fn matching_font_face(
-    database: &usvg::fontdb::Database,
-    font_family: &str,
-    bold: bool,
-    italic: bool,
-) -> Option<usvg::fontdb::ID> {
-    let names = css_font_family_names(font_family);
-    let families = names
-        .iter()
-        .map(|name| fontdb_family(name))
-        .collect::<Vec<_>>();
-    database.query(&usvg::fontdb::Query {
-        families: &families,
-        weight: usvg::fontdb::Weight(if bold {
-            BOLD_FONT_WEIGHT
-        } else {
-            NORMAL_FONT_WEIGHT
-        }),
-        stretch: usvg::fontdb::Stretch::Normal,
-        style: if italic {
-            usvg::fontdb::Style::Italic
-        } else {
-            usvg::fontdb::Style::Normal
-        },
-    })
-}
-
-fn shape_text_with_face(
-    database: &usvg::fontdb::Database,
-    face_id: usvg::fontdb::ID,
-    text: &str,
-    font_size: f32,
-    letter_spacing: f32,
-    font_feature_settings: Option<&str>,
-) -> Option<f32> {
-    database
-        .with_face_data(face_id, |data, face_index| {
-            let face = rustybuzz::Face::from_slice(data, face_index)?;
-            let mut buffer = rustybuzz::UnicodeBuffer::new();
-            buffer.push_str(text);
-            buffer.guess_segment_properties();
-            let glyphs =
-                rustybuzz::shape(&face, &rustybuzz_features(font_feature_settings), buffer);
-            let advance = glyphs
-                .glyph_positions()
-                .iter()
-                .map(|position| position.x_advance as f32)
-                .sum::<f32>();
-            let spacing = text.chars().count().saturating_sub(1) as f32 * letter_spacing;
-            Some(advance * font_size / face.units_per_em() as f32 + spacing)
-        })
-        .flatten()
-}
-
-fn css_font_family_names(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .map(|name| name.trim_matches(['\'', '"']).to_string())
-        .filter(|name| !name.is_empty())
-        .collect()
-}
-
-fn fontdb_family(name: &str) -> usvg::fontdb::Family<'_> {
-    match name.to_ascii_lowercase().as_str() {
-        "serif" => usvg::fontdb::Family::Serif,
-        "sans-serif" | "system-ui" => usvg::fontdb::Family::SansSerif,
-        "cursive" => usvg::fontdb::Family::Cursive,
-        "fantasy" => usvg::fontdb::Family::Fantasy,
-        "monospace" => usvg::fontdb::Family::Monospace,
-        _ => usvg::fontdb::Family::Name(name),
-    }
-}
-
-fn rustybuzz_features(settings: Option<&str>) -> Vec<rustybuzz::Feature> {
-    settings
-        .into_iter()
-        .flat_map(|settings| settings.split(','))
-        .filter_map(|setting| {
-            let mut parts = setting.split_whitespace();
-            let tag = parts.next()?.trim_matches(['\'', '"']);
-            let value = parts.next().unwrap_or("1");
-            format!("{tag}={value}").parse().ok()
-        })
-        .collect()
 }
 
 fn fallback_text_width(

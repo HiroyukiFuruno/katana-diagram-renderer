@@ -2,12 +2,12 @@ use resvg::usvg;
 
 const BUNDLED_SANS_SERIF_FONT: &[u8] = include_bytes!("../../assets/fonts/NotoSans-Regular.ttf");
 const SANS_SERIF_FAMILIES: &[&str] = &[
+    "Noto Sans",
     "Noto Sans JP",
     "Noto Sans CJK JP",
     "Hiragino Sans",
     "Yu Gothic",
     "Meiryo",
-    "Noto Sans",
     "Arial",
     "DejaVu Sans",
     "Liberation Sans",
@@ -137,6 +137,26 @@ mod tests {
                     .is_some()
             );
         }
+    }
+
+    #[test]
+    fn generic_sans_serif_prefers_the_bundled_font() {
+        let mut database = usvg::fontdb::Database::new();
+        database.load_font_data(BUNDLED_SANS_SERIF_FONT.to_vec());
+        configure_generic_families(&mut database);
+        let face = database
+            .query(&usvg::fontdb::Query {
+                families: &[usvg::fontdb::Family::SansSerif],
+                weight: usvg::fontdb::Weight::NORMAL,
+                stretch: usvg::fontdb::Stretch::Normal,
+                style: usvg::fontdb::Style::Normal,
+            })
+            .and_then(|id| database.face(id));
+
+        assert!(face.is_some_and(|face| {
+            face.families.iter().any(|family| family.0 == "Noto Sans")
+                && matches!(face.source, usvg::fontdb::Source::Binary(_))
+        }));
     }
 
     #[test]
