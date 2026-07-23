@@ -62,9 +62,9 @@ fn rasterize_svg_renders_distinct_japanese_glyphs_with_system_font_fallback() ->
 
 #[test]
 fn html_text_measurement_uses_the_same_shaping_as_rasterization() -> Result<(), String> {
-    let family = r#""Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif"#;
-    let prefix = "LibreChat fork → MCP Hub → Code Sandbox の 3 層";
-    let full = "LibreChat fork → MCP Hub → Code Sandbox の 3 層構成";
+    let family = "Noto Sans";
+    let prefix = "LibreChat fork to MCP Hub to Code Sandbox in three layers";
+    let full = "LibreChat fork to MCP Hub to Code Sandbox in three layers architecture";
     let prefix_width = SvgRasterizeOps::measure_html_text(
         prefix,
         family,

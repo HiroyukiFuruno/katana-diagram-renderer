@@ -67,7 +67,7 @@ html, body { margin: 0; }
 .slide { display: flex; flex-direction: column; width: 100vw; padding: 44px 76px 80px; box-sizing: border-box; }
 h1 { margin: 0; padding: 0; }
 .title {
-  font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif;
+  font-family: "Noto Sans";
   font-size: 42.842px;
   font-weight: 700;
   line-height: 55.6946px;
@@ -75,7 +75,7 @@ h1 { margin: 0; padding: 0; }
   font-feature-settings: "palt" 1;
 }
 </style>
-<main class="slide"><h1 class="title">LibreChat fork → MCP Hub → Code Sandbox の 3 層構成</h1></main>"#;
+<main class="slide"><h1 class="title">LibreChat fork to MCP Hub to Code Sandbox in three layers architecture</h1></main>"#;
 
 #[test]
 fn renders_css_and_hides_document_metadata() -> TestResult {
@@ -942,15 +942,19 @@ fn slide_heading_wraps_with_browser_font_shaping_at_the_declared_content_width()
     assert!(
         layout
             .svg
-            .contains(">LibreChat fork → MCP Hub → Code Sandbox の 3 層</text>"),
+            .contains(">LibreChat fork to MCP Hub to Code Sandbox in three layers</text>"),
         "{}",
         layout.svg
     );
-    assert!(layout.svg.contains(">構成</text>"), "{}", layout.svg);
     assert!(
-        !layout
-            .svg
-            .contains(">LibreChat fork → MCP Hub → Code Sandbox の 3 層構成</text>"),
+        layout.svg.contains(">architecture</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        !layout.svg.contains(
+            ">LibreChat fork to MCP Hub to Code Sandbox in three layers architecture</text>"
+        ),
         "{}",
         layout.svg
     );

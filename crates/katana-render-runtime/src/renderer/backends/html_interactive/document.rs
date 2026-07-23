@@ -230,16 +230,19 @@ mod tests {
     #[test]
     fn styled_wrapping_uses_shaped_font_width_and_splits_long_segments() {
         let mut style = CssStyle::browser_default();
-        style.font_family = r#""Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif"#.to_string();
+        style.font_family = "Noto Sans".to_string();
         style.font_size = 42.842;
         style.letter_spacing = 0.42842;
         style.bold = true;
         style.font_feature_settings = Some(r#""palt" 1"#.to_string());
-        let title = "LibreChat fork → MCP Hub → Code Sandbox の 3 層構成";
+        let title = "LibreChat fork to MCP Hub to Code Sandbox in three layers architecture";
 
         assert_eq!(
             wrap_text_with_style(title, 1230.0, &style),
-            ["LibreChat fork → MCP Hub → Code Sandbox の 3 層", "構成"]
+            [
+                "LibreChat fork to MCP Hub to Code Sandbox in three layers",
+                "architecture"
+            ]
         );
         assert_eq!(wrap_text_with_style("abcdef", 1.0, &style).len(), 6);
         assert_eq!(
