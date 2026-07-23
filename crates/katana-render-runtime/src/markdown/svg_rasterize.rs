@@ -7,20 +7,16 @@ use tiny_skia::Pixmap;
 
 #[path = "svg_rasterize_font.rs"]
 mod font;
+#[path = "svg_rasterize_text.rs"]
+mod text;
+#[path = "svg_rasterize_types.rs"]
+mod types;
 
 use font::{html_rasterizer_options, rasterizer_options};
+pub use types::{RasterizedSvg, SvgRasterizeError};
 
 const MAX_RASTERIZED_SVG_EDGE: f32 = 8192.0;
 const LIGHT_DARK_FUNCTION: &str = "light-dark(";
-
-#[derive(Debug, Clone)]
-pub struct RasterizedSvg {
-    pub width: u32,
-    pub height: u32,
-    pub display_width: f32,
-    pub display_height: f32,
-    pub rgba: Vec<u8>,
-}
 
 pub struct SvgRasterizeOps;
 
@@ -40,6 +36,26 @@ impl SvgRasterizeOps {
         scale: f32,
     ) -> Result<RasterizedSvg, SvgRasterizeError> {
         Self::rasterize_with_options(svg_text, scale, &html_rasterizer_options())
+    }
+
+    pub(crate) fn measure_html_text(
+        text: &str,
+        font_family: &str,
+        font_size: f32,
+        bold: bool,
+        italic: bool,
+        letter_spacing: f32,
+        font_feature_settings: Option<&str>,
+    ) -> Result<f32, SvgRasterizeError> {
+        text::measure_html_text(
+            text,
+            font_family,
+            font_size,
+            bold,
+            italic,
+            letter_spacing,
+            font_feature_settings,
+        )
     }
 
     fn rasterize_with_options(
@@ -166,14 +182,6 @@ fn effective_scale(width: f32, height: f32, requested_scale: f32) -> f32 {
     let width_scale = MAX_RASTERIZED_SVG_EDGE / width.max(1.0);
     let height_scale = MAX_RASTERIZED_SVG_EDGE / height.max(1.0);
     positive_scale.min(width_scale).min(height_scale)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SvgRasterizeError {
-    #[error("Failed to parse SVG: {0}")]
-    ParseFailed(String),
-    #[error("Failed to rasterize SVG: {0}")]
-    RasterizeFailed(String),
 }
 
 #[cfg(test)]

@@ -8,9 +8,17 @@ use crate::renderer::backends::html_document::HtmlDocumentNode;
 pub(super) type TestResult<T = ()> = Result<T, String>;
 
 pub(super) fn start(html: &str) -> TestResult<HtmlInteractiveSession> {
+    start_with_viewport(html, 320, 240)
+}
+
+pub(super) fn start_with_viewport(
+    html: &str,
+    width: u32,
+    height: u32,
+) -> TestResult<HtmlInteractiveSession> {
     let source =
         HtmlBrowserSource::new(html, "https://example.test/docs/index.html").map_err(to_string)?;
-    let viewport = HtmlBrowserViewport::new(320, 240, 1.0).map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(width, height, 1.0).map_err(to_string)?;
     HtmlInteractiveSession::start(source, viewport).map_err(to_string)
 }
 

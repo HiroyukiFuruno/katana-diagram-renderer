@@ -1,151 +1,156 @@
-use super::super::html_document::HtmlDocumentNode;
-use super::constants::{MIN_LAYOUT_WIDTH, TEXT_CHARACTER_WIDTH_FACTOR};
-use std::collections::HashMap;
+#[cfg(test)]
+use super::constants::TEXT_CHARACTER_WIDTH_FACTOR;
+use super::constants::{LAYOUT_FLOAT_EPSILON, MIN_LAYOUT_WIDTH};
+use super::style::CssStyle;
+use super::text_metrics::text_width;
+use unicode_linebreak::linebreaks;
+use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone)]
-pub(super) struct TableCell {
-    pub(super) tag: String,
-    pub(super) attributes: Vec<(String, String)>,
-    pub(super) children: Vec<HtmlDocumentNode>,
-}
+#[path = "document_nodes.rs"]
+mod nodes;
 
-pub(super) fn table_rows(nodes: &[HtmlDocumentNode]) -> Vec<Vec<TableCell>> {
-    let mut rows = Vec::new();
-    collect_table_rows(nodes, &mut rows);
-    rows
-}
+#[cfg(test)]
+use nodes::is_input_tag;
+pub(super) use nodes::{
+    TableCell, attribute, input_initial_value, node_text, seed_input_values, table_rows,
+};
 
-fn collect_table_rows(nodes: &[HtmlDocumentNode], rows: &mut Vec<Vec<TableCell>>) {
-    for node in nodes {
-        let HtmlDocumentNode::Element { tag, children, .. } = node else {
-            continue;
-        };
-        if tag == "tr" {
-            push_table_row(children, rows);
-            continue;
-        }
-        collect_table_rows(children, rows);
-    }
-}
-
-fn push_table_row(children: &[HtmlDocumentNode], rows: &mut Vec<Vec<TableCell>>) {
-    let cells = children.iter().filter_map(table_cell).collect::<Vec<_>>();
-    if !cells.is_empty() {
-        rows.push(cells);
-    }
-}
-
-fn table_cell(node: &HtmlDocumentNode) -> Option<TableCell> {
-    let HtmlDocumentNode::Element {
-        tag,
-        attributes,
-        children,
-        ..
-    } = node
-    else {
-        return None;
-    };
-    (tag == "th" || tag == "td").then(|| TableCell {
-        tag: tag.clone(),
-        attributes: attributes.clone(),
-        children: children.clone(),
-    })
-}
-
-pub(super) fn attribute<'a>(attributes: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
-}
-
-pub(super) fn node_text(nodes: &[HtmlDocumentNode]) -> String {
-    let mut text = String::new();
-    for node in nodes {
-        append_node_text(node, &mut text);
-    }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn append_node_text(node: &HtmlDocumentNode, text: &mut String) {
-    match node {
-        HtmlDocumentNode::Text(value) => text.push_str(value),
-        HtmlDocumentNode::Element { children, .. } => {
-            for child in children {
-                append_node_text(child, text);
-            }
-        }
-    }
-}
-
-pub(super) fn seed_input_values(nodes: &[HtmlDocumentNode], values: &mut HashMap<u64, String>) {
-    for node in nodes {
-        seed_node_input_value(node, values);
-    }
-}
-
-fn seed_node_input_value(node: &HtmlDocumentNode, values: &mut HashMap<u64, String>) {
-    let HtmlDocumentNode::Element {
-        node_id,
-        tag,
-        attributes,
-        children,
-    } = node
-    else {
-        return;
-    };
-    if is_input_tag(tag) && !values.contains_key(node_id) {
-        values.insert(*node_id, input_initial_value(attributes));
-    }
-    seed_input_values(children, values);
-}
-
-pub(super) fn is_input_tag(tag: &str) -> bool {
-    tag == "input" || tag == "textarea"
-}
-
-pub(super) fn input_initial_value(attributes: &[(String, String)]) -> String {
-    match attribute(attributes, "value") {
-        Some(value) => value.to_string(),
-        None => String::new(),
-    }
-}
-
+#[cfg(test)]
 pub(super) fn wrap_text(text: &str, width: f32, font_size: f32) -> Vec<String> {
-    let capacity = text_capacity(width, font_size);
+    wrap_text_with_factor(text, width, font_size, TEXT_CHARACTER_WIDTH_FACTOR)
+}
+
+#[cfg(test)]
+pub(super) fn wrap_text_with_factor(
+    text: &str,
+    width: f32,
+    font_size: f32,
+    width_factor: f32,
+) -> Vec<String> {
+    let capacity = text_capacity(width, font_size, width_factor);
     let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        append_word(word, capacity, &mut line, &mut lines);
+    for forced_line in text.split('\n') {
+        wrap_forced_line(forced_line, capacity, &mut lines);
     }
-    finish_line(line, &mut lines);
     lines
 }
 
-fn text_capacity(width: f32, font_size: f32) -> usize {
-    (width / (font_size * TEXT_CHARACTER_WIDTH_FACTOR))
-        .floor()
-        .max(MIN_LAYOUT_WIDTH) as usize
-}
-
-fn append_word(word: &str, capacity: usize, line: &mut String, lines: &mut Vec<String>) {
-    if line.is_empty() {
-        line.push_str(word);
-    } else if line.chars().count() + word.chars().count() < capacity {
-        line.push(' ');
-        line.push_str(word);
+#[cfg(test)]
+fn text_capacity(width: f32, font_size: f32, width_factor: f32) -> usize {
+    let column_width = font_size * width_factor;
+    let columns = width / column_width;
+    let nearest = columns.round();
+    let pixel_rounding_tolerance = 1.0 / column_width;
+    let stable_columns = if (columns - nearest).abs() <= pixel_rounding_tolerance {
+        nearest
     } else {
-        lines.push(std::mem::take(line));
-        line.push_str(word);
-    }
+        columns.floor()
+    };
+    stable_columns.max(MIN_LAYOUT_WIDTH) as usize
 }
 
-fn finish_line(line: String, lines: &mut Vec<String>) {
-    if line.is_empty() {
+#[cfg(test)]
+fn wrap_forced_line(text: &str, capacity: usize, lines: &mut Vec<String>) {
+    if text.is_empty() {
         lines.push(String::new());
-    } else {
-        lines.push(line);
+        return;
     }
+
+    let mut line = String::new();
+    let mut segment_start = 0;
+    for (segment_end, _) in linebreaks(text) {
+        let segment = &text[segment_start..segment_end];
+        append_breakable_segment(segment, capacity, &mut line, lines);
+        segment_start = segment_end;
+    }
+    push_wrapped_line(line, lines);
+}
+
+#[cfg(test)]
+fn append_breakable_segment(
+    segment: &str,
+    capacity: usize,
+    line: &mut String,
+    lines: &mut Vec<String>,
+) {
+    if !line.is_empty() && text_display_columns(line) + text_display_columns(segment) > capacity {
+        lines.push(std::mem::take(line).trim_end().to_string());
+        line.push_str(segment.trim_start());
+        return;
+    }
+    line.push_str(segment);
+}
+
+#[cfg(test)]
+fn push_wrapped_line(line: String, lines: &mut Vec<String>) {
+    lines.push(line.trim_end().to_string());
+}
+
+pub(super) fn wrap_text_with_style(text: &str, width: f32, style: &CssStyle) -> Vec<String> {
+    wrap_text_with_initial_width(text, width, width, style)
+}
+
+pub(super) fn wrap_text_with_initial_width(
+    text: &str,
+    initial_width: f32,
+    continuing_width: f32,
+    style: &CssStyle,
+) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut remaining = text;
+    let mut width = initial_width.max(MIN_LAYOUT_WIDTH);
+    while !remaining.is_empty() {
+        let (line, consumed) = take_styled_line(remaining, width, style);
+        lines.push(line);
+        remaining = &remaining[consumed..];
+        width = continuing_width.max(MIN_LAYOUT_WIDTH);
+    }
+    if text.ends_with('\n') {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn take_styled_line(text: &str, width: f32, style: &CssStyle) -> (String, usize) {
+    if text.starts_with('\n') {
+        return (String::new(), 1);
+    }
+    let forced_end = text.find('\n').unwrap_or(text.len());
+    let forced_line = &text[..forced_end];
+    let mut fitted_end = 0;
+    for (segment_end, _) in linebreaks(forced_line) {
+        if text_width(&forced_line[..segment_end], style) > width + LAYOUT_FLOAT_EPSILON {
+            break;
+        }
+        fitted_end = segment_end;
+    }
+    if fitted_end == forced_line.len() {
+        let consumed = forced_end + usize::from(forced_end < text.len());
+        return (forced_line.trim_end().to_string(), consumed);
+    }
+    if fitted_end == 0 {
+        fitted_end = fitted_character_end(forced_line, width, style);
+    }
+    (forced_line[..fitted_end].trim_end().to_string(), fitted_end)
+}
+
+fn fitted_character_end(text: &str, width: f32, style: &CssStyle) -> usize {
+    let mut fitted = 0;
+    for (index, character) in text.char_indices() {
+        let end = index + character.len_utf8();
+        if fitted > 0 && text_width(&text[..end], style) > width + LAYOUT_FLOAT_EPSILON {
+            break;
+        }
+        fitted = end;
+    }
+    fitted.max(text.chars().next().map_or(0, char::len_utf8))
+}
+
+pub(super) fn text_display_columns(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 pub(super) fn css_px(value: &str) -> Option<f32> {
@@ -182,11 +187,78 @@ fn is_named_border_color(value: &&str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::backends::html_document::HtmlDocumentNode;
+    use std::collections::HashMap;
 
     #[test]
     fn structural_helpers_preserve_rows_text_and_empty_input_defaults() {
         assert_table_rows_preserve_cells();
         assert_input_defaults_are_seeded();
+    }
+
+    #[test]
+    fn explicit_breaks_survive_html_whitespace_collapse_and_text_wrapping() {
+        let nodes = [element(
+            "h1",
+            vec![
+                HtmlDocumentNode::Text(" First   line ".to_string()),
+                element("br", Vec::new()),
+                HtmlDocumentNode::Text(" Second   line ".to_string()),
+            ],
+        )];
+
+        let text = node_text(&nodes);
+        assert_eq!(text, "First line\nSecond line");
+        assert_eq!(wrap_text(&text, 400.0, 16.0), ["First line", "Second line"]);
+        assert_eq!(
+            wrap_text("first\n\nthird", 400.0, 16.0),
+            ["first", "", "third"]
+        );
+        assert_eq!(
+            wrap_text("日本語の長い文章です", 44.0, 10.0),
+            ["日本語の", "長い文章", "です"]
+        );
+        assert_eq!(
+            wrap_text("日本語、句読点。", 44.0, 10.0),
+            ["日本語、", "句読点。"]
+        );
+        assert_eq!(wrap_text("Summary text", 105.0, 16.0), ["Summary text"]);
+        assert_eq!(text_capacity(105.0, 16.0, TEXT_CHARACTER_WIDTH_FACTOR), 12);
+        assert_eq!(text_capacity(104.0, 16.0, TEXT_CHARACTER_WIDTH_FACTOR), 11);
+    }
+
+    #[test]
+    fn styled_wrapping_uses_shaped_font_width_and_splits_long_segments() {
+        let mut style = CssStyle::browser_default();
+        style.font_family = r#""Noto Sans JP", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", "Meiryo", system-ui, sans-serif"#.to_string();
+        style.font_size = 42.842;
+        style.letter_spacing = 0.42842;
+        style.bold = true;
+        style.font_feature_settings = Some(r#""palt" 1"#.to_string());
+        let title = "LibreChat fork → MCP Hub → Code Sandbox の 3 層構成";
+
+        assert_eq!(
+            wrap_text_with_style(title, 1230.0, &style),
+            ["LibreChat fork → MCP Hub → Code Sandbox の 3 層", "構成"]
+        );
+        assert_eq!(wrap_text_with_style("abcdef", 1.0, &style).len(), 6);
+        assert_eq!(
+            wrap_text_with_style("first\n\nthird", 1230.0, &style),
+            ["first", "", "third"]
+        );
+    }
+
+    #[test]
+    fn inline_wrapping_uses_remaining_first_line_then_the_complete_width() {
+        let style = CssStyle::browser_default();
+        let lines = wrap_text_with_initial_width(
+            " next remaining words",
+            text_width(" next ", &style) + 0.5,
+            text_width("remaining words", &style) + 0.5,
+            &style,
+        );
+
+        assert_eq!(lines, [" next", "remaining words"]);
     }
 
     fn assert_table_rows_preserve_cells() {

@@ -40,6 +40,7 @@ fn compound(source: &str) -> Option<CssCompoundSelector> {
         id: None,
         attributes: Vec::new(),
         root: false,
+        disabled: false,
     };
     while !remaining.is_empty() {
         remaining = parse_suffix(&mut compound, remaining)?;
@@ -48,7 +49,8 @@ fn compound(source: &str) -> Option<CssCompoundSelector> {
         || !compound.classes.is_empty()
         || compound.id.is_some()
         || !compound.attributes.is_empty()
-        || compound.root)
+        || compound.root
+        || compound.disabled)
         .then_some(compound)
 }
 
@@ -69,14 +71,24 @@ fn parse_suffix<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Opti
             compound.attributes.push(attribute);
             rest
         }),
-        ':' => source.strip_prefix(":root").and_then(|rest| {
-            (!compound.root).then(|| {
-                compound.root = true;
-                rest
-            })
-        }),
+        ':' => parse_pseudo_class(compound, source),
         _ => None,
     }
+}
+
+fn parse_pseudo_class<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Option<&'a str> {
+    if let Some(rest) = source.strip_prefix(":root") {
+        return (!compound.root).then(|| {
+            compound.root = true;
+            rest
+        });
+    }
+    source.strip_prefix(":disabled").and_then(|rest| {
+        (!compound.disabled).then(|| {
+            compound.disabled = true;
+            rest
+        })
+    })
 }
 
 fn parse_identifier(source: &str) -> Option<(&str, &str)> {

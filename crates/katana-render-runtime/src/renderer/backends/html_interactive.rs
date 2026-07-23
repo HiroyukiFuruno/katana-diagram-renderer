@@ -8,6 +8,7 @@ mod layout_container;
 mod layout_control_paint;
 mod layout_controls;
 mod layout_dispatch;
+mod layout_element;
 mod layout_flow;
 mod layout_flow_item;
 mod layout_flow_measure;
@@ -17,6 +18,8 @@ mod layout_inline;
 mod layout_input;
 mod layout_media;
 mod layout_paint;
+mod layout_paint_order;
+mod layout_position;
 mod layout_structures;
 mod layout_summary;
 mod layout_table;
@@ -27,6 +30,7 @@ mod style;
 mod svg;
 #[cfg(test)]
 mod tests;
+mod text_metrics;
 mod types;
 
 use super::html_browser::HtmlBrowserError;

@@ -36,22 +36,24 @@ impl HtmlInteractiveSession {
     }
 
     pub(super) fn dispatch_key_down(&mut self, key: String) -> Result<(), HtmlBrowserError> {
-        let Some(node_id) = self.focused_input else {
-            return Ok(());
-        };
-        self.dispatch_runtime_event(HtmlRuntimeEvent::KeyDown {
-            target: HtmlNodeId(node_id),
-            key,
-        })
+        self.focused_input
+            .or_else(|| self.runtime.body_node().map(|node| node.0))
+            .map_or(Ok(()), |node_id| {
+                self.dispatch_runtime_event(HtmlRuntimeEvent::KeyDown {
+                    target: HtmlNodeId(node_id),
+                    key,
+                })
+            })
     }
 
     pub(super) fn dispatch_key_up(&mut self, key: String) -> Result<(), HtmlBrowserError> {
-        let Some(node_id) = self.focused_input else {
-            return Ok(());
-        };
-        self.dispatch_runtime_event(HtmlRuntimeEvent::KeyUp {
-            target: HtmlNodeId(node_id),
-            key,
-        })
+        self.focused_input
+            .or_else(|| self.runtime.body_node().map(|node| node.0))
+            .map_or(Ok(()), |node_id| {
+                self.dispatch_runtime_event(HtmlRuntimeEvent::KeyUp {
+                    target: HtmlNodeId(node_id),
+                    key,
+                })
+            })
     }
 }

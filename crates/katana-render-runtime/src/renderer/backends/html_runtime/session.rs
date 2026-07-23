@@ -129,6 +129,18 @@ impl StaticHtmlRuntimeSession {
             .ok_or_else(dom_state_unavailable_error)
     }
 
+    pub(in crate::renderer::backends) fn event_target_ids(
+        &self,
+        event_type: &str,
+    ) -> Result<std::collections::HashSet<u64>, HtmlRuntimeError> {
+        self.isolate
+            .as_ref()
+            .ok_or_else(discarded_runtime_error)?
+            .get_slot::<HtmlDomBridgeState>()
+            .map(|state| state.event_target_ids(event_type))
+            .ok_or_else(dom_state_unavailable_error)
+    }
+
     pub(crate) fn set_value(&mut self, node_id: u64, value: &str) -> Result<(), HtmlRuntimeError> {
         let isolate = self.isolate.as_mut().ok_or_else(discarded_runtime_error)?;
         let state = isolate

@@ -1,12 +1,20 @@
-use super::constants::TEXT_CHARACTER_WIDTH_FACTOR;
 use super::layout::HtmlLayoutRenderer;
 use super::style::{CssStyle, CssTextAlign};
 use super::svg::{box_svg, escape_xml};
+use super::text_metrics::text_width;
 
 impl HtmlLayoutRenderer {
     pub(super) fn paint_box(&mut self, x: f32, y: f32, width: f32, height: f32, style: &CssStyle) {
-        self.svg
-            .push_str(&box_svg(x, y - self.scroll_y, width, height, style));
+        let gradient_id = self.next_gradient_id;
+        self.next_gradient_id += 1;
+        self.svg.push_str(&box_svg(
+            gradient_id,
+            x,
+            y - self.scroll_y,
+            width,
+            height,
+            style,
+        ));
     }
 
     pub(super) fn insert_box(
@@ -18,8 +26,12 @@ impl HtmlLayoutRenderer {
         height: f32,
         style: &CssStyle,
     ) {
-        self.svg
-            .insert_str(index, &box_svg(x, y - self.scroll_y, width, height, style));
+        let gradient_id = self.next_gradient_id;
+        self.next_gradient_id += 1;
+        self.svg.insert_str(
+            index,
+            &box_svg(gradient_id, x, y - self.scroll_y, width, height, style),
+        );
     }
 
     pub(super) fn paint_text_lines(
@@ -43,7 +55,7 @@ impl HtmlLayoutRenderer {
     fn paint_text_line(&mut self, line: &str, x: f32, baseline_y: f32, style: &CssStyle) {
         let y = baseline_y - self.scroll_y;
         self.svg.push_str(&format!(
-            r#"<text x="{x}" y="{y}" font-family="{}" font-size="{}" fill="{}"{}{}{}{}>{}</text>"#,
+            r#"<text x="{x}" y="{y}" font-family="{}" font-size="{}" fill="{}"{}{}{}{}{}>{}</text>"#,
             escape_xml(&style.font_family),
             style.font_size,
             escape_xml(&style.color),
@@ -51,6 +63,7 @@ impl HtmlLayoutRenderer {
             font_style(style),
             text_decoration(style),
             letter_spacing(style),
+            text_length(line, style),
             escape_xml(line)
         ));
     }
@@ -62,7 +75,7 @@ impl HtmlLayoutRenderer {
         y: f32,
         width: f32,
         height: f32,
-        radius: f32,
+        radius: (f32, f32),
     ) {
         let clip_id = self.next_clip_id;
         self.next_clip_id += 1;
@@ -70,21 +83,32 @@ impl HtmlLayoutRenderer {
         self.svg.insert_str(
             index,
             &format!(
-                r#"<defs><clipPath id="krr-clip-{clip_id}"><rect x="{x}" y="{}" width="{width}" height="{height}" rx="{radius}" ry="{radius}"/></clipPath></defs><g clip-path="url(#krr-clip-{clip_id})">"#,
-                y - self.scroll_y
+                r#"<defs><clipPath id="krr-clip-{clip_id}"><rect x="{x}" y="{}" width="{width}" height="{height}" rx="{}" ry="{}"/></clipPath></defs><g clip-path="url(#krr-clip-{clip_id})">"#,
+                y - self.scroll_y,
+                radius.0,
+                radius.1
             ),
         );
     }
 }
 
 fn aligned_text_x(line: &str, x: f32, width: f32, style: &CssStyle) -> f32 {
-    let characters = line.chars().count() as f32;
-    let text_width = characters * style.font_size * TEXT_CHARACTER_WIDTH_FACTOR
-        + (characters - 1.0).max(0.0) * style.letter_spacing;
+    let text_width = text_width(line, style);
     match style.text_align {
         CssTextAlign::Start => x,
         CssTextAlign::Center => x + (width - text_width).max(0.0) / 2.0,
         CssTextAlign::End => x + (width - text_width).max(0.0),
+    }
+}
+
+fn text_length(line: &str, style: &CssStyle) -> String {
+    if line.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\"",
+            text_width(line, style)
+        )
     }
 }
 
@@ -123,9 +147,9 @@ fn letter_spacing(style: &CssStyle) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        constants::TEXT_CHARACTER_WIDTH_FACTOR,
         layout::HtmlLayoutRenderer,
         style::{CssStyle, CssTextAlign},
+        text_metrics::text_width,
     };
     use crate::renderer::backends::html_browser::HtmlBrowserViewport;
     use crate::renderer::backends::html_interactive::layout_paint::aligned_text_x;
@@ -171,7 +195,7 @@ mod tests {
         style.text_align = CssTextAlign::Center;
         let width = 100.0;
         let expected = aligned_text_x("ab", 5.0, width, &style);
-        let text_width = 2.0 * style.font_size * TEXT_CHARACTER_WIDTH_FACTOR;
+        let text_width = text_width("ab", &style);
         assert_eq!(expected, 5.0 + (width - text_width).max(0.0_f32) / 2.0);
         renderer.paint_text_lines(&["ab".to_string()], 5.0, width, 24.0, &style);
         assert!(renderer.svg.contains("<text"));
@@ -193,6 +217,10 @@ mod tests {
         let style = CssStyle::browser_default();
         renderer.paint_text_line("hello", 2.0, 12.0, &style);
         assert!(renderer.svg.contains(" y=\"10\""));
+        assert!(renderer.svg.contains(" textLength=\""));
+
+        renderer.paint_text_line("", 2.0, 12.0, &style);
+        assert_eq!(renderer.svg.matches(" textLength=\"").count(), 1);
     }
 
     fn first_text_x(svg: &str) -> Option<f32> {

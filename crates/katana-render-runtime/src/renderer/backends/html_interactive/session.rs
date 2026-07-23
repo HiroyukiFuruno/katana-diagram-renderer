@@ -120,13 +120,18 @@ impl HtmlInteractiveSession {
             .runtime
             .interactive_nodes_at_width(self.viewport.logical_width())
             .map_err(runtime_failure)?;
+        let clickable_nodes = self
+            .runtime
+            .event_target_ids("click")
+            .map_err(runtime_failure)?;
         seed_input_values(&nodes, &mut self.input_values);
-        HtmlLayoutRenderer::render(
+        HtmlLayoutRenderer::render_with_clickable_nodes(
             &nodes,
             self.viewport,
             self.scroll_y,
             &self.input_values,
             self.focused_input,
+            &clickable_nodes,
         )
         .map_err(runtime_failure)
     }

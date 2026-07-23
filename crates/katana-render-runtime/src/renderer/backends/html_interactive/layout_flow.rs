@@ -1,42 +1,52 @@
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
 use super::layout::HtmlLayoutRenderer;
-use super::layout_flow_measure::{is_layout_item, item_style, leaf_style, measured_widths};
-use super::layout_grid_track::taffy_grid_track;
+use super::layout_flow_measure::{assign_leaf_height, item_style, leaf_style, measured_widths};
 use super::style::CssStyle;
-use super::types::DetailsContext;
-use taffy::geometry::Size;
-use taffy::prelude::{AvailableSpace, Display, Style, TaffyTree};
-use taffy::style_helpers::{auto, length};
+use super::types::{DetailsContext, LayoutContext};
+use taffy::prelude::{Display, TaffyTree};
+
+#[path = "layout_flow_compute.rs"]
+mod compute;
+
+use compute::{
+    compute_flow_layout, compute_root_layout, is_visible_layout_item, layout_error,
+    row_stretch_height,
+};
+
+type FlowMeasurement = (taffy::tree::NodeId, CssStyle, f32);
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_flow_children(
         &mut self,
         children: &[HtmlDocumentNode],
-        x: f32,
-        y: f32,
-        width: f32,
-        style: &CssStyle,
-        details: DetailsContext,
+        layout: LayoutContext<'_>,
+        available_height: Option<f32>,
     ) -> Result<f32, String> {
-        match style.display {
+        match layout.style.display {
             Display::Flex | Display::Grid => {
-                self.render_taffy_flow(children, x, y, width, style, details)
+                self.render_taffy_flow(children, layout, available_height)
             }
-            Display::Block => Ok(self.render_nodes(children, x, y, width, style, details)),
-            Display::None => Ok(y),
+            Display::Block => Ok(self.render_nodes(
+                children,
+                layout.x,
+                layout.y,
+                layout.width,
+                layout.style,
+                layout.details,
+            )),
+            Display::None => Ok(layout.y),
         }
     }
 
     fn render_taffy_flow(
         &mut self,
         children: &[HtmlDocumentNode],
-        x: f32,
-        y: f32,
-        width: f32,
-        style: &CssStyle,
-        details: DetailsContext,
+        layout: LayoutContext<'_>,
+        available_height: Option<f32>,
     ) -> Result<f32, String> {
+        let (x, y, width) = (layout.x, layout.y, layout.width);
+        let (style, details) = (layout.style, layout.details);
         let items = children
             .iter()
             .filter(|node| is_visible_layout_item(node, style))
@@ -46,7 +56,9 @@ impl HtmlLayoutRenderer {
         }
         let mut tree = TaffyTree::<()>::new();
         let nodes = self.build_flow_nodes(&mut tree, &items, width, style, details)?;
-        compute_flow_layout(&mut tree, &nodes, style, width)?;
+        let root = compute_flow_layout(&mut tree, &nodes, style, width, available_height)?;
+        self.remeasure_flow_heights(&mut tree, &nodes, &items, width, style, details)?;
+        compute_root_layout(&mut tree, root, width, available_height)?;
         self.paint_flow_items(&tree, &nodes, &items, (x, y), style, details)
     }
 
@@ -67,7 +79,7 @@ impl HtmlLayoutRenderer {
         for ((item, item_style), measure_width) in items.iter().zip(item_styles).zip(widths) {
             let height = self.measure_flow_node_height(item, measure_width, style, details)?;
             let node = tree
-                .new_leaf(leaf_style(item_style, measure_width, height))
+                .new_leaf(leaf_style(item_style, measure_width, height, width))
                 .map_err(layout_error)?;
             nodes.push(node);
         }
@@ -89,87 +101,73 @@ impl HtmlLayoutRenderer {
             let layout = tree.layout(*node).map_err(layout_error)?;
             let item_bottom = self.render_flow_node(
                 item,
-                x + layout.location.x,
-                y + layout.location.y,
-                layout.size.width.max(MIN_LAYOUT_WIDTH),
-                inherited,
-                details,
+                LayoutContext::new(
+                    x + layout.location.x,
+                    y + layout.location.y,
+                    layout.size.width.max(MIN_LAYOUT_WIDTH),
+                    inherited,
+                    details,
+                ),
+                Some(layout.size.height),
             );
             bottom = bottom.max(item_bottom);
         }
         Ok(bottom)
     }
-}
 
-fn is_visible_layout_item(node: &HtmlDocumentNode, inherited: &CssStyle) -> bool {
-    if !is_layout_item(node) {
-        return false;
-    }
-
-    match node {
-        HtmlDocumentNode::Text(_) => true,
-        HtmlDocumentNode::Element { attributes, .. } => {
-            let style = CssStyle::from_attributes(attributes, inherited);
-            style.display != Display::None
+    fn remeasure_flow_heights(
+        &self,
+        tree: &mut TaffyTree<()>,
+        nodes: &[taffy::tree::NodeId],
+        items: &[&HtmlDocumentNode],
+        available_width: f32,
+        inherited: &CssStyle,
+        details: DetailsContext,
+    ) -> Result<(), String> {
+        let measurements =
+            self.measure_flow_items(tree, nodes, items, available_width, inherited, details)?;
+        let stretch_height = row_stretch_height(inherited, &measurements);
+        for (node, css_style, measured_height) in measurements {
+            let height = if css_style.height.is_none() {
+                stretch_height.unwrap_or(measured_height)
+            } else {
+                measured_height
+            };
+            let mut style = tree.style(node).map_err(layout_error)?.clone();
+            assign_leaf_height(&mut style, &css_style, height);
+            tree.set_style(node, style).map_err(layout_error)?;
         }
+        Ok(())
     }
-}
 
-fn compute_flow_layout(
-    tree: &mut TaffyTree<()>,
-    nodes: &[taffy::tree::NodeId],
-    style: &CssStyle,
-    width: f32,
-) -> Result<(), String> {
-    let root = tree
-        .new_with_children(flow_style(style, width), nodes)
-        .map_err(layout_error)?;
-    tree.compute_layout(
-        root,
-        Size {
-            width: AvailableSpace::Definite(width),
-            height: AvailableSpace::MaxContent,
-        },
-    )
-    .map_err(layout_error)
-}
-
-fn flow_style(style: &CssStyle, width: f32) -> Style {
-    let mut layout = Style {
-        display: style.display,
-        size: Size {
-            width: length(width),
-            height: auto(),
-        },
-        gap: Size {
-            width: length(style.gap),
-            height: length(style.gap),
-        },
-        flex_direction: style.flex_direction,
-        flex_wrap: style.flex_wrap,
-        align_items: style.align_items,
-        justify_content: style.justify_content,
-        ..Style::default()
-    };
-    if style.display == Display::Grid {
-        layout.grid_template_columns = style
-            .grid_template_columns
-            .iter()
-            .copied()
-            .map(taffy_grid_track)
-            .map(Into::into)
-            .collect();
+    fn measure_flow_items(
+        &self,
+        tree: &TaffyTree<()>,
+        nodes: &[taffy::tree::NodeId],
+        items: &[&HtmlDocumentNode],
+        available_width: f32,
+        inherited: &CssStyle,
+        details: DetailsContext,
+    ) -> Result<Vec<FlowMeasurement>, String> {
+        let mut measurements = Vec::with_capacity(nodes.len());
+        for (node, item) in nodes.iter().zip(items) {
+            let width = tree
+                .layout(*node)
+                .map_err(layout_error)?
+                .size
+                .width
+                .max(MIN_LAYOUT_WIDTH);
+            let height = self.measure_flow_node_height(item, width, inherited, details)?;
+            let css_style = item_style(item, inherited, available_width, items.len());
+            measurements.push((*node, css_style, height));
+        }
+        Ok(measurements)
     }
-    layout
-}
-
-fn layout_error(error: impl ToString) -> String {
-    format!("CSS flow layout failed: {}", error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CssStyle, DetailsContext, Display, HtmlDocumentNode};
+    use super::{CssStyle, DetailsContext, Display, HtmlDocumentNode, LayoutContext};
     use super::{HtmlLayoutRenderer, layout_error};
     use crate::renderer::backends::html_browser::HtmlBrowserViewport;
     use std::collections::HashMap;
@@ -185,7 +183,11 @@ mod tests {
         let mut style = CssStyle::browser_default();
         style.display = Display::None;
         assert_eq!(
-            renderer.render_flow_children(&[], 0.0, 7.0, 100.0, &style, DetailsContext::NONE),
+            renderer.render_flow_children(
+                &[],
+                LayoutContext::new(0.0, 7.0, 100.0, &style, DetailsContext::NONE),
+                None,
+            ),
             Ok(7.0)
         );
 
@@ -194,11 +196,8 @@ mod tests {
         assert_eq!(
             renderer.render_flow_children(
                 &whitespace,
-                0.0,
-                9.0,
-                100.0,
-                &style,
-                DetailsContext::NONE,
+                LayoutContext::new(0.0, 9.0, 100.0, &style, DetailsContext::NONE),
+                None,
             ),
             Ok(9.0)
         );

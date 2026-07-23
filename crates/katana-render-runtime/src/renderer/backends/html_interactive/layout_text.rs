@@ -1,26 +1,25 @@
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::{MIN_LAYOUT_WIDTH, TEXT_CHARACTER_WIDTH_FACTOR};
-use super::document::{node_text, wrap_text};
+use super::constants::MIN_LAYOUT_WIDTH;
+use super::document::{node_text, wrap_text_with_style};
 use super::layout::HtmlLayoutRenderer;
 use super::style::CssStyle;
+use super::text_metrics::text_width;
 use super::types::{HitTarget, HitTargetKind};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_label(
         &mut self,
-        tag: &str,
         children: &[HtmlDocumentNode],
         x: f32,
         y: f32,
         width: f32,
         style: &CssStyle,
     ) -> f32 {
-        let style = style.clone().for_tag(tag);
         let start = y + style.margin_top;
         let box_x = x + style.margin_left;
         let available = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
-        let box_width = text_box_width(&node_text(children), available, &style);
-        let height = self.paint_wrapped_box(&node_text(children), box_x, start, box_width, &style);
+        let box_width = text_box_width(&node_text(children), available, style);
+        let height = self.paint_wrapped_box(&node_text(children), box_x, start, box_width, style);
         start + height + style.margin_bottom
     }
 
@@ -61,7 +60,7 @@ impl HtmlLayoutRenderer {
         if text.trim().is_empty() {
             return y;
         }
-        let lines = wrap_text(text, width, style.font_size);
+        let lines = wrap_text_with_style(text, width, style);
         self.paint_text_lines(&lines, x, width, y + style.font_size, style);
         y + lines.len() as f32 * style.line_height
     }
@@ -74,20 +73,20 @@ impl HtmlLayoutRenderer {
         width: f32,
         style: &CssStyle,
     ) -> f32 {
-        let lines = wrap_text(
+        let lines = wrap_text_with_style(
             text,
             style.content_width(width).max(MIN_LAYOUT_WIDTH),
-            style.font_size,
+            style,
         );
         let height = text_box_height(&lines, style);
         self.paint_box(x, start, width, height, style);
-        let content_x = x + style.border_width + style.padding_left;
+        let content_x = x + style.border_left_width() + style.padding_left;
         let content_width = style.content_width(width).max(MIN_LAYOUT_WIDTH);
         self.paint_text_lines(
             &lines,
             content_x,
             content_width,
-            start + style.border_width + style.padding_top + style.font_size,
+            start + style.border_top_width() + style.padding_top + style.font_size,
             style,
         );
         height
@@ -99,7 +98,7 @@ fn text_box_width(text: &str, available: f32, style: &CssStyle) -> f32 {
     if !style.inline_block || style.width.is_some() || style.max_width.is_some() {
         return explicit.max(MIN_LAYOUT_WIDTH);
     }
-    let content = text.chars().count() as f32 * style.font_size * TEXT_CHARACTER_WIDTH_FACTOR;
+    let content = text_width(text, style);
     style
         .outer_width(content)
         .min(available)

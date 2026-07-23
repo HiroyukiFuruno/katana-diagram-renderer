@@ -1,7 +1,6 @@
 use super::super::dom_state::HtmlDomBridgeState;
 use super::super::interaction::{event, event_default_prevented};
 use super::super::script::{HtmlTryCatchScope, check_bridge_error, dom_state_unavailable_error};
-#[cfg(test)]
 use super::super::types::HtmlNodeId;
 use super::super::types::{
     HtmlNavigationIntent, HtmlRuntimeDispatch, HtmlRuntimeError, HtmlRuntimeEvent,
@@ -10,6 +9,16 @@ use super::super::types::{
 use super::{StaticHtmlRuntimeSession, discarded_runtime_error};
 
 impl StaticHtmlRuntimeSession {
+    pub(crate) fn body_node(&mut self) -> Option<HtmlNodeId> {
+        self.isolate
+            .as_mut()?
+            .get_slot::<HtmlDomBridgeState>()?
+            .document
+            .borrow_mut()
+            .query_selector("body")
+            .map(HtmlNodeId)
+    }
+
     #[cfg(test)]
     pub(crate) fn node_for_element_id(&mut self, id: &str) -> Option<HtmlNodeId> {
         self.isolate

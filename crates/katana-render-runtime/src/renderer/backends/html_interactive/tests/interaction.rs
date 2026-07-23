@@ -73,6 +73,134 @@ fn class_list_mutation_recascades_css_after_click() -> TestResult {
 }
 
 #[test]
+fn slide_deck_repaints_for_document_keys_fixed_controls_and_surface_clicks() -> TestResult {
+    let mut session = start(SLIDE_DECK_DOCUMENT)?;
+    let initial = session
+        .latest_frame()
+        .ok_or_else(|| "initial slide frame must exist".to_string())?;
+    assert!(frame_contains_rgb(initial, [23, 51, 130]));
+    assert!(!frame_contains_rgb(initial, [53, 168, 83]));
+    assert_slide_state(&session, "1", "slide cover active", "slide")?;
+
+    session
+        .dispatch_input(HtmlBrowserInput::KeyDown {
+            key: "ArrowRight".to_string(),
+        })
+        .map_err(to_string)?;
+    let keyed = session
+        .latest_frame()
+        .ok_or_else(|| "keyboard slide frame must exist".to_string())?;
+    assert!(frame_contains_rgb(keyed, [53, 168, 83]));
+    assert_slide_state(&session, "2", "slide cover", "slide active")?;
+
+    click_element(&mut session, "prev")?;
+    assert_slide_state(&session, "1", "slide cover active", "slide")?;
+    click_element(&mut session, "first")?;
+    assert_slide_state(&session, "2", "slide cover", "slide active")?;
+    Ok(())
+}
+
+const REPEATED_SLIDE_DOCUMENT_TEMPLATE: &str = r#"<style>
+.slide { display:none; position:absolute; inset:0; width:100vw; height:100vh; }
+.slide.active { display:block; }
+</style>
+<section id=one class="slide active">One<!-- filler --></section>
+<section id=two class="slide">Two<!-- filler --></section>
+<section id=three class="slide">Three</section>
+<section id=four class="slide">Four</section>
+<span id=page>1</span>
+<script>
+var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+var index = 0;
+function render() {
+  slides.forEach(function (slide, position) { slide.classList.toggle('active', position === index); });
+  document.getElementById('page').textContent = String(index + 1);
+}
+slides.forEach(function (slide) {
+  slide.addEventListener('click', function (event) {
+    if (event.target.closest('.blocked')) return;
+    index = Math.min(slides.length - 1, index + 1);
+    render();
+  });
+});
+</script>"#;
+
+#[test]
+fn repeated_slide_surface_clicks_keep_every_listener_and_advance_all_slides() -> TestResult {
+    let filler = (0..80).map(|_| "<i></i>").collect::<String>();
+    let document = REPEATED_SLIDE_DOCUMENT_TEMPLATE.replace("<!-- filler -->", &filler);
+    let mut session = start(&document)?;
+
+    for (active, page) in [("one", "2"), ("two", "3"), ("three", "4")] {
+        click_element(&mut session, active)?;
+        let snapshot = session.runtime.snapshot().map_err(to_string)?;
+        assert!(
+            snapshot.contains(&format!(r#"id="page">{page}</span>"#)),
+            "{snapshot}"
+        );
+    }
+    Ok(())
+}
+
+fn assert_slide_state(
+    session: &super::super::HtmlInteractiveSession,
+    page: &str,
+    first_class: &str,
+    second_class: &str,
+) -> TestResult {
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(
+        snapshot.contains(&format!(r#"id="page">{page}</span>"#)),
+        "{snapshot}"
+    );
+    assert!(
+        snapshot.contains(&format!(r#"id="first" class="{first_class}""#)),
+        "{snapshot}"
+    );
+    assert!(
+        snapshot.contains(&format!(r#"id="second" class="{second_class}""#)),
+        "{snapshot}"
+    );
+    Ok(())
+}
+
+const SLIDE_DECK_DOCUMENT: &str = r##"<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+.deck { position: relative; width: 100vw; height: 100vh; }
+.slide { position: absolute; inset: 0; display: none; flex-direction: column; padding: 24px 28px 40px; }
+.slide.active { display: flex; }
+.cover { background: linear-gradient(155deg, #173382 0%, #2c4ac6 62%, #3952ff 100%); color: #fff; }
+.inner { display: flex; flex-direction: column; flex: 1; min-height: 0; justify-content: center; }
+h1 { font-size: clamp(20px, 8vw, 32px); line-height: 1.2; }
+.success { background: #35a853; width: 120px; height: 60px; }
+.nav { position: fixed; left: 0; right: 0; bottom: 0; height: 32px; background: #fff; display: flex; }
+</style>
+<div class="deck">
+  <section id="first" class="slide cover active"><div class="inner"><h1>First<br>slide</h1></div></section>
+  <section id="second" class="slide"><div class="success">Second slide</div></section>
+</div>
+<div class="nav"><button id="prev">Prev</button><span id="page">1</span></div>
+<script>
+var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+var index = 0;
+function renderSlide() {
+  slides.forEach(function (slide, position) { slide.classList.toggle('active', position === index); });
+  document.getElementById('page').textContent = String(index + 1);
+}
+function go(next) { index = Math.max(0, Math.min(slides.length - 1, next)); renderSlide(); }
+document.getElementById('prev').addEventListener('click', function (event) { event.stopPropagation(); go(index - 1); });
+document.addEventListener('keydown', function (event) { if (event.key === 'ArrowRight') go(index + 1); });
+slides.forEach(function (slide) {
+  slide.addEventListener('click', function (event) {
+    if (event.target.closest('.no-advance')) return;
+    go(index + 1);
+  });
+});
+renderSlide();
+</script>"##;
+
+#[test]
 fn custom_property_style_mutation_recascades_and_repaints_after_click() -> TestResult {
     let mut session = start(
         r#"<style>#card { --accent: #ef4444; background: var(--accent); width: 80px; height: 40px; }</style>

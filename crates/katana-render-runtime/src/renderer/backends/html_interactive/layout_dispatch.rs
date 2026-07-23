@@ -87,7 +87,6 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
     ) -> f32 {
         self.render_label(
-            element.tag,
             element.children,
             layout.x,
             layout.y,
@@ -101,13 +100,12 @@ impl HtmlLayoutRenderer {
         element: ElementRenderContext<'_>,
         layout: LayoutContext<'_>,
     ) -> f32 {
-        let style = layout.style.clone().for_tag("label");
         self.render_container(
             element.children,
             layout.x,
             layout.y,
             layout.width,
-            &style,
+            layout.style,
             layout.details,
         )
     }

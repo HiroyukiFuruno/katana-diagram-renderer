@@ -238,6 +238,16 @@ fn url_attribute_selectors_work_through_query_selector_and_query_selector_all() 
     Ok(())
 }
 
+#[test]
+fn element_matches_and_closest_use_the_css_selector_engine() -> TestResult {
+    let output = render(
+        r#"<main class="deck"><section class="slide active"><span id="target" class="label">Text</span></section></main><p id="result"></p><script>const target = document.getElementById('target'); const slide = target.closest('main.deck > section.slide.active'); const detached = document.createElement('div'); detached.className = 'detached'; document.getElementById('result').textContent = [target.matches('span#target.label'), slide === document.querySelector('.slide'), target.closest('.missing') === null, detached.matches('.detached'), detached.closest('.detached') === detached].join(':');</script>"#,
+    )?;
+
+    assert!(output.contains(">true:true:true:true:true</p>"), "{output}");
+    Ok(())
+}
+
 fn render(source: &str) -> TestResult<String> {
     HtmlRenderer
         .render(&HtmlRenderInput {

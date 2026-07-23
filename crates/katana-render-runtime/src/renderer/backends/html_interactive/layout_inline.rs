@@ -1,9 +1,14 @@
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::{MIN_LAYOUT_WIDTH, TEXT_CHARACTER_WIDTH_FACTOR};
-use super::document::node_text;
+use super::constants::{LAYOUT_FLOAT_EPSILON, MIN_LAYOUT_WIDTH};
+use super::document::wrap_text_with_initial_width;
 use super::layout::HtmlLayoutRenderer;
-use super::style::CssStyle;
+use super::style::{CssStyle, CssTextAlign};
 use super::types::DetailsContext;
+
+#[path = "layout_inline_measure.rs"]
+mod measure;
+
+use measure::{inline_node_width, inline_run_start_x, inline_text_width, visible_inline_line};
 
 struct InlineFlowState {
     x: f32,
@@ -42,17 +47,35 @@ impl HtmlLayoutRenderer {
         details: DetailsContext,
     ) -> f32 {
         let mut inline = InlineFlowState::new(x, y, width);
-        for node in nodes {
-            if matches!(node, HtmlDocumentNode::Text(text) if text.trim().is_empty()) {
-                continue;
-            }
-            if let Some(inline_width) = inline_node_width(node, inherited, width) {
-                self.render_inline_node(node, inline_width, inherited, details, &mut inline);
-            } else {
-                self.render_block_node(node, inherited, details, &mut inline);
-            }
+        for index in 0..nodes.len() {
+            self.render_inline_or_block_node(nodes, index, inherited, details, &mut inline);
         }
         inline.bottom()
+    }
+
+    fn render_inline_or_block_node(
+        &mut self,
+        nodes: &[HtmlDocumentNode],
+        index: usize,
+        inherited: &CssStyle,
+        details: DetailsContext,
+        inline: &mut InlineFlowState,
+    ) {
+        let node = &nodes[index];
+        if matches!(node, HtmlDocumentNode::Text(text) if text.trim().is_empty()) {
+            return;
+        }
+        if !inline.has_items {
+            inline.cursor_x =
+                inline_run_start_x(&nodes[index..], inline.x, inline.width, inherited);
+        }
+        if let HtmlDocumentNode::Text(text) = node {
+            self.render_inline_text(text, inherited, inline);
+        } else if let Some(width) = inline_node_width(node, inherited, inline.width) {
+            self.render_inline_node(node, width, inherited, details, inline);
+        } else {
+            self.render_block_node(node, inherited, details, inline);
+        }
     }
 
     fn render_inline_node(
@@ -63,7 +86,9 @@ impl HtmlLayoutRenderer {
         details: DetailsContext,
         inline: &mut InlineFlowState,
     ) {
-        if inline.has_items && inline.cursor_x + inline_width > inline.x + inline.width {
+        if inline.has_items
+            && inline.cursor_x + inline_width > inline.x + inline.width + LAYOUT_FLOAT_EPSILON
+        {
             inline.y = inline.bottom;
             inline.cursor_x = inline.x;
             inline.bottom = inline.y;
@@ -80,6 +105,67 @@ impl HtmlLayoutRenderer {
         inline.has_items = true;
     }
 
+    fn render_inline_text(&mut self, text: &str, style: &CssStyle, inline: &mut InlineFlowState) {
+        let initial_x = inline.cursor_x;
+        let initial_y = inline.y;
+        let remaining_width = (inline.x + inline.width - initial_x).max(MIN_LAYOUT_WIDTH);
+        let lines = wrap_text_with_initial_width(text, remaining_width, inline.width, style);
+        self.paint_inline_lines(&lines, initial_x, initial_y, style, inline);
+        advance_inline_text(inline, text, &lines, remaining_width, initial_y, style);
+        inline.has_items = true;
+    }
+
+    fn paint_inline_lines(
+        &mut self,
+        lines: &[String],
+        initial_x: f32,
+        initial_y: f32,
+        style: &CssStyle,
+        inline: &InlineFlowState,
+    ) {
+        let mut paint_style = style.clone();
+        paint_style.text_align = CssTextAlign::Start;
+        for (index, line) in lines.iter().enumerate() {
+            let line_x = if index == 0 { initial_x } else { inline.x };
+            let (leading_width, visible_line) = visible_inline_line(line, style);
+            let line_x = line_x + leading_width;
+            let line_y = initial_y + index as f32 * style.line_height;
+            let visible_line = visible_line.to_string();
+            self.paint_text_lines(
+                std::slice::from_ref(&visible_line),
+                line_x,
+                (inline.x + inline.width - line_x).max(MIN_LAYOUT_WIDTH),
+                line_y + style.font_size,
+                &paint_style,
+            );
+        }
+    }
+}
+
+fn advance_inline_text(
+    inline: &mut InlineFlowState,
+    text: &str,
+    lines: &[String],
+    remaining_width: f32,
+    initial_y: f32,
+    style: &CssStyle,
+) {
+    inline.bottom = inline
+        .bottom
+        .max(initial_y + lines.len() as f32 * style.line_height);
+    if lines.len() == 1 {
+        inline.cursor_x += inline_text_width(text, style).min(remaining_width);
+    } else {
+        inline.y = initial_y + (lines.len() - 1) as f32 * style.line_height;
+        inline.cursor_x = inline.x
+            + lines
+                .last()
+                .map(|line| inline_text_width(line, style))
+                .unwrap_or(0.0);
+    }
+}
+
+impl HtmlLayoutRenderer {
     fn render_block_node(
         &mut self,
         node: &HtmlDocumentNode,
@@ -94,35 +180,6 @@ impl HtmlLayoutRenderer {
         }
         inline.y = self.render_node(node, inline.x, inline.y, inline.width, inherited, details);
     }
-}
-
-fn inline_node_width(node: &HtmlDocumentNode, inherited: &CssStyle, available: f32) -> Option<f32> {
-    let HtmlDocumentNode::Element {
-        attributes,
-        children,
-        ..
-    } = node
-    else {
-        return None;
-    };
-    let style = CssStyle::from_attributes(attributes, inherited);
-    if !style.inline_block || style.display == taffy::style::Display::None {
-        return None;
-    }
-    let available_box = (available - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
-    let box_width = if style.width.is_some() || style.max_width.is_some() {
-        style.box_width(available_box)
-    } else {
-        let content = node_text(children).chars().count() as f32
-            * style.font_size
-            * TEXT_CHARACTER_WIDTH_FACTOR;
-        style.outer_width(content)
-    };
-    Some(
-        (box_width + style.margin_left + style.margin_right)
-            .min(available)
-            .max(MIN_LAYOUT_WIDTH),
-    )
 }
 
 #[cfg(test)]
@@ -196,5 +253,15 @@ mod tests {
             inline_node_width(&node, &CssStyle::browser_default(), 300.0),
             Some(52.0)
         );
+    }
+
+    #[test]
+    fn leading_inline_whitespace_becomes_a_horizontal_text_offset() {
+        let style = CssStyle::browser_default();
+        let (offset, visible) = super::visible_inline_line("  next", &style);
+
+        assert!(offset > 0.0);
+        assert_eq!(visible, "next");
+        assert_eq!(super::visible_inline_line("next", &style), (0.0, "next"));
     }
 }

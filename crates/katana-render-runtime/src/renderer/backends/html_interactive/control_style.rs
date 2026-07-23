@@ -1,13 +1,12 @@
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::{BUTTON_TEXT_HORIZONTAL_PADDING, BUTTON_TEXT_WIDTH_FACTOR, CONTROL_HEIGHT};
+use super::constants::{BUTTON_TEXT_HORIZONTAL_PADDING, CONTROL_HEIGHT};
 use super::document::{attribute, node_text};
 use super::style::CssStyle;
+use super::text_metrics::text_width;
 
 pub(super) fn button_width(children: &[HtmlDocumentNode], width: f32, style: &CssStyle) -> f32 {
     style.explicit_width(width).unwrap_or_else(|| {
-        (node_text(children).chars().count() as f32 * style.font_size * BUTTON_TEXT_WIDTH_FACTOR
-            + BUTTON_TEXT_HORIZONTAL_PADDING)
-            .min(width)
+        (text_width(&node_text(children), style) + BUTTON_TEXT_HORIZONTAL_PADDING).min(width)
     })
 }
 
