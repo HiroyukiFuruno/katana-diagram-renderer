@@ -1,7 +1,9 @@
+use super::constants::FONT_WEIGHT_NORMAL;
 use super::layout::HtmlLayoutRenderer;
 use super::style::{CssStyle, CssTextAlign};
 use super::svg::{box_svg, escape_xml};
 use super::text_metrics::text_width;
+use crate::markdown::svg_rasterize::SvgRasterizeOps;
 
 impl HtmlLayoutRenderer {
     pub(super) fn paint_box(&mut self, x: f32, y: f32, width: f32, height: f32, style: &CssStyle) {
@@ -54,8 +56,13 @@ impl HtmlLayoutRenderer {
 
     fn paint_text_line(&mut self, line: &str, x: f32, baseline_y: f32, style: &CssStyle) {
         let y = baseline_y - self.scroll_y;
+        let transformed = style.transformed_text(line);
+        let feature_dx = font_feature_dx(&transformed, style);
+        let text_length = feature_dx
+            .as_ref()
+            .map_or_else(|| text_length(line, style), |_| String::new());
         self.svg.push_str(&format!(
-            r#"<text x="{x}" y="{y}" font-family="{}" font-size="{}" fill="{}"{}{}{}{}{}>{}</text>"#,
+            r#"<text x="{x}" y="{y}" font-family="{}" font-size="{}" fill="{}"{}{}{}{}{}{}{}>{}</text>"#,
             escape_xml(&style.font_family),
             style.font_size,
             escape_xml(&style.color),
@@ -63,8 +70,10 @@ impl HtmlLayoutRenderer {
             font_style(style),
             text_decoration(style),
             letter_spacing(style),
-            text_length(line, style),
-            escape_xml(line)
+            font_feature_settings(style),
+            feature_dx.as_deref().unwrap_or_default(),
+            text_length,
+            escape_xml(&transformed),
         ));
     }
 
@@ -112,11 +121,11 @@ fn text_length(line: &str, style: &CssStyle) -> String {
     }
 }
 
-fn font_weight(style: &CssStyle) -> &'static str {
-    if style.bold {
-        " font-weight=\"700\""
+fn font_weight(style: &CssStyle) -> String {
+    if style.font_weight == FONT_WEIGHT_NORMAL {
+        String::new()
     } else {
-        ""
+        format!(" font-weight=\"{}\"", style.font_weight)
     }
 }
 
@@ -144,6 +153,31 @@ fn letter_spacing(style: &CssStyle) -> String {
     }
 }
 
+fn font_feature_settings(style: &CssStyle) -> String {
+    let Some(settings) = style.font_feature_settings.as_ref() else {
+        return String::new();
+    };
+    format!(" font-feature-settings=\"{}\"", escape_xml(settings))
+}
+
+fn font_feature_dx(text: &str, style: &CssStyle) -> Option<String> {
+    let dx = SvgRasterizeOps::shape_html_text_dx(
+        text,
+        &style.font_family,
+        style.font_size,
+        style.font_weight,
+        style.italic,
+        style.font_feature_settings.as_deref(),
+    )?;
+    Some(format!(
+        " dx=\"{}\"",
+        dx.iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -163,24 +197,38 @@ mod tests {
             device_scale_factor: 1.0,
         };
         let mut renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
-        let lines = vec!["abc".to_string(), "x".to_string()];
+        let lines = vec!["（JSC 案件）".to_string(), "x".to_string()];
 
-        let mut end_style = CssStyle::browser_default();
-        end_style.text_align = CssTextAlign::End;
-        end_style.letter_spacing = 1.0;
-        end_style.bold = true;
-        end_style.italic = true;
-        end_style.underline = true;
+        let end_style = typography_test_style();
         renderer.paint_text_lines(&lines, 10.0, 120.0, 24.0, &end_style);
 
-        let expected_x = aligned_text_x("abc", 10.0, 120.0, &end_style);
+        let expected_x = aligned_text_x("（JSC 案件）", 10.0, 120.0, &end_style);
         let text_attr = first_text_x(&renderer.svg);
 
         assert_eq!(text_attr, Some(expected_x));
         assert!(renderer.svg.contains(" font-weight=\"700\""));
         assert!(renderer.svg.contains(" font-style=\"italic\""));
         assert!(renderer.svg.contains(" text-decoration=\"underline\""));
+        assert!(renderer.svg.contains(" dx=\""), "{}", renderer.svg);
         assert!(renderer.svg.contains(" letter-spacing=\"1\""));
+        assert!(
+            renderer
+                .svg
+                .contains(" font-feature-settings=\"&quot;palt&quot; 1\"")
+        );
+    }
+
+    fn typography_test_style() -> CssStyle {
+        let mut style = CssStyle::browser_default();
+        style.text_align = CssTextAlign::End;
+        style.letter_spacing = 1.0;
+        style.font_weight = 700;
+        style.italic = true;
+        style.underline = true;
+        style.font_family =
+            "\"Noto Sans JP\", \"Hiragino Sans\", \"Yu Gothic\", sans-serif".to_string();
+        style.font_feature_settings = Some(r#""palt" 1"#.to_string());
+        style
     }
 
     #[test]

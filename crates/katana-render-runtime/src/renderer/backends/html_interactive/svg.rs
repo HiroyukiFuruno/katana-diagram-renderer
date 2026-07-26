@@ -37,13 +37,13 @@ pub(super) fn box_svg(
 }
 
 fn append_box_shadow(svg: &mut String, x: f32, y: f32, width: f32, height: f32, style: &CssStyle) {
-    const BLUR_LAYERS: usize = 8;
+    const LAYER_OPACITIES: [f32; 8] = [0.10, 0.09, 0.08, 0.07, 0.055, 0.04, 0.03, 0.015];
     let Some(shadow) = &style.box_shadow else {
         return;
     };
     let radius = style.resolved_border_radius(width, height);
-    for layer in (1..=BLUR_LAYERS).rev() {
-        let blur_expansion = shadow.blur_radius * layer as f32 / BLUR_LAYERS as f32;
+    for (layer, opacity) in LAYER_OPACITIES.iter().enumerate().rev() {
+        let blur_expansion = shadow.blur_radius * (layer + 1) as f32 / LAYER_OPACITIES.len() as f32;
         let expansion = shadow.spread_radius + blur_expansion;
         let shadow_x = x + shadow.offset_x - expansion;
         let shadow_y = y + shadow.offset_y - expansion;
@@ -53,11 +53,10 @@ fn append_box_shadow(svg: &mut String, x: f32, y: f32, width: f32, height: f32, 
             continue;
         }
         svg.push_str(&format!(
-            r#"<rect x="{shadow_x}" y="{shadow_y}" width="{shadow_width}" height="{shadow_height}" rx="{}" ry="{}" fill="{}" fill-opacity="{}"/>"#,
+            r#"<rect x="{shadow_x}" y="{shadow_y}" width="{shadow_width}" height="{shadow_height}" rx="{}" ry="{}" fill="{}" fill-opacity="{opacity}"/>"#,
             (radius.0 + expansion).max(0.0),
             (radius.1 + expansion).max(0.0),
             escape_xml(&shadow.color),
-            1.0 / BLUR_LAYERS as f32
         ));
     }
 }
@@ -115,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn box_shadow_is_layered_behind_the_background_without_filters() {
+    fn box_shadow_uses_gaussian_weighted_layers_behind_the_background() {
         let attributes = [(
             "style".to_string(),
             "box-shadow: 0 10px 28px rgba(15,40,89,0.14)".to_string(),
@@ -125,10 +124,8 @@ mod tests {
         let svg = box_svg(0, 10.0, 20.0, 100.0, 50.0, &style);
 
         assert_eq!(svg.matches("fill-opacity=\"").count(), 8, "{svg}");
-        assert!(
-            svg.contains(r#"x="-18" y="2" width="156" height="106""#),
-            "{svg}"
-        );
+        assert!(svg.contains(r#"fill-opacity="0.1""#), "{svg}");
+        assert!(svg.contains(r#"fill-opacity="0.015""#), "{svg}");
         let paint_order = (svg.find("fill-opacity"), svg.rfind(r##"fill="#ffffff""##));
         assert!(
             matches!(paint_order, (Some(shadow), Some(background)) if shadow < background),

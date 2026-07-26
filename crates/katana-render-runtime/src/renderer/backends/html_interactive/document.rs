@@ -1,7 +1,7 @@
 #[cfg(test)]
 use super::constants::TEXT_CHARACTER_WIDTH_FACTOR;
 use super::constants::{LAYOUT_FLOAT_EPSILON, MIN_LAYOUT_WIDTH};
-use super::style::CssStyle;
+use super::style::{CssStyle, CssWhiteSpace};
 use super::text_metrics::text_width;
 use unicode_linebreak::linebreaks;
 use unicode_width::UnicodeWidthStr;
@@ -99,6 +99,12 @@ pub(super) fn wrap_text_with_initial_width(
     if text.is_empty() {
         return vec![String::new()];
     }
+    if style.white_space == CssWhiteSpace::NoWrap {
+        return text
+            .split('\n')
+            .map(|line| line.trim_end().to_string())
+            .collect();
+    }
     let mut lines = Vec::new();
     let mut remaining = text;
     let mut width = initial_width.max(MIN_LAYOUT_WIDTH);
@@ -122,7 +128,8 @@ fn take_styled_line(text: &str, width: f32, style: &CssStyle) -> (String, usize)
     let forced_line = &text[..forced_end];
     let mut fitted_end = 0;
     for (segment_end, _) in linebreaks(forced_line) {
-        if text_width(&forced_line[..segment_end], style) > width + LAYOUT_FLOAT_EPSILON {
+        let visible_candidate = forced_line[..segment_end].trim_end();
+        if text_width(visible_candidate, style) > width + LAYOUT_FLOAT_EPSILON {
             break;
         }
         fitted_end = segment_end;
@@ -233,7 +240,7 @@ mod tests {
         style.font_family = "Noto Sans".to_string();
         style.font_size = 42.842;
         style.letter_spacing = 0.42842;
-        style.bold = true;
+        style.font_weight = 700;
         style.font_feature_settings = Some(r#""palt" 1"#.to_string());
         let title = "LibreChat fork to MCP Hub to Code Sandbox in three layers architecture";
 
@@ -248,6 +255,47 @@ mod tests {
         assert_eq!(
             wrap_text_with_style("first\n\nthird", 1230.0, &style),
             ["first", "", "third"]
+        );
+    }
+
+    #[test]
+    fn mixed_japanese_latin_palt_wrap_matches_browser_line_rects() {
+        let mut style = CssStyle::browser_default();
+        style.font_family =
+            "\"Noto Sans JP\", \"Hiragino Kaku Gothic ProN\", \"Hiragino Sans\", \"Yu Gothic\", Meiryo, system-ui, sans-serif".to_string();
+        style.font_size = 20.0;
+        style.font_weight = 400;
+        style.line_height = 33.0;
+        style.font_feature_settings = Some(r#""palt" 1"#.to_string());
+        let text = "比較したマネージド Kubernetes 構成に対し、ECS Fargate は ARM64（Graviton）対応を含め運用負荷・コスト効率で有利だった";
+        let first_line = "比較したマネージド Kubernetes";
+        let measured = text_width(first_line, &style);
+
+        assert!((measured - 287.703_13).abs() < 0.75, "{measured}");
+        assert_eq!(
+            wrap_text_with_style(text, 288.671_88, &style),
+            [
+                "比較したマネージド Kubernetes",
+                "構成に対し、ECS Fargate は",
+                "ARM64（Graviton）対応を含め",
+                "運用負荷・コスト効率で有利だっ",
+                "た",
+            ]
+        );
+    }
+
+    #[test]
+    fn nowrap_suppresses_soft_wraps_but_preserves_explicit_breaks() {
+        let mut style = CssStyle::browser_default();
+        style.white_space = CssWhiteSpace::NoWrap;
+
+        assert_eq!(
+            wrap_text_with_style("first second", 1.0, &style),
+            ["first second"]
+        );
+        assert_eq!(
+            wrap_text_with_style("first\nsecond", 1.0, &style),
+            ["first", "second"]
         );
     }
 

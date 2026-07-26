@@ -27,6 +27,7 @@ fn raster_and_frame_failures_are_mapped_to_runtime_errors() -> TestResult {
     let layout = LayoutResult {
         svg: String::new(),
         hit_targets: Vec::new(),
+        element_boxes: Vec::new(),
         anchor_positions: HashMap::new(),
         content_height: 0.0,
     };

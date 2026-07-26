@@ -10,8 +10,8 @@ use taffy::prelude::{Display, TaffyTree};
 mod compute;
 
 use compute::{
-    compute_flow_layout, compute_root_layout, is_visible_layout_item, layout_error,
-    row_stretch_height,
+    compute_flow_layout, compute_root_layout, flow_stretch_heights, is_visible_layout_item,
+    layout_error,
 };
 
 type FlowMeasurement = (taffy::tree::NodeId, CssStyle, f32);
@@ -126,10 +126,12 @@ impl HtmlLayoutRenderer {
     ) -> Result<(), String> {
         let measurements =
             self.measure_flow_items(tree, nodes, items, available_width, inherited, details)?;
-        let stretch_height = row_stretch_height(inherited, &measurements);
-        for (node, css_style, measured_height) in measurements {
+        let stretch_heights = flow_stretch_heights(tree, inherited, &measurements)?;
+        for (index, (node, css_style, measured_height)) in measurements.into_iter().enumerate() {
             let height = if css_style.height.is_none() {
-                stretch_height.unwrap_or(measured_height)
+                stretch_heights
+                    .as_ref()
+                    .map_or(measured_height, |heights| heights[index])
             } else {
                 measured_height
             };

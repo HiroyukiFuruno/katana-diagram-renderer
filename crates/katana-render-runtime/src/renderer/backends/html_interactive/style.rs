@@ -1,5 +1,5 @@
 use super::constants::{
-    DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, MONOSPACE_CHARACTER_WIDTH_FACTOR,
+    DEFAULT_FONT_SIZE, DEFAULT_LINE_HEIGHT, FONT_WEIGHT_NORMAL, MONOSPACE_CHARACTER_WIDTH_FACTOR,
     TEXT_CHARACTER_WIDTH_FACTOR,
 };
 use super::document::attribute;
@@ -31,7 +31,7 @@ mod value;
 
 pub(super) use types::{
     CssBoxShadow, CssBoxSizing, CssGridTrack, CssGridTrackBreadth, CssLength, CssOverflow,
-    CssPosition, CssStyle, CssTextAlign,
+    CssPosition, CssStyle, CssTextAlign, CssTextTransform, CssWhiteSpace,
 };
 
 const DEFAULT_STYLE_VIEWPORT_WIDTH: f32 = 1_024.0;
@@ -53,6 +53,7 @@ impl CssStyle {
             line_height: DEFAULT_LINE_HEIGHT,
             line_height_factor: Some(DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE),
             font_family: "Noto Sans, sans-serif".to_string(),
+            font_weight: FONT_WEIGHT_NORMAL,
             display: Display::Block,
             inline_block: false,
             flex_direction: FlexDirection::Row,
@@ -118,10 +119,12 @@ impl CssStyle {
             line_height_factor: self.line_height_factor,
             font_family: self.font_family.clone(),
             font_feature_settings: self.font_feature_settings.clone(),
-            bold: self.bold,
+            font_weight: self.font_weight,
             italic: self.italic,
             underline: self.underline,
             text_align: self.text_align,
+            text_transform: self.text_transform,
+            white_space: self.white_space,
             list_style_none: self.list_style_none,
             letter_spacing: self.letter_spacing,
             viewport_width: self.viewport_width,
@@ -142,6 +145,27 @@ impl CssStyle {
             MONOSPACE_CHARACTER_WIDTH_FACTOR
         } else {
             TEXT_CHARACTER_WIDTH_FACTOR
+        }
+    }
+
+    pub(super) fn transformed_text<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        match self.text_transform {
+            CssTextTransform::None => std::borrow::Cow::Borrowed(text),
+            CssTextTransform::Uppercase => std::borrow::Cow::Owned(text.to_uppercase()),
+            CssTextTransform::Lowercase => std::borrow::Cow::Owned(text.to_lowercase()),
+            CssTextTransform::Capitalize => {
+                let mut word_start = true;
+                let mut transformed = String::with_capacity(text.len());
+                for character in text.chars() {
+                    if word_start && character.is_alphabetic() {
+                        transformed.extend(character.to_uppercase());
+                    } else {
+                        transformed.push(character);
+                    }
+                    word_start = !character.is_alphanumeric();
+                }
+                std::borrow::Cow::Owned(transformed)
+            }
         }
     }
 }

@@ -10,6 +10,11 @@ use crate::renderer::backends::html_document::HtmlDocument;
 use crate::renderer::backends::html_subresources::HtmlSubresourceLoader;
 use std::collections::HashMap;
 
+#[path = "session_interaction.rs"]
+mod session_interaction;
+
+use session_interaction::discarded_runtime_error;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StaticHtmlRuntime;
 
@@ -110,9 +115,22 @@ impl StaticHtmlRuntimeSession {
         self.interactive_nodes_at_width(1024.0)
     }
 
+    #[cfg(test)]
     pub(in crate::renderer::backends) fn interactive_nodes_at_width(
         &self,
         viewport_width: f32,
+    ) -> Result<Vec<crate::renderer::backends::html_document::HtmlDocumentNode>, HtmlRuntimeError>
+    {
+        self.interactive_nodes_at_width_with_hover(
+            viewport_width,
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    pub(in crate::renderer::backends) fn interactive_nodes_at_width_with_hover(
+        &self,
+        viewport_width: f32,
+        hovered_nodes: &std::collections::HashSet<u64>,
     ) -> Result<Vec<crate::renderer::backends::html_document::HtmlDocumentNode>, HtmlRuntimeError>
     {
         self.isolate
@@ -123,9 +141,10 @@ impl StaticHtmlRuntimeSession {
                 state
                     .document
                     .borrow()
-                    .interactive_nodes_with_styles_at_width(
+                    .interactive_nodes_with_styles_at_width_and_hover(
                         &self.external_stylesheets,
                         viewport_width,
+                        hovered_nodes,
                     )
             })
             .ok_or_else(dom_state_unavailable_error)
@@ -167,10 +186,3 @@ impl StaticHtmlRuntimeSession {
             .map_err(HtmlRuntimeError::DomBridge)
     }
 }
-
-fn discarded_runtime_error() -> HtmlRuntimeError {
-    HtmlRuntimeError::DomBridge("HTML runtime session was discarded after timeout".to_string())
-}
-
-#[path = "session_interaction.rs"]
-mod session_interaction;

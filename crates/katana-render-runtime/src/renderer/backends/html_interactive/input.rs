@@ -13,7 +13,7 @@ impl HtmlInteractiveSession {
         input.validate()?;
         match input {
             HtmlBrowserInput::Focus { focused } => self.update_focus(focused)?,
-            HtmlBrowserInput::PointerMove { .. } => {}
+            HtmlBrowserInput::PointerMove { x, y } => self.update_hover(x, y)?,
             HtmlBrowserInput::KeyDown { key } => self.dispatch_key_down(key)?,
             HtmlBrowserInput::KeyUp { key } => self.dispatch_key_up(key)?,
             HtmlBrowserInput::PointerDown { x, y, button } => self.press_target(x, y, button),
@@ -22,6 +22,19 @@ impl HtmlInteractiveSession {
             HtmlBrowserInput::Text { text } => self.append_text(&text)?,
         }
         Ok(())
+    }
+
+    fn update_hover(&mut self, x: f32, y: f32) -> Result<(), HtmlBrowserError> {
+        let hovered_node = self.element_at(x, y).map(|element| element.node_id);
+        let hovered_nodes = hovered_node.map_or_else(
+            || Ok(std::collections::HashSet::new()),
+            |node_id| self.runtime.node_path(node_id).map_err(runtime_failure),
+        )?;
+        if hovered_nodes == self.hovered_nodes {
+            return Ok(());
+        }
+        self.hovered_nodes = hovered_nodes;
+        self.render_frame()
     }
 
     fn press_target(&mut self, x: f32, y: f32, button: u8) {

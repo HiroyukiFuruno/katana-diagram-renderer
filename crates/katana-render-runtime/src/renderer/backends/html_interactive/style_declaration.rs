@@ -76,29 +76,26 @@ impl CssStyle {
     }
 
     fn apply_display(&mut self, value: &str) {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "inline" | "inline-block" => {
-                self.display = taffy::style::Display::Block;
-                self.inline_block = true;
-                return;
-            }
-            "inline-flex" => {
-                self.display = taffy::style::Display::Flex;
-                self.inline_block = true;
-                return;
-            }
-            "inline-grid" => {
-                self.display = taffy::style::Display::Grid;
-                self.inline_block = true;
-                return;
-            }
-            _ => {}
+        let normalized = value.trim().to_ascii_lowercase();
+        if self.apply_inline_display(&normalized) {
+            return;
         }
         let Ok(display) = value.parse() else {
             return;
         };
         self.display = display;
         self.inline_block = false;
+        self.inline_atomic = false;
+    }
+
+    fn apply_inline_display(&mut self, value: &str) -> bool {
+        let Some((display, atomic)) = inline_display(value) else {
+            return false;
+        };
+        self.display = display;
+        self.inline_block = true;
+        self.inline_atomic = atomic;
+        true
     }
 
     fn apply_color(&mut self, value: &str) {
@@ -149,6 +146,16 @@ impl CssStyle {
         };
         self.line_height = resolved;
         self.line_height_factor = inherited_factor;
+    }
+}
+
+fn inline_display(value: &str) -> Option<(taffy::style::Display, bool)> {
+    match value {
+        "inline" => Some((taffy::style::Display::Block, false)),
+        "inline-block" => Some((taffy::style::Display::Block, true)),
+        "inline-flex" => Some((taffy::style::Display::Flex, true)),
+        "inline-grid" => Some((taffy::style::Display::Grid, true)),
+        _ => None,
     }
 }
 
@@ -260,6 +267,7 @@ mod tests {
         style.apply("display", "inline-grid");
         assert_eq!(style.display, taffy::style::Display::Grid);
         assert!(style.inline_block);
+        assert!(style.inline_atomic);
     }
 
     #[test]
@@ -269,14 +277,17 @@ mod tests {
         style.apply("display", "inline-block");
         assert_eq!(style.display, taffy::style::Display::Block);
         assert!(style.inline_block);
+        assert!(style.inline_atomic);
 
         style.apply("display", "inline");
         assert_eq!(style.display, taffy::style::Display::Block);
         assert!(style.inline_block);
+        assert!(!style.inline_atomic);
 
         style.apply("display", "inline-flex");
         assert_eq!(style.display, taffy::style::Display::Flex);
         assert!(style.inline_block);
+        assert!(style.inline_atomic);
     }
 
     #[test]

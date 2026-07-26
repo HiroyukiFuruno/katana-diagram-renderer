@@ -4,7 +4,7 @@ use super::layout_grid_measure::grid_track_widths;
 use super::style::{CssLength, CssStyle};
 use taffy::geometry::Size;
 use taffy::prelude::{Display, Style};
-use taffy::style_helpers::{auto, length, percent};
+use taffy::style_helpers::{auto, length};
 
 #[path = "layout_intrinsic.rs"]
 mod intrinsic;
@@ -28,8 +28,10 @@ pub(super) fn leaf_style(style: CssStyle, width: f32, height: f32, available_wid
         flex_grow: style.flex_grow,
         flex_shrink: style.flex_shrink,
         flex_basis: match style.flex_basis {
-            Some(CssLength::Px(value)) => length(value),
-            Some(CssLength::Percent(value)) => percent(value),
+            Some(CssLength::Px(value)) => length(style.flex_basis_outer_width(value)),
+            Some(CssLength::Percent(value)) => {
+                length(style.flex_basis_outer_width(available_width * value))
+            }
             None => auto(),
         },
         ..Style::default()
@@ -186,13 +188,16 @@ mod tests {
     fn leaf_style_forwards_typed_flex_basis_to_taffy() {
         let mut style = CssStyle::browser_default();
         style.flex_basis = Some(CssLength::Percent(0.0));
+        style.padding_left = 8.0;
+        style.padding_right = 8.0;
         let leaf = super::leaf_style(style, 80.0, 20.0, 200.0);
-        assert_eq!(leaf.flex_basis, taffy::style_helpers::percent(0.0_f32));
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(16.0_f32));
 
         let mut pixels = CssStyle::browser_default();
         pixels.flex_basis = Some(CssLength::Px(24.0));
+        pixels.border_width = 1.0;
         let leaf = super::leaf_style(pixels, 80.0, 20.0, 200.0);
-        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(24.0_f32));
+        assert_eq!(leaf.flex_basis, taffy::style_helpers::length(26.0_f32));
 
         let leaf = super::leaf_style(CssStyle::browser_default(), 80.0, 20.0, 200.0);
         assert_eq!(leaf.flex_basis, taffy::style_helpers::auto());

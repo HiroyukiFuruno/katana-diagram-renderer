@@ -169,7 +169,13 @@ mod tests {
             StaticCss::for_interactive_document_with_styles(&document.document, &HashMap::new());
 
         assert_eq!(
-            document.interactive_node(&document.document, &css, &[]),
+            document.interactive_node(
+                &document.document,
+                &css,
+                &[],
+                1,
+                &std::collections::HashSet::new(),
+            ),
             None
         );
     }

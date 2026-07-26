@@ -49,7 +49,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   browser-style capture/target/bubble event dispatch, and scroll/content frame
   metrics. Local `release-check` passes with 100% line coverage and 0 uncovered;
   crates.io publication and public artifact verification remain.
-- [/] 1.11 Release and verify KRR `0.4.7` against a real self-contained HTML
+- [x] 1.11 Release and verify KRR `0.4.7` against a real self-contained HTML
   slide deck. Preserve explicit `<br>` line breaks, resolve viewport-relative
   lengths and `clamp()`, paint CSS linear gradients, implement selector-based
   ancestor lookup through `Element.closest()`, and repaint after slide class
@@ -151,18 +151,37 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   `release-check` passes, including 797 tests, package verification, crate-size
   enforcement, and `cargo publish --dry-run`. The real 3 MB local slideshow
   wrapper also renders its first slide at 1440 x 1000 through KRR `0.4.8`.
-- [ ] 6.6 Publish and verify KRR `0.4.8`, then update KatanA `v0.22.37` through
+- [x] 6.6 Publish and verify KRR `0.4.8`, then update KatanA `v0.22.37` through
   the crates.io dependency chain and capture fresh local-file evidence.
+
+### 7. v0.4.9 Chrome CSS Equivalence Follow-up
+
+- [x] 7.1 Capture KRR and headless Chrome at the same CSS viewport and slide
+  state, then compare representative element geometry, text metrics, colors,
+  overflow, and the resulting raster without relying on visual judgment alone.
+- [x] 7.2 Make layout measurement and SVG rasterization resolve the same
+  concrete font face for every text run so fallback differences cannot change
+  line wrapping, box geometry, or paint output.
+- [x] 7.3 Add generic regression contracts for mixed Japanese/Latin font
+  fallback, viewport-dependent typography, and layout/paint metric agreement.
+- [ ] 7.4 Re-run the real `slides.html` oracle comparison and regenerate KatanA
+  local-file evidence from registry-only KRR `0.4.9`.
+- [x] 7.5 Pass focused tests, the full workspace suite, AST lint, strict 100%
+  line coverage with 0 uncovered lines, package verification, release target
+  checks, and publish dry-run without exclusions or threshold changes.
+- [ ] 7.6 Publish and verify KRR `0.4.9` before refreshing the uncommitted
+  KatanA `v0.22.37` candidate.
 
 ## Local Verification Evidence
 
-- KRR: KRR `0.4.7` is published and verified. The local `0.4.8` patch keeps the
-  in-process Rust/V8 architecture and adds policy-bounded same-directory local
-  iframe loading, wrapper DOM APIs, and actionable in-frame failure diagnostics.
-  The full `release-check` passes with 797 tests, AST lint, strict coverage at
-  15,705 / 15,705 lines (100%, 0 uncovered), package verification, crate-size
-  enforcement, and publish dry-run. The real 3 MB local slideshow wrapper
-  renders a non-blank first slide at 1440 x 1000. Public verification remains.
+- KRR: KRR `0.4.8` is published and verified. The `0.4.9` candidate keeps the
+  in-process Rust/V8 architecture and now proves Chrome CSS equivalence for the
+  real 14-slide deck at the same 1230 x 867 CSS viewport. Structured contracts
+  cover font-face resolution, mixed Japanese/Latin wrapping, inline
+  fragmentation, dynamic hover selectors, nowrap, and gradient geometry. Its
+  complete release gate passes 822 workspace tests, AST/Biome/TypeScript and
+  asset checks, 16,782 / 16,782 covered lines, package size enforcement, and
+  publish dry-run without exclusions or threshold changes.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
   line without a local path or Git dependency.
 - KatanA: `v0.22.36` is published. The local `v0.22.37` candidate renders all

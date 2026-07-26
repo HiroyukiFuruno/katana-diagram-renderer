@@ -3,13 +3,14 @@ use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
 use super::style::CssStyle;
 use super::svg::svg_header;
-use super::types::{DetailsContext, HitTarget, LayoutResult};
+use super::types::{DetailsContext, ElementBox, HitTarget, LayoutResult};
 use std::collections::HashMap;
 
 pub(super) struct HtmlLayoutRenderer {
     pub(super) scroll_y: f32,
     pub(super) svg: String,
     pub(super) hit_targets: Vec<HitTarget>,
+    pub(super) element_boxes: Vec<ElementBox>,
     pub(super) anchor_positions: HashMap<String, f32>,
     pub(super) input_values: HashMap<u64, String>,
     pub(super) focused_input: Option<u64>,
@@ -90,6 +91,7 @@ impl HtmlLayoutRenderer {
         Ok(LayoutResult {
             svg: self.svg,
             hit_targets: self.hit_targets,
+            element_boxes: self.element_boxes,
             anchor_positions: self.anchor_positions,
             content_height,
         })
@@ -123,6 +125,7 @@ impl HtmlLayoutRenderer {
             scroll_y,
             svg,
             hit_targets: Vec::new(),
+            element_boxes: Vec::new(),
             anchor_positions: HashMap::new(),
             input_values: input_values.clone(),
             focused_input,

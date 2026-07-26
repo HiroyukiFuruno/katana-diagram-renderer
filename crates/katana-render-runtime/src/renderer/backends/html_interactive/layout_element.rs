@@ -2,7 +2,9 @@ use super::super::html_document::HtmlDocumentNode;
 use super::document::attribute;
 use super::layout::HtmlLayoutRenderer;
 use super::style::{CssPosition, CssStyle};
-use super::types::{DetailsContext, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext};
+use super::types::{
+    DetailsContext, ElementBox, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext,
+};
 
 impl HtmlLayoutRenderer {
     pub(super) fn render_node(
@@ -82,13 +84,47 @@ impl HtmlLayoutRenderer {
         if layout.style.display == taffy::style::Display::None {
             return layout.y;
         }
+        let element_box_index = self.start_element_box(element.node_id);
         let target_index = self.start_click_target(element);
         self.record_anchor(element, layout.y);
         let bottom = self.render_tag(element, layout);
+        self.finish_element_box(element_box_index, element.node_id, layout, bottom);
         if let Some(index) = target_index {
             self.finish_click_target(index, element.node_id, layout, bottom);
         }
         bottom
+    }
+
+    fn start_element_box(&mut self, node_id: u64) -> usize {
+        let index = self.element_boxes.len();
+        self.element_boxes.push(ElementBox {
+            node_id,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+        index
+    }
+
+    fn finish_element_box(
+        &mut self,
+        index: usize,
+        node_id: u64,
+        layout: LayoutContext<'_>,
+        bottom: f32,
+    ) {
+        let x = layout.x + layout.style.margin_left;
+        let y = layout.y + layout.style.margin_top;
+        let available =
+            (layout.width - layout.style.margin_left - layout.style.margin_right).max(0.0);
+        self.element_boxes[index] = ElementBox {
+            node_id,
+            x,
+            y,
+            width: layout.style.box_width(available).min(available),
+            height: (bottom - y - layout.style.margin_bottom).max(0.0),
+        };
     }
 
     fn start_click_target(&mut self, element: ElementRenderContext<'_>) -> Option<usize> {

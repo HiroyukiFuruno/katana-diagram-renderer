@@ -6,24 +6,68 @@ use taffy::geometry::Size;
 use taffy::prelude::{AvailableSpace, Display, Style, TaffyTree};
 use taffy::style_helpers::{auto, length};
 
-pub(super) fn row_stretch_height(
+const GRID_ROW_Y_EPSILON: f32 = 0.01;
+
+pub(super) fn flow_stretch_heights(
+    tree: &TaffyTree<()>,
     parent: &CssStyle,
     measurements: &[(taffy::tree::NodeId, CssStyle, f32)],
-) -> Option<f32> {
-    let is_row = matches!(
-        parent.flex_direction,
-        taffy::style::FlexDirection::Row | taffy::style::FlexDirection::RowReverse
-    );
-    let stretches = matches!(
-        parent.align_items,
-        None | Some(taffy::style::AlignItems::STRETCH)
-    );
-    (parent.display == Display::Flex && is_row && stretches).then(|| {
-        measurements
+) -> Result<Option<Vec<f32>>, String> {
+    if !stretches_children(parent) {
+        return Ok(None);
+    }
+    if parent.display == Display::Flex && is_flex_row(parent) {
+        let height = measurements
             .iter()
             .map(|(_, _, height)| *height)
-            .fold(0.0, f32::max)
-    })
+            .fold(0.0, f32::max);
+        return Ok(Some(vec![height; measurements.len()]));
+    }
+    if parent.display != Display::Grid {
+        return Ok(None);
+    }
+    grid_row_heights(tree, measurements).map(Some)
+}
+
+fn grid_row_heights(
+    tree: &TaffyTree<()>,
+    measurements: &[(taffy::tree::NodeId, CssStyle, f32)],
+) -> Result<Vec<f32>, String> {
+    let mut heights = Vec::with_capacity(measurements.len());
+    for (node, _, _) in measurements {
+        let row_y = tree.layout(*node).map_err(layout_error)?.location.y;
+        heights.push(grid_row_height(tree, measurements, row_y)?);
+    }
+    Ok(heights)
+}
+
+fn grid_row_height(
+    tree: &TaffyTree<()>,
+    measurements: &[(taffy::tree::NodeId, CssStyle, f32)],
+    row_y: f32,
+) -> Result<f32, String> {
+    let mut row_height = 0.0_f32;
+    for (candidate, _, measured_height) in measurements {
+        let candidate_y = tree.layout(*candidate).map_err(layout_error)?.location.y;
+        if (candidate_y - row_y).abs() <= GRID_ROW_Y_EPSILON {
+            row_height = row_height.max(*measured_height);
+        }
+    }
+    Ok(row_height)
+}
+
+fn stretches_children(parent: &CssStyle) -> bool {
+    matches!(
+        parent.align_items,
+        None | Some(taffy::style::AlignItems::STRETCH)
+    )
+}
+
+fn is_flex_row(parent: &CssStyle) -> bool {
+    matches!(
+        parent.flex_direction,
+        taffy::style::FlexDirection::Row | taffy::style::FlexDirection::RowReverse
+    )
 }
 
 pub(super) fn is_visible_layout_item(node: &HtmlDocumentNode, inherited: &CssStyle) -> bool {

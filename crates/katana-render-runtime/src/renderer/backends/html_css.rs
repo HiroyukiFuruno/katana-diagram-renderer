@@ -1,11 +1,14 @@
-use super::html_css_cascade::{
-    inherited_custom_properties, resolved_css_values, select_declaration, style_attribute,
-};
-use super::html_css_rule::{CssRule, parse_declarations, parse_rules};
+use super::html_css_cascade::{inherited_custom_properties, resolved_css_values};
+use super::html_css_rule::{CssRule, parse_rules};
 use super::html_css_selector::CssAncestor;
 use super::html_css_sources::{inline_styles, interactive_styles};
 use markup5ever_rcdom::Handle;
 use std::collections::HashMap;
+
+#[path = "html_css_resolution.rs"]
+mod resolution;
+
+use resolution::select_inline_declarations;
 
 pub(super) type HtmlAttributes = Vec<(String, String)>;
 
@@ -74,12 +77,34 @@ impl StaticCss {
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
     ) -> HtmlAttributes {
+        self.apply_with_ancestors_at(tag, attributes, ancestors, 1)
+    }
+
+    pub(super) fn apply_with_ancestors_at(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        sibling_index: usize,
+    ) -> HtmlAttributes {
+        self.apply_with_ancestors_at_state(tag, attributes, ancestors, sibling_index, false)
+    }
+
+    pub(super) fn apply_with_ancestors_at_state(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
+    ) -> HtmlAttributes {
         let mut rendered = attributes
             .iter()
             .filter(|(name, _)| !name.eq_ignore_ascii_case("style"))
             .cloned()
             .collect::<HtmlAttributes>();
-        let stylesheet = self.resolved_declarations(tag, attributes, ancestors);
+        let stylesheet =
+            self.resolved_declarations(tag, attributes, ancestors, sibling_index, hovered);
         if stylesheet.is_empty() {
             return rendered;
         }
@@ -92,9 +117,18 @@ impl StaticCss {
         tag: &str,
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
     ) -> Vec<String> {
         let mut selected = inherited_custom_properties(ancestors);
-        self.select_rule_declarations(tag, attributes, ancestors, &mut selected);
+        self.select_rule_declarations(
+            tag,
+            attributes,
+            ancestors,
+            sibling_index,
+            hovered,
+            &mut selected,
+        );
         select_inline_declarations(attributes, &mut selected);
         resolved_css_values(selected)
     }
@@ -104,26 +138,17 @@ impl StaticCss {
         tag: &str,
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
         selected: &mut Vec<super::html_css_cascade::SelectedDeclaration>,
     ) {
         for (rule_order, rule) in self.rules.iter().enumerate() {
-            let Some(specificity) = self.rule_specificity(rule, tag, attributes, ancestors) else {
+            let Some(specificity) =
+                self.rule_specificity(rule, tag, attributes, ancestors, sibling_index, hovered)
+            else {
                 continue;
             };
-            for (declaration_order, declaration) in rule.declarations.iter().enumerate() {
-                if self.mode == CssResolutionMode::StaticSnapshot
-                    && !static_snapshot_property(&declaration.name)
-                {
-                    continue;
-                }
-                select_declaration(
-                    selected,
-                    declaration,
-                    specificity,
-                    rule_order,
-                    declaration_order,
-                );
-            }
+            self.select_matched_declarations(rule, rule_order, specificity, selected);
         }
     }
 
@@ -133,48 +158,21 @@ impl StaticCss {
         tag: &str,
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
     ) -> Option<u16> {
         match self.mode {
             CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
-            CssResolutionMode::InteractiveRuntime => {
-                rule.matches(tag, attributes, ancestors, self.viewport_width)
-            }
+            CssResolutionMode::InteractiveRuntime => rule.matches_at_state(
+                tag,
+                attributes,
+                ancestors,
+                sibling_index,
+                self.viewport_width,
+                hovered,
+            ),
         }
     }
-}
-
-fn select_inline_declarations(
-    attributes: &HtmlAttributes,
-    selected: &mut Vec<super::html_css_cascade::SelectedDeclaration>,
-) {
-    for (declaration_order, declaration) in parse_declarations(style_attribute(attributes))
-        .iter()
-        .enumerate()
-    {
-        select_declaration(
-            selected,
-            declaration,
-            u16::MAX,
-            usize::MAX,
-            declaration_order,
-        );
-    }
-}
-
-fn static_snapshot_property(name: &str) -> bool {
-    matches!(
-        name,
-        "background"
-            | "background-color"
-            | "color"
-            | "font-family"
-            | "font-style"
-            | "font-weight"
-            | "font-size"
-            | "line-height"
-            | "text-align"
-            | "text-decoration"
-    )
 }
 
 #[cfg(test)]
@@ -246,6 +244,23 @@ mod tests {
     }
 
     #[test]
+    fn nth_child_cascade_uses_element_sibling_order_not_text_nodes() {
+        let document = HtmlDocument::parse(
+            "<style>.layer { color: red; }.layer:nth-child(3) { color: blue; }</style><main>\n<div id=first class=layer>A</div>\n<span>B</span>\n<div id=third class=layer>C</div>\n</main>",
+        );
+        let nodes = document.interactive_nodes_with_styles(&HashMap::new());
+
+        assert_eq!(
+            find_style_for_id(&nodes, "first").as_deref(),
+            Some("color: red")
+        );
+        assert_eq!(
+            find_style_for_id(&nodes, "third").as_deref(),
+            Some("color: blue")
+        );
+    }
+
+    #[test]
     fn css_variables_resolve_nested_values_fallbacks_and_cycles() {
         let custom = HashMap::from([
             ("--a".to_string(), "var(--b)".to_string()),
@@ -282,6 +297,29 @@ mod tests {
                         .map(|(_, value)| value.clone())
                 } else {
                     find_style_attribute(children, target_tag)
+                }
+            }
+            HtmlDocumentNode::Text(_) => None,
+        })
+    }
+
+    fn find_style_for_id(nodes: &[HtmlDocumentNode], target_id: &str) -> Option<String> {
+        nodes.iter().find_map(|node| match node {
+            HtmlDocumentNode::Element {
+                attributes,
+                children,
+                ..
+            } => {
+                let matches = attributes
+                    .iter()
+                    .any(|(name, value)| name == "id" && value == target_id);
+                if matches {
+                    attributes
+                        .iter()
+                        .find(|(name, _)| name == "style")
+                        .map(|(_, value)| value.clone())
+                } else {
+                    find_style_for_id(children, target_id)
                 }
             }
             HtmlDocumentNode::Text(_) => None,

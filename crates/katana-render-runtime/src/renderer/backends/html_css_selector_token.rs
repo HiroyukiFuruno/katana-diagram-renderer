@@ -10,6 +10,7 @@ struct SelectorTokenizer {
     tokens: Vec<SelectorToken>,
     current: String,
     bracket_depth: u8,
+    parenthesis_depth: u8,
     quote: Option<char>,
     pending_descendant: bool,
 }
@@ -30,17 +31,32 @@ impl SelectorTokenizer {
         if self.consume_quoted(character) {
             return Some(());
         }
+        self.consume_unquoted(character)
+    }
+
+    fn consume_unquoted(&mut self, character: char) -> Option<()> {
+        if self.unsupported_sibling_combinator(character) {
+            return None;
+        }
         match character {
-            '+' if self.bracket_depth == 0 => return None,
-            '~' if self.bracket_depth == 0 => return None,
             '\'' | '"' if self.bracket_depth > 0 => self.start_quote(character),
             '[' => self.open_attribute()?,
             ']' => self.close_attribute()?,
-            '>' if self.bracket_depth == 0 => self.push_child()?,
-            value if value.is_whitespace() && self.bracket_depth == 0 => self.push_whitespace(),
+            '(' if self.bracket_depth == 0 => self.open_parenthesis()?,
+            ')' if self.bracket_depth == 0 => self.close_parenthesis()?,
+            '>' if self.outside_group() => self.push_child()?,
+            value if value.is_whitespace() && self.outside_group() => self.push_whitespace(),
             value => self.push_value(value),
         }
         Some(())
+    }
+
+    fn unsupported_sibling_combinator(&self, character: char) -> bool {
+        self.outside_group() && matches!(character, '+' | '~')
+    }
+
+    fn outside_group(&self) -> bool {
+        self.bracket_depth == 0 && self.parenthesis_depth == 0
     }
 
     fn consume_quoted(&mut self, character: char) -> bool {
@@ -68,6 +84,18 @@ impl SelectorTokenizer {
     fn close_attribute(&mut self) -> Option<()> {
         self.bracket_depth = self.bracket_depth.checked_sub(1)?;
         self.current.push(']');
+        Some(())
+    }
+
+    fn open_parenthesis(&mut self) -> Option<()> {
+        self.parenthesis_depth = self.parenthesis_depth.checked_add(1)?;
+        self.current.push('(');
+        Some(())
+    }
+
+    fn close_parenthesis(&mut self) -> Option<()> {
+        self.parenthesis_depth = self.parenthesis_depth.checked_sub(1)?;
+        self.current.push(')');
         Some(())
     }
 
@@ -104,7 +132,7 @@ impl SelectorTokenizer {
     }
 
     fn finish(mut self) -> Option<Vec<SelectorToken>> {
-        if self.bracket_depth != 0 || self.quote.is_some() {
+        if self.bracket_depth != 0 || self.parenthesis_depth != 0 || self.quote.is_some() {
             return None;
         }
         self.push_compound();
