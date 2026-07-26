@@ -179,8 +179,8 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   real 14-slide deck at the same 1230 x 867 CSS viewport. Structured contracts
   cover font-face resolution, mixed Japanese/Latin wrapping, inline
   fragmentation, dynamic hover selectors, nowrap, and gradient geometry. Its
-  complete release gate passes 822 workspace tests, AST/Biome/TypeScript and
-  asset checks, 16,782 / 16,782 covered lines, package size enforcement, and
+  complete release gate passes 823 workspace tests, AST/Biome/TypeScript and
+  asset checks, 16,796 / 16,796 covered lines, package size enforcement, and
   publish dry-run without exclusions or threshold changes.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
   line without a local path or Git dependency.

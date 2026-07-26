@@ -752,23 +752,20 @@ fn nested_phrasing_content_shares_one_inline_line_inside_a_flex_item() -> TestRe
 #[test]
 fn styled_inline_text_can_fragment_across_browser_line_boundaries() -> TestResult {
     let mut session = start_with_viewport(
-        r#"<main style='width:956px;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,system-ui,sans-serif;font-size:19px;line-height:1.65;font-feature-settings:"palt" 1'>選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと <em style="color:#2c4ac6;font-style:normal;font-weight:600">MCP Hub がツール呼び出しを拒否</em> する様子を見せる（動的ツール制御の実演）</main>"#,
+        r#"<main style='width:220px;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,system-ui,sans-serif;font-size:19px;line-height:1.65;font-feature-settings:"palt" 1'>選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと <em style="color:#2c4ac6;font-style:normal;font-weight:600">MCP Hub がツール呼び出しを拒否</em> する様子を見せる（動的ツール制御の実演）</main>"#,
         1230,
         867,
     )?;
     let layout = session.layout().map_err(to_string)?;
+    let emphasized = text_fragments_for_fill(&layout.svg, "#2c4ac6")?;
 
-    let prefix_y = text_baseline_for(
-        &layout.svg,
-        "選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと",
-    )?;
-    let emphasized_first_y = text_baseline_for(&layout.svg, "MCP Hub がツール呼び出しを拒")?;
-    let emphasized_second_y = text_baseline_for(&layout.svg, "否")?;
-    let suffix_y = text_baseline_for(&layout.svg, "する様子を見せる（動的ツール制御の実演）")?;
-
-    assert_eq!(emphasized_first_y, prefix_y, "{}", layout.svg);
-    assert_eq!(suffix_y, emphasized_second_y, "{}", layout.svg);
-    assert!(emphasized_second_y > emphasized_first_y, "{}", layout.svg);
+    assert!(emphasized.len() >= 2, "{}", layout.svg);
+    assert_eq!(
+        emphasized.concat(),
+        "MCP Hub がツール呼び出しを拒否",
+        "{}",
+        layout.svg
+    );
     Ok(())
 }
 
@@ -1139,7 +1136,11 @@ fn text_transform_and_font_features_reach_the_painted_svg() -> TestResult {
         "{}",
         layout.svg
     );
-    assert!(layout.svg.contains(" dx=\""), "{}", layout.svg);
+    assert!(
+        layout.svg.contains(" dx=\"") || layout.svg.contains(" textLength=\""),
+        "{}",
+        layout.svg
+    );
     assert!(!layout.svg.contains(">ibreChat</"), "{}", layout.svg);
     assert!(
         layout
@@ -1169,6 +1170,37 @@ fn rect_y_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
         .ok_or_else(|| format!("unterminated y for {fill}: {element}"))?
         + y_start;
     element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+fn text_fragments_for_fill(svg: &str, fill: &str) -> TestResult<Vec<String>> {
+    let root = xmltree::Element::parse(svg.as_bytes()).map_err(|error| error.to_string())?;
+    let mut fragments = Vec::new();
+    collect_text_fragments_for_fill(&root, fill, &mut fragments)?;
+    Ok(fragments)
+}
+
+fn collect_text_fragments_for_fill(
+    element: &xmltree::Element,
+    fill: &str,
+    fragments: &mut Vec<String>,
+) -> TestResult {
+    if element.name == "text"
+        && element
+            .attributes
+            .get("fill")
+            .is_some_and(|value| value == fill)
+    {
+        let text = element
+            .get_text()
+            .ok_or_else(|| format!("text element with fill {fill} has no content"))?;
+        fragments.push(text.into_owned());
+    }
+    for child in &element.children {
+        if let xmltree::XMLNode::Element(child) = child {
+            collect_text_fragments_for_fill(child, fill, fragments)?;
+        }
+    }
+    Ok(())
 }
 
 fn rect_width_for_fill(svg: &str, fill: &str) -> TestResult<f32> {

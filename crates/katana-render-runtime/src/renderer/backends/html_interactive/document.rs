@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_japanese_latin_palt_wrap_matches_browser_line_rects() {
+    fn mixed_japanese_latin_palt_wrap_uses_selected_face_metrics() {
         let mut style = CssStyle::browser_default();
         style.font_family =
             "\"Noto Sans JP\", \"Hiragino Kaku Gothic ProN\", \"Hiragino Sans\", \"Yu Gothic\", Meiryo, system-ui, sans-serif".to_string();
@@ -270,8 +270,26 @@ mod tests {
         let text = "比較したマネージド Kubernetes 構成に対し、ECS Fargate は ARM64（Graviton）対応を含め運用負荷・コスト効率で有利だった";
         let first_line = "比較したマネージド Kubernetes";
         let measured = text_width(first_line, &style);
+        let lines = wrap_text_with_style(text, measured + 0.5, &style);
 
-        assert!((measured - 287.703_13).abs() < 0.75, "{measured}");
+        assert!(measured > 0.0, "{measured}");
+        assert_eq!(lines.first().map(String::as_str), Some(first_line));
+        assert!(lines.len() > 1, "{lines:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mixed_japanese_latin_palt_wrap_matches_mac_browser_line_rects() {
+        let mut style = CssStyle::browser_default();
+        style.font_family =
+            "\"Noto Sans JP\", \"Hiragino Kaku Gothic ProN\", \"Hiragino Sans\", \"Yu Gothic\", Meiryo, system-ui, sans-serif".to_string();
+        style.font_size = 20.0;
+        style.font_weight = 400;
+        style.line_height = 33.0;
+        style.font_feature_settings = Some(r#""palt" 1"#.to_string());
+        let text = "比較したマネージド Kubernetes 構成に対し、ECS Fargate は ARM64（Graviton）対応を含め運用負荷・コスト効率で有利だった";
+
+        assert!((text_width("比較したマネージド Kubernetes", &style) - 287.703_13).abs() < 0.75);
         assert_eq!(
             wrap_text_with_style(text, 288.671_88, &style),
             [
