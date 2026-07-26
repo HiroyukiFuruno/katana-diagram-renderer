@@ -7,7 +7,7 @@ use super::super::html_subresources::HtmlSubresourcePolicy;
 use super::document::seed_input_values;
 use super::layout::HtmlLayoutRenderer;
 use super::session_geometry::max_scroll_for;
-use super::types::{HitTarget, LayoutResult};
+use super::types::{ElementBox, HitTarget, LayoutResult};
 use super::{HtmlBrowserError, runtime_failure};
 use crate::markdown::svg_rasterize::SvgRasterizeOps;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +21,8 @@ pub(in crate::renderer::backends) struct HtmlInteractiveSession {
     pub(super) generation: u64,
     pub(super) latest_frame: Option<HtmlBrowserFrame>,
     pub(super) hit_targets: Vec<HitTarget>,
+    pub(super) element_boxes: Vec<ElementBox>,
+    pub(super) hovered_nodes: HashSet<u64>,
     pub(super) input_values: HashMap<u64, String>,
     pub(super) pressed_target: Option<u64>,
     pub(super) focused_input: Option<u64>,
@@ -65,6 +67,8 @@ impl HtmlInteractiveSession {
             generation: 0,
             latest_frame: None,
             hit_targets: Vec::new(),
+            element_boxes: Vec::new(),
+            hovered_nodes: HashSet::new(),
             input_values: HashMap::new(),
             pressed_target: None,
             focused_input: None,
@@ -118,7 +122,10 @@ impl HtmlInteractiveSession {
     pub(super) fn layout(&mut self) -> Result<LayoutResult, HtmlBrowserError> {
         let nodes = self
             .runtime
-            .interactive_nodes_at_width(self.viewport.logical_width())
+            .interactive_nodes_at_width_with_hover(
+                self.viewport.logical_width(),
+                &self.hovered_nodes,
+            )
             .map_err(runtime_failure)?;
         let clickable_nodes = self
             .runtime
@@ -181,6 +188,7 @@ impl HtmlInteractiveSession {
             .with_layout_metrics(self.scroll_y, render.content_height),
         );
         self.hit_targets = render.hit_targets;
+        self.element_boxes = render.element_boxes;
         self.content_height = render.content_height;
         Ok(())
     }

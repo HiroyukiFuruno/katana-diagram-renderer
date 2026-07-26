@@ -86,6 +86,15 @@ pub(super) struct HitTarget {
     pub(super) kind: HitTargetKind,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ElementBox {
+    pub(super) node_id: u64,
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HitTargetKind {
     Click,
@@ -96,6 +105,7 @@ pub(super) enum HitTargetKind {
 pub(super) struct LayoutResult {
     pub(super) svg: String,
     pub(super) hit_targets: Vec<HitTarget>,
+    pub(super) element_boxes: Vec<ElementBox>,
     pub(super) anchor_positions: HashMap<String, f32>,
     pub(super) content_height: f32,
 }

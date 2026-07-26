@@ -1,5 +1,7 @@
 use super::html_css::HtmlAttributes;
 
+#[path = "html_css_selector_match.rs"]
+mod matching;
 #[path = "html_css_selector_parse.rs"]
 mod parse;
 
@@ -10,13 +12,31 @@ const ID_SPECIFICITY: u16 = 100;
 pub(super) struct CssAncestor {
     tag: String,
     attributes: HtmlAttributes,
+    sibling_index: usize,
+    hovered: bool,
 }
 
 impl CssAncestor {
+    #[cfg(test)]
     pub(super) fn new(tag: &str, attributes: &HtmlAttributes) -> Self {
+        Self::new_at(tag, attributes, 1)
+    }
+
+    pub(super) fn new_at(tag: &str, attributes: &HtmlAttributes, sibling_index: usize) -> Self {
+        Self::new_at_state(tag, attributes, sibling_index, false)
+    }
+
+    pub(super) fn new_at_state(
+        tag: &str,
+        attributes: &HtmlAttributes,
+        sibling_index: usize,
+        hovered: bool,
+    ) -> Self {
         Self {
             tag: tag.to_string(),
             attributes: attributes.clone(),
+            sibling_index,
+            hovered,
         }
     }
 
@@ -39,13 +59,22 @@ struct CssCompoundSelector {
     id: Option<String>,
     attributes: Vec<CssAttributeSelector>,
     root: bool,
+    hovered: bool,
     disabled: bool,
+    not_disabled: bool,
+    nth_child: Option<CssNthExpression>,
 }
 
 #[derive(Debug)]
 struct CssAttributeSelector {
     name: String,
     value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CssNthExpression {
+    step: i32,
+    offset: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -57,56 +86,6 @@ enum CssCombinator {
 impl CssSelector {
     pub(super) fn parse(raw: &str) -> Option<Self> {
         parse::selector(raw)
-    }
-
-    pub(super) fn matches(
-        &self,
-        tag: &str,
-        attributes: &HtmlAttributes,
-        ancestors: &[CssAncestor],
-    ) -> bool {
-        self.matches_from(self.compounds.len() - 1, tag, attributes, ancestors)
-    }
-
-    fn matches_from(
-        &self,
-        index: usize,
-        tag: &str,
-        attributes: &HtmlAttributes,
-        ancestors: &[CssAncestor],
-    ) -> bool {
-        if !self.compounds[index].matches(tag, attributes) {
-            return false;
-        }
-        if index == 0 {
-            return true;
-        }
-        match self.combinators[index - 1] {
-            CssCombinator::Child => self.matches_parent(index, ancestors),
-            CssCombinator::Descendant => self.matches_ancestor(index, ancestors),
-        }
-    }
-
-    fn matches_parent(&self, index: usize, ancestors: &[CssAncestor]) -> bool {
-        ancestors.last().is_some_and(|parent| {
-            self.matches_from(
-                index - 1,
-                &parent.tag,
-                &parent.attributes,
-                &ancestors[..ancestors.len() - 1],
-            )
-        })
-    }
-
-    fn matches_ancestor(&self, index: usize, ancestors: &[CssAncestor]) -> bool {
-        ancestors.iter().enumerate().rev().any(|(position, item)| {
-            self.matches_from(
-                index - 1,
-                &item.tag,
-                &item.attributes,
-                &ancestors[..position],
-            )
-        })
     }
 
     pub(super) fn matches_static_snapshot(&self, tag: &str, attributes: &HtmlAttributes) -> bool {
@@ -137,77 +116,107 @@ impl CssSelector {
 }
 
 impl CssCompoundSelector {
-    fn matches(&self, tag: &str, attributes: &HtmlAttributes) -> bool {
-        self.tag
-            .as_ref()
-            .is_none_or(|name| name.eq_ignore_ascii_case(tag))
-            && self
-                .classes
-                .iter()
-                .all(|class| has_class(attributes, class))
-            && self
-                .id
-                .as_ref()
-                .is_none_or(|id| attribute_value(attributes, "id").is_some_and(|value| value == id))
-            && self
-                .attributes
-                .iter()
-                .all(|selector| selector.matches(attributes))
-            && (!self.root || tag.eq_ignore_ascii_case("html"))
-            && (!self.disabled || attribute_value(attributes, "disabled").is_some())
-    }
-
     fn specificity(&self) -> u16 {
         self.tag.iter().count() as u16
             + (self.classes.len()
                 + self.attributes.len()
                 + usize::from(self.root)
-                + usize::from(self.disabled)) as u16
+                + usize::from(self.hovered)
+                + usize::from(self.disabled)
+                + usize::from(self.not_disabled)
+                + usize::from(self.nth_child.is_some())) as u16
                 * CLASS_SPECIFICITY
             + self.id.iter().count() as u16 * ID_SPECIFICITY
     }
 }
 
-impl CssAttributeSelector {
-    fn matches(&self, attributes: &HtmlAttributes) -> bool {
-        attribute_value(attributes, &self.name).is_some_and(|candidate| {
-            self.value
-                .as_ref()
-                .is_none_or(|expected| candidate == expected)
-        })
+impl CssNthExpression {
+    fn parse(source: &str) -> Option<Self> {
+        let normalized = source
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match normalized.as_str() {
+            "odd" => return Some(Self { step: 2, offset: 1 }),
+            "even" => return Some(Self { step: 2, offset: 0 }),
+            _ => {}
+        }
+        let Some((step, offset)) = normalized.split_once('n') else {
+            return normalized
+                .parse::<i32>()
+                .ok()
+                .map(|offset| Self { step: 0, offset });
+        };
+        let step = match step {
+            "" | "+" => 1,
+            "-" => -1,
+            value => value.parse().ok()?,
+        };
+        let offset = if offset.is_empty() {
+            0
+        } else {
+            offset.parse().ok()?
+        };
+        Some(Self { step, offset })
     }
-}
-
-fn has_class(attributes: &HtmlAttributes, class: &str) -> bool {
-    attribute_value(attributes, "class").is_some_and(|classes| {
-        classes
-            .split_whitespace()
-            .any(|candidate| candidate == class)
-    })
-}
-
-fn attribute_value<'a>(attributes: &'a HtmlAttributes, name: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CssAncestor, CssSelector};
+    use super::{CssAncestor, CssNthExpression, CssSelector};
 
     #[test]
-    fn selector_parser_rejects_invalid_combinators_and_suffixes() {
-        assert!(CssSelector::parse(".bad!").is_none());
-        assert!(CssSelector::parse("bad!").is_none());
+    fn selector_parser_rejects_invalid_combinators() {
         assert!(CssSelector::parse("main + p").is_none());
         assert!(CssSelector::parse("main ~ p").is_none());
         assert!(CssSelector::parse("main > > p").is_none());
-        assert!(CssSelector::parse("a:hover").is_none());
-        assert!(CssSelector::parse("a[href=\"https://example.com\"]:hover").is_none());
+    }
+
+    #[test]
+    fn selector_parser_rejects_invalid_suffixes_and_attributes() {
+        assert!(CssSelector::parse(".bad!").is_none());
+        assert!(CssSelector::parse("bad!").is_none());
+        assert!(CssSelector::parse("a:focus").is_none());
+        assert!(CssSelector::parse("li:nth-child(broken)").is_none());
+        assert!(CssSelector::parse("li:nth-child(2):nth-child(3)").is_none());
         assert!(CssSelector::parse("[data-state").is_none());
         assert!(CssSelector::parse("[data!=ready]").is_none());
+    }
+
+    #[test]
+    fn nth_child_handles_zero_overflow_and_implicit_offsets() -> Result<(), String> {
+        let even = CssNthExpression::parse("2n").ok_or("2n must parse")?;
+
+        assert!(even.matches(2));
+        assert!(!even.matches(0));
+        assert!(!even.matches(usize::MAX));
+        Ok(())
+    }
+
+    #[test]
+    fn nth_child_matches_element_sibling_positions_and_ancestry() -> Result<(), String> {
+        let odd = CssSelector::parse(".layer:nth-child(2n + 1)")
+            .ok_or("nth-child selector must parse")?;
+        let bounded =
+            CssSelector::parse("li:nth-child(-n+3)").ok_or("bounded selector must parse")?;
+        let nested = CssSelector::parse("main:nth-child(2) > p:nth-child(even)")
+            .ok_or("nested selector must parse")?;
+        let attributes = attributes(&[("class", "layer")]);
+
+        assert!(odd.matches_at("div", &attributes, &[], 1));
+        assert!(!odd.matches_at("div", &attributes, &[], 2));
+        assert!(odd.matches_at("div", &attributes, &[], 5));
+        assert!(bounded.matches_at("li", &Vec::new(), &[], 3));
+        assert!(!bounded.matches_at("li", &Vec::new(), &[], 4));
+        assert!(nested.matches_at(
+            "p",
+            &Vec::new(),
+            &[CssAncestor::new_at("main", &Vec::new(), 2)],
+            4,
+        ));
+        assert_eq!(nested.specificity(), 22);
+        Ok(())
     }
 
     #[test]
@@ -228,6 +237,30 @@ mod tests {
         assert!(selector.matches("button", &attributes(&[("disabled", "")]), &[]));
         assert!(!selector.matches("button", &attributes(&[]), &[]));
         assert_eq!(selector.specificity(), 11);
+        Ok(())
+    }
+
+    #[test]
+    fn hover_and_not_disabled_match_dynamic_element_state() -> Result<(), String> {
+        let selector = CssSelector::parse(".nav button:hover:not(:disabled)")
+            .ok_or("dynamic selector must parse")?;
+        let ancestors = [CssAncestor::new_at_state(
+            "div",
+            &attributes(&[("class", "nav")]),
+            1,
+            false,
+        )];
+
+        assert!(selector.matches_at_state("button", &Vec::new(), &ancestors, 1, true));
+        assert!(!selector.matches_at_state("button", &Vec::new(), &ancestors, 1, false));
+        assert!(!selector.matches_at_state(
+            "button",
+            &attributes(&[("disabled", "")]),
+            &ancestors,
+            1,
+            true,
+        ));
+        assert_eq!(selector.specificity(), 31);
         Ok(())
     }
 

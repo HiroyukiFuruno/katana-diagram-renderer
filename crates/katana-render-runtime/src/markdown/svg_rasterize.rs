@@ -7,6 +7,8 @@ use tiny_skia::Pixmap;
 
 #[path = "svg_rasterize_font.rs"]
 mod font;
+#[path = "svg_rasterize_preprocess.rs"]
+mod preprocess;
 #[path = "svg_rasterize_text.rs"]
 mod text;
 #[path = "svg_rasterize_text_shaping.rs"]
@@ -15,18 +17,18 @@ mod text_shaping;
 mod types;
 
 use font::{html_rasterizer_options, rasterizer_options};
+#[cfg(test)]
+use preprocess::parse_light_dark_function;
+use preprocess::{effective_scale, preprocess_for_rasterizer};
 pub use types::{RasterizedSvg, SvgRasterizeError};
 
 const MAX_RASTERIZED_SVG_EDGE: f32 = 8192.0;
-const LIGHT_DARK_FUNCTION: &str = "light-dark(";
 
 pub struct SvgRasterizeOps;
 
 impl SvgRasterizeOps {
     pub fn preprocess_for_rasterizer(svg_text: &str) -> String {
-        let with_xml_entities = normalize_html_entities_for_xml(svg_text);
-        let without_foreign_objects = strip_foreign_objects(&with_xml_entities);
-        resolve_light_dark_functions(&without_foreign_objects)
+        preprocess_for_rasterizer(svg_text)
     }
 
     pub fn rasterize_svg(svg_text: &str, scale: f32) -> Result<RasterizedSvg, SvgRasterizeError> {
@@ -44,7 +46,7 @@ impl SvgRasterizeOps {
         text: &str,
         font_family: &str,
         font_size: f32,
-        bold: bool,
+        font_weight: u16,
         italic: bool,
         letter_spacing: f32,
         font_feature_settings: Option<&str>,
@@ -53,9 +55,27 @@ impl SvgRasterizeOps {
             text,
             font_family,
             font_size,
-            bold,
+            font_weight,
             italic,
             letter_spacing,
+            font_feature_settings,
+        )
+    }
+
+    pub(crate) fn shape_html_text_dx(
+        text: &str,
+        font_family: &str,
+        font_size: f32,
+        font_weight: u16,
+        italic: bool,
+        font_feature_settings: Option<&str>,
+    ) -> Option<Vec<f32>> {
+        text_shaping::shaped_html_text_dx(
+            text,
+            font_family,
+            font_size,
+            font_weight,
+            italic,
             font_feature_settings,
         )
     }
@@ -113,77 +133,6 @@ impl RasterTarget {
         render(tree, transform, &mut pixmap.as_mut());
         Ok(pixmap)
     }
-}
-
-fn normalize_html_entities_for_xml(svg_text: &str) -> String {
-    svg_text.replace("&nbsp;", "&#160;")
-}
-
-fn strip_foreign_objects(svg_text: &str) -> String {
-    let mut output = String::with_capacity(svg_text.len());
-    let mut remaining = svg_text;
-    while let Some(start) = remaining.to_ascii_lowercase().find("<foreignobject") {
-        output.push_str(&remaining[..start]);
-        let after_open = &remaining[start..];
-        let lower_after_open = after_open.to_ascii_lowercase();
-        if let Some(self_close) = lower_after_open.find("/>") {
-            remaining = &after_open[self_close + "/>".len()..];
-            continue;
-        }
-        let Some(close) = lower_after_open.find("</foreignobject>") else {
-            output.push_str(after_open);
-            return output;
-        };
-        remaining = &after_open[close + "</foreignobject>".len()..];
-    }
-    output.push_str(remaining);
-    output
-}
-
-fn resolve_light_dark_functions(svg_text: &str) -> String {
-    let mut result = String::with_capacity(svg_text.len());
-    let mut remaining = svg_text;
-    while let Some(start) = find_light_dark_function(remaining) {
-        let content_start = start + LIGHT_DARK_FUNCTION.len();
-        result.push_str(&remaining[..start]);
-        let Some((content_end, light_color)) =
-            parse_light_dark_function(&remaining[content_start..])
-        else {
-            result.push_str(&remaining[start..content_start]);
-            remaining = &remaining[content_start..];
-            continue;
-        };
-        result.push_str(light_color.trim());
-        remaining = &remaining[content_start + content_end + 1..];
-    }
-    result.push_str(remaining);
-    result
-}
-
-fn find_light_dark_function(text: &str) -> Option<usize> {
-    text.to_ascii_lowercase().find(LIGHT_DARK_FUNCTION)
-}
-
-fn parse_light_dark_function(content: &str) -> Option<(usize, &str)> {
-    let mut depth = 0usize;
-    let mut comma = None;
-    for (index, character) in content.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' if depth == 0 => return comma.map(|comma_index| (index, &content[..comma_index])),
-            ')' => depth -= 1,
-            ',' if depth == 0 && comma.is_none() => comma = Some(index),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn effective_scale(width: f32, height: f32, requested_scale: f32) -> f32 {
-    let positive_scale = requested_scale.max(f32::MIN_POSITIVE);
-    let width_scale = MAX_RASTERIZED_SVG_EDGE / width.max(1.0);
-    let height_scale = MAX_RASTERIZED_SVG_EDGE / height.max(1.0);
-    positive_scale.min(width_scale).min(height_scale)
 }
 
 #[cfg(test)]

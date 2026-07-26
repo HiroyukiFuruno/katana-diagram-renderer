@@ -24,34 +24,50 @@ pub(super) fn selector(raw: &str) -> Option<CssSelector> {
 }
 
 fn compound(source: &str) -> Option<CssCompoundSelector> {
-    let mut remaining = source.trim();
-    let tag_end = remaining
+    let (tag, mut remaining) = parse_tag(source.trim())?;
+    let mut compound = empty_compound(tag);
+    while !remaining.is_empty() {
+        remaining = parse_suffix(&mut compound, remaining)?;
+    }
+    has_selector_part(&compound).then_some(compound)
+}
+
+fn parse_tag(source: &str) -> Option<(Option<String>, &str)> {
+    let tag_end = source
         .find(|character: char| ['.', '#', '[', ':'].contains(&character))
-        .unwrap_or(remaining.len());
-    let raw_tag = &remaining[..tag_end];
+        .unwrap_or(source.len());
+    let raw_tag = &source[..tag_end];
     if !raw_tag.is_empty() && raw_tag != "*" && !raw_tag.chars().all(is_selector_character) {
         return None;
     }
     let tag = (!raw_tag.is_empty() && raw_tag != "*").then(|| raw_tag.to_ascii_lowercase());
-    remaining = &remaining[tag_end..];
-    let mut compound = CssCompoundSelector {
+    Some((tag, &source[tag_end..]))
+}
+
+fn empty_compound(tag: Option<String>) -> CssCompoundSelector {
+    CssCompoundSelector {
         tag,
         classes: Vec::new(),
         id: None,
         attributes: Vec::new(),
         root: false,
+        hovered: false,
         disabled: false,
-    };
-    while !remaining.is_empty() {
-        remaining = parse_suffix(&mut compound, remaining)?;
+        not_disabled: false,
+        nth_child: None,
     }
-    (compound.tag.is_some()
+}
+
+fn has_selector_part(compound: &CssCompoundSelector) -> bool {
+    compound.tag.is_some()
         || !compound.classes.is_empty()
         || compound.id.is_some()
         || !compound.attributes.is_empty()
         || compound.root
-        || compound.disabled)
-        .then_some(compound)
+        || compound.hovered
+        || compound.disabled
+        || compound.not_disabled
+        || compound.nth_child.is_some()
 }
 
 fn parse_suffix<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Option<&'a str> {
@@ -77,18 +93,37 @@ fn parse_suffix<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Opti
 }
 
 fn parse_pseudo_class<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Option<&'a str> {
-    if let Some(rest) = source.strip_prefix(":root") {
-        return (!compound.root).then(|| {
-            compound.root = true;
-            rest
-        });
+    if source.starts_with(":root") {
+        return parse_flag(&mut compound.root, source, ":root");
     }
-    source.strip_prefix(":disabled").and_then(|rest| {
-        (!compound.disabled).then(|| {
-            compound.disabled = true;
-            rest
-        })
+    if source.starts_with(":nth-child(") {
+        return parse_nth_child(compound, source);
+    }
+    if source.starts_with(":hover") {
+        return parse_flag(&mut compound.hovered, source, ":hover");
+    }
+    if source.starts_with(":not(:disabled)") {
+        return parse_flag(&mut compound.not_disabled, source, ":not(:disabled)");
+    }
+    parse_flag(&mut compound.disabled, source, ":disabled")
+}
+
+fn parse_flag<'a>(flag: &mut bool, source: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = source.strip_prefix(prefix)?;
+    (!*flag).then(|| {
+        *flag = true;
+        rest
     })
+}
+
+fn parse_nth_child<'a>(compound: &mut CssCompoundSelector, source: &'a str) -> Option<&'a str> {
+    let rest = source.strip_prefix(":nth-child(")?;
+    let end = rest.find(')')?;
+    if compound.nth_child.is_some() {
+        return None;
+    }
+    compound.nth_child = Some(super::CssNthExpression::parse(&rest[..end])?);
+    Some(&rest[end + 1..])
 }
 
 fn parse_identifier(source: &str) -> Option<(&str, &str)> {

@@ -1,5 +1,7 @@
 pub(super) const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub(super) const DEFAULT_LINE_HEIGHT: f32 = 22.0;
+pub(super) const FONT_WEIGHT_NORMAL: u16 = 400;
+pub(super) const FONT_WEIGHT_BOLD: u16 = 700;
 pub(super) const CONTROL_HEIGHT: f32 = 34.0;
 pub(super) const MIN_LAYOUT_WIDTH: f32 = 1.0;
 pub(super) const LAYOUT_FLOAT_EPSILON: f32 = 1.0;
@@ -20,6 +22,5 @@ pub(super) const H2_MARGIN: f32 = 10.0;
 pub(super) const H3_MARGIN: f32 = 8.0;
 pub(super) const PARAGRAPH_MARGIN: f32 = 10.0;
 pub(super) const LINE_HEIGHT_FACTOR: f32 = 1.2;
-pub(super) const BOLD_FONT_WEIGHT_MINIMUM: u16 = 600;
 pub(super) const TEXT_CHARACTER_WIDTH_FACTOR: f32 = 0.55;
 pub(super) const MONOSPACE_CHARACTER_WIDTH_FACTOR: f32 = 0.6;

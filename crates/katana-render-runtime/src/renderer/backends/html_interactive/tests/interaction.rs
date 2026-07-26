@@ -4,7 +4,7 @@ use super::support::{
     has_open_details, input_value, start, to_string,
 };
 use crate::renderer::backends::html_browser::{
-    HtmlBrowserInput, HtmlBrowserSource, HtmlBrowserViewport,
+    HtmlBrowserError, HtmlBrowserInput, HtmlBrowserSource, HtmlBrowserViewport,
 };
 
 const NO_HORIZONTAL_SCROLL: f32 = 0.0;
@@ -69,6 +69,62 @@ fn class_list_mutation_recascades_css_after_click() -> TestResult {
     assert!(frame_contains_rgb(after, [53, 168, 83]));
     let snapshot = session.runtime.snapshot().map_err(to_string)?;
     assert!(snapshot.contains(r#"class="active""#), "{snapshot}");
+    Ok(())
+}
+
+#[test]
+fn pointer_move_recascades_hover_for_the_element_and_its_ancestors() -> TestResult {
+    let mut session = start(
+        r#"<style>
+.card:hover button:not(:disabled) { background: #35a853; color: #ffffff; }
+</style>
+<div id=card class=card><button id=active>Next</button></div>
+<button id=disabled disabled>Disabled</button>"#,
+    )?;
+    let before = session
+        .latest_frame()
+        .ok_or_else(|| "initial frame must exist".to_string())?;
+    assert!(!frame_contains_rgb(before, [53, 168, 83]));
+
+    move_pointer_outside_viewport(&mut session)?;
+    move_pointer_to_element(&mut session, "active")?;
+
+    let hovered = session
+        .latest_frame()
+        .ok_or_else(|| "hovered frame must exist".to_string())?;
+    assert!(frame_contains_rgb(hovered, [53, 168, 83]));
+
+    move_pointer_to_element(&mut session, "disabled")?;
+
+    let disabled = session
+        .latest_frame()
+        .ok_or_else(|| "disabled hover frame must exist".to_string())?;
+    assert!(!frame_contains_rgb(disabled, [53, 168, 83]));
+    Ok(())
+}
+
+#[test]
+fn pointer_move_surfaces_a_stale_layout_node_path() -> TestResult {
+    let mut session = start("<div>target</div>")?;
+    let element = session
+        .element_boxes
+        .last_mut()
+        .ok_or_else(|| "element box must exist".to_string())?;
+    element.node_id = u64::MAX;
+    let pointer = (
+        element.x + element.width / 2.0,
+        element.y + element.height / 2.0,
+    );
+
+    let result = session.dispatch_input(HtmlBrowserInput::PointerMove {
+        x: pointer.0,
+        y: pointer.1,
+    });
+
+    assert!(matches!(
+        result,
+        Err(HtmlBrowserError::RuntimeFailure { .. })
+    ));
     Ok(())
 }
 
@@ -779,6 +835,35 @@ fn required_error(result: TestResult, subject: &str) -> TestResult<String> {
         Ok(()) => Err(format!("{subject} must fail")),
         Err(error) => Ok(error),
     }
+}
+
+fn move_pointer_to_element(
+    session: &mut super::super::HtmlInteractiveSession,
+    id: &str,
+) -> TestResult {
+    let node_id = session
+        .runtime
+        .node_for_element_id(id)
+        .ok_or_else(|| format!("missing element #{id}"))?
+        .0;
+    let element = session
+        .element_boxes
+        .iter()
+        .find(|element| element.node_id == node_id)
+        .cloned()
+        .ok_or_else(|| format!("missing layout box #{id}"))?;
+    session
+        .dispatch_input(HtmlBrowserInput::PointerMove {
+            x: element.x + element.width / 2.0,
+            y: element.y + element.height / 2.0 - session.scroll_y,
+        })
+        .map_err(to_string)
+}
+
+fn move_pointer_outside_viewport(session: &mut super::super::HtmlInteractiveSession) -> TestResult {
+    session
+        .dispatch_input(HtmlBrowserInput::PointerMove { x: -1.0, y: -1.0 })
+        .map_err(to_string)
 }
 
 fn dispatch_passive_input_events(session: &mut super::super::HtmlInteractiveSession) -> TestResult {

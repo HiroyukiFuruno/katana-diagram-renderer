@@ -154,6 +154,11 @@ impl CssStyle {
         content_width + self.horizontal_non_content()
     }
 
+    pub(in super::super) fn flex_basis_outer_width(&self, css_basis: f32) -> f32 {
+        self.outer_width(css_basis)
+            .max(self.horizontal_non_content())
+    }
+
     fn horizontal_non_content(&self) -> f32 {
         self.padding_left
             + self.padding_right

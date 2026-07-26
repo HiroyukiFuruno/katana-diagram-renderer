@@ -3,57 +3,82 @@ use super::font::html_rasterizer_options;
 use super::text_shaping::shaped_text_width;
 use resvg::usvg;
 
-const BOLD_FONT_WEIGHT: u16 = 700;
-const NORMAL_FONT_WEIGHT: u16 = 400;
 const FALLBACK_SVG_WIDTH: u32 = 16_384;
 const FALLBACK_HEIGHT_FACTOR: f32 = 4.0;
 const FALLBACK_BASELINE_FACTOR: f32 = 2.0;
+
+struct HtmlTextMeasure<'a> {
+    font_family: &'a str,
+    font_size: f32,
+    font_weight: u16,
+    italic: bool,
+    letter_spacing: f32,
+    font_feature_settings: Option<&'a str>,
+}
 
 pub(super) fn measure_html_text(
     text: &str,
     font_family: &str,
     font_size: f32,
-    bold: bool,
+    font_weight: u16,
     italic: bool,
     letter_spacing: f32,
     font_feature_settings: Option<&str>,
 ) -> Result<f32, SvgRasterizeError> {
-    if text.is_empty() {
-        return Ok(0.0);
-    }
-    shaped_text_width(
-        text,
+    HtmlTextMeasure {
         font_family,
         font_size,
-        bold,
+        font_weight,
         italic,
         letter_spacing,
         font_feature_settings,
-    )
-    .map_or_else(
-        || fallback_text_width(text, font_family, font_size, bold, italic, letter_spacing),
-        Ok,
-    )
+    }
+    .measure(text)
+}
+
+impl HtmlTextMeasure<'_> {
+    fn measure(&self, text: &str) -> Result<f32, SvgRasterizeError> {
+        if text.is_empty() {
+            return Ok(0.0);
+        }
+        shaped_text_width(
+            text,
+            self.font_family,
+            self.font_size,
+            self.font_weight,
+            self.italic,
+            self.letter_spacing,
+            self.font_feature_settings,
+        )
+        .map_or_else(
+            || {
+                fallback_text_width(
+                    text,
+                    self.font_family,
+                    self.font_size,
+                    self.font_weight,
+                    self.italic,
+                    self.letter_spacing,
+                )
+            },
+            Ok,
+        )
+    }
 }
 
 fn fallback_text_width(
     text: &str,
     font_family: &str,
     font_size: f32,
-    bold: bool,
+    font_weight: u16,
     italic: bool,
     letter_spacing: f32,
 ) -> Result<f32, SvgRasterizeError> {
-    let weight = if bold {
-        BOLD_FONT_WEIGHT
-    } else {
-        NORMAL_FONT_WEIGHT
-    };
     let style = if italic { "italic" } else { "normal" };
     let height = (font_size * FALLBACK_HEIGHT_FACTOR).max(1.0);
     let baseline = font_size * FALLBACK_BASELINE_FACTOR;
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{FALLBACK_SVG_WIDTH}" height="{height}"><text id="krr-text-measure" x="0" y="{baseline}" font-family="{}" font-size="{font_size}" font-weight="{weight}" font-style="{style}" letter-spacing="{letter_spacing}">{}</text></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{FALLBACK_SVG_WIDTH}" height="{height}"><text id="krr-text-measure" x="0" y="{baseline}" font-family="{}" font-size="{font_size}" font-weight="{font_weight}" font-style="{style}" letter-spacing="{letter_spacing}">{}</text></svg>"#,
         escape_xml_attribute(font_family),
         escape_xml_text(text)
     );
@@ -84,14 +109,14 @@ mod tests {
 
     #[test]
     fn empty_html_text_has_zero_width() {
-        let measured = measure_html_text("", "sans-serif", 16.0, false, false, 0.0, None);
+        let measured = measure_html_text("", "sans-serif", 16.0, 400, false, 0.0, None);
 
         assert!(matches!(measured, Ok(0.0)));
     }
 
     #[test]
     fn fallback_measurement_supports_bold_italic_text() {
-        let measured = fallback_text_width("Bold", "sans-serif", 16.0, true, true, 0.0);
+        let measured = fallback_text_width("Bold", "sans-serif", 16.0, 700, true, 0.0);
 
         assert!(matches!(measured, Ok(width) if width > 0.0));
     }

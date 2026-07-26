@@ -14,12 +14,44 @@ pub(super) struct CssRule {
 }
 
 impl CssRule {
+    #[cfg(test)]
     pub(super) fn matches(
         &self,
         tag: &str,
         attributes: &HtmlAttributes,
         ancestors: &[CssAncestor],
         viewport_width: f32,
+    ) -> Option<u16> {
+        self.matches_at(tag, attributes, ancestors, 1, viewport_width)
+    }
+
+    #[cfg(test)]
+    pub(super) fn matches_at(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        sibling_index: usize,
+        viewport_width: f32,
+    ) -> Option<u16> {
+        self.matches_at_state(
+            tag,
+            attributes,
+            ancestors,
+            sibling_index,
+            viewport_width,
+            false,
+        )
+    }
+
+    pub(super) fn matches_at_state(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        sibling_index: usize,
+        viewport_width: f32,
+        hovered: bool,
     ) -> Option<u16> {
         if !self
             .media
@@ -30,7 +62,9 @@ impl CssRule {
         }
         self.selectors
             .iter()
-            .filter(|selector| selector.matches(tag, attributes, ancestors))
+            .filter(|selector| {
+                selector.matches_at_state(tag, attributes, ancestors, sibling_index, hovered)
+            })
             .map(CssSelector::specificity)
             .max()
     }

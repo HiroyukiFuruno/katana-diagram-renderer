@@ -18,7 +18,7 @@ struct TextMeasurementKey {
     text: String,
     font_family: String,
     font_size: u32,
-    bold: bool,
+    font_weight: u16,
     italic: bool,
     letter_spacing: u32,
     font_feature_settings: Option<String>,
@@ -30,7 +30,7 @@ impl TextMeasurementKey {
             text: text.to_string(),
             font_family: style.font_family.clone(),
             font_size: style.font_size.to_bits(),
-            bold: style.bold,
+            font_weight: style.font_weight,
             italic: style.italic,
             letter_spacing: style.letter_spacing.to_bits(),
             font_feature_settings: style.font_feature_settings.clone(),
@@ -39,15 +39,16 @@ impl TextMeasurementKey {
 }
 
 pub(super) fn text_width(text: &str, style: &CssStyle) -> f32 {
-    if text.is_empty() {
+    let transformed = style.transformed_text(text);
+    if transformed.is_empty() {
         return 0.0;
     }
-    let key = TextMeasurementKey::new(text, style);
+    let key = TextMeasurementKey::new(&transformed, style);
     TEXT_WIDTH_CACHE.with(|cache| {
         if let Some(width) = cache.borrow().get(&key) {
             return *width;
         }
-        let width = measured_text_width(text, style);
+        let width = measured_text_width(&transformed, style);
         let mut cache = cache.borrow_mut();
         if cache.len() >= MAX_CACHED_MEASUREMENTS {
             cache.clear();
@@ -62,7 +63,7 @@ fn measured_text_width(text: &str, style: &CssStyle) -> f32 {
         text,
         &style.font_family,
         style.font_size,
-        style.bold,
+        style.font_weight,
         style.italic,
         style.letter_spacing,
         style.font_feature_settings.as_deref(),

@@ -8,7 +8,12 @@ pub(super) fn matches_selector(node: &Handle, selector: &CssSelector) -> bool {
     };
     let tag = name.local.to_string().to_ascii_lowercase();
     let attributes = attributes(&attrs.borrow());
-    selector.matches(&tag, &attributes, &selector_ancestors(node))
+    selector.matches_at(
+        &tag,
+        &attributes,
+        &selector_ancestors(node),
+        element_sibling_index(node),
+    )
 }
 
 fn selector_ancestors(node: &Handle) -> Vec<CssAncestor> {
@@ -17,7 +22,11 @@ fn selector_ancestors(node: &Handle) -> Vec<CssAncestor> {
     while let Some(node) = current {
         if let NodeData::Element { name, attrs, .. } = &node.data {
             let tag = name.local.to_string().to_ascii_lowercase();
-            ancestors.push(CssAncestor::new(&tag, &attributes(&attrs.borrow())));
+            ancestors.push(CssAncestor::new_at(
+                &tag,
+                &attributes(&attrs.borrow()),
+                element_sibling_index(&node),
+            ));
         }
         current = parent(&node);
     }
@@ -31,24 +40,55 @@ fn parent(node: &Handle) -> Option<Handle> {
     parent.and_then(|parent| parent.upgrade())
 }
 
+fn element_sibling_index(node: &Handle) -> usize {
+    let Some(parent) = parent(node) else {
+        return 1;
+    };
+    let mut index = 0;
+    for child in parent.children.borrow().iter() {
+        if matches!(&child.data, NodeData::Element { .. }) {
+            index += 1;
+        }
+        if std::rc::Rc::ptr_eq(child, node) {
+            return index.max(1);
+        }
+    }
+    1
+}
+
 pub(super) fn find_selector(
     node: &Handle,
     selector: &CssSelector,
     ancestors: &[CssAncestor],
 ) -> Option<Handle> {
+    find_selector_at(node, selector, ancestors, 1)
+}
+
+fn find_selector_at(
+    node: &Handle,
+    selector: &CssSelector,
+    ancestors: &[CssAncestor],
+    sibling_index: usize,
+) -> Option<Handle> {
     let mut child_ancestors = ancestors.to_vec();
     if let NodeData::Element { name, attrs, .. } = &node.data {
         let tag = name.local.to_string().to_ascii_lowercase();
         let attributes = attributes(&attrs.borrow());
-        if selector.matches(&tag, &attributes, ancestors) {
+        if selector.matches_at(&tag, &attributes, ancestors, sibling_index) {
             return Some(node.clone());
         }
-        child_ancestors.push(CssAncestor::new(&tag, &attributes));
+        child_ancestors.push(CssAncestor::new_at(&tag, &attributes, sibling_index));
     }
-    node.children
-        .borrow()
-        .iter()
-        .find_map(|child| find_selector(child, selector, &child_ancestors))
+    let mut child_index = 0;
+    for child in node.children.borrow().iter() {
+        if matches!(&child.data, NodeData::Element { .. }) {
+            child_index += 1;
+        }
+        if let Some(found) = find_selector_at(child, selector, &child_ancestors, child_index) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 pub(super) fn collect_selectors(
@@ -57,16 +97,50 @@ pub(super) fn collect_selectors(
     ancestors: &[CssAncestor],
     matches: &mut Vec<Handle>,
 ) {
+    collect_selectors_at(node, selector, ancestors, matches, 1);
+}
+
+fn collect_selectors_at(
+    node: &Handle,
+    selector: &CssSelector,
+    ancestors: &[CssAncestor],
+    matches: &mut Vec<Handle>,
+    sibling_index: usize,
+) {
     let mut child_ancestors = ancestors.to_vec();
     if let NodeData::Element { name, attrs, .. } = &node.data {
         let tag = name.local.to_string().to_ascii_lowercase();
         let attributes = attributes(&attrs.borrow());
-        if selector.matches(&tag, &attributes, ancestors) {
+        if selector.matches_at(&tag, &attributes, ancestors, sibling_index) {
             matches.push(node.clone());
         }
-        child_ancestors.push(CssAncestor::new(&tag, &attributes));
+        child_ancestors.push(CssAncestor::new_at(&tag, &attributes, sibling_index));
     }
+    let mut child_index = 0;
     for child in node.children.borrow().iter() {
-        collect_selectors(child, selector, &child_ancestors, matches);
+        if matches!(&child.data, NodeData::Element { .. }) {
+            child_index += 1;
+        }
+        collect_selectors_at(child, selector, &child_ancestors, matches, child_index);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::HtmlDocument;
+    use super::{element_sibling_index, parent};
+
+    #[test]
+    fn detached_child_uses_the_first_sibling_index() -> Result<(), String> {
+        let mut document = HtmlDocument::parse("<div><span id=target></span></div>");
+        let node_id = document
+            .query_selector("#target")
+            .ok_or("target node must exist")?;
+        let node = document.node(node_id)?;
+        let parent = parent(&node).ok_or("target parent must exist")?;
+        parent.children.borrow_mut().clear();
+
+        assert_eq!(element_sibling_index(&node), 1);
+        Ok(())
     }
 }

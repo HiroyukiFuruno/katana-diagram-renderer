@@ -5,10 +5,13 @@ use super::layout::HtmlLayoutRenderer;
 use super::style::{CssStyle, CssTextAlign};
 use super::types::DetailsContext;
 
+#[path = "layout_inline_fragment.rs"]
+mod fragment;
 #[path = "layout_inline_measure.rs"]
 mod measure;
 
-use measure::{inline_node_width, inline_run_start_x, inline_text_width, visible_inline_line};
+use fragment::{advance_inline_text, inline_flow_style};
+use measure::{inline_node_width, inline_run_start_x, visible_inline_line};
 
 struct InlineFlowState {
     x: f32,
@@ -71,10 +74,27 @@ impl HtmlLayoutRenderer {
         }
         if let HtmlDocumentNode::Text(text) = node {
             self.render_inline_text(text, inherited, inline);
+        } else if let Some(style) = inline_flow_style(node, inherited, &self.clickable_nodes) {
+            self.render_inline_flow_children(node, &style, details, inline);
         } else if let Some(width) = inline_node_width(node, inherited, inline.width) {
             self.render_inline_node(node, width, inherited, details, inline);
         } else {
             self.render_block_node(node, inherited, details, inline);
+        }
+    }
+
+    fn render_inline_flow_children(
+        &mut self,
+        node: &HtmlDocumentNode,
+        style: &CssStyle,
+        details: DetailsContext,
+        inline: &mut InlineFlowState,
+    ) {
+        let HtmlDocumentNode::Element { children, .. } = node else {
+            return;
+        };
+        for index in 0..children.len() {
+            self.render_inline_or_block_node(children, index, style, details, inline);
         }
     }
 
@@ -139,29 +159,6 @@ impl HtmlLayoutRenderer {
                 &paint_style,
             );
         }
-    }
-}
-
-fn advance_inline_text(
-    inline: &mut InlineFlowState,
-    text: &str,
-    lines: &[String],
-    remaining_width: f32,
-    initial_y: f32,
-    style: &CssStyle,
-) {
-    inline.bottom = inline
-        .bottom
-        .max(initial_y + lines.len() as f32 * style.line_height);
-    if lines.len() == 1 {
-        inline.cursor_x += inline_text_width(text, style).min(remaining_width);
-    } else {
-        inline.y = initial_y + (lines.len() - 1) as f32 * style.line_height;
-        inline.cursor_x = inline.x
-            + lines
-                .last()
-                .map(|line| inline_text_width(line, style))
-                .unwrap_or(0.0);
     }
 }
 
@@ -231,6 +228,7 @@ mod tests {
         inline.cursor_x = 15.0;
         inline.bottom = 20.0;
 
+        renderer.render_inline_flow_children(&node, &style, DetailsContext::NONE, &mut inline);
         renderer.render_inline_node(&node, 10.0, &style, DetailsContext::NONE, &mut inline);
         assert_eq!(inline.y, 20.0);
         renderer.render_block_node(&node, &style, DetailsContext::NONE, &mut inline);

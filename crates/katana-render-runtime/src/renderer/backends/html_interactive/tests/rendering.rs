@@ -466,6 +466,35 @@ fn flex_one_uses_zero_basis_and_distributes_equal_card_widths() -> TestResult {
 }
 
 #[test]
+fn flex_grow_distributes_content_space_after_each_items_box_edges() -> TestResult {
+    let mut session = start_with_viewport(
+        r#"<main style="display:flex;width:1078px;gap:22px">
+<section style="flex:1;padding:20px 24px;border:1px solid #111;background:#ef4444">One</section>
+<section style="flex:2;padding:20px 24px;border:1px solid #111;background:#35a853">Two</section>
+</main>"#,
+        1_200,
+        240,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let first = rect_width_for_fill(&layout.svg, "#ef4444")?;
+    let second = rect_width_for_fill(&layout.svg, "#35a853")?;
+
+    assert!(
+        (first - 368.666_66).abs() <= 0.5,
+        "{}\n{}",
+        first,
+        layout.svg
+    );
+    assert!(
+        (second - 687.333_3).abs() <= 0.5,
+        "{}\n{}",
+        second,
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
 fn flex_flow_paints_a_direct_text_node() -> TestResult {
     let mut session = start(r#"<main style="display:flex; width:280px">Direct flow text</main>"#)?;
     let layout = session.layout().map_err(to_string)?;
@@ -564,6 +593,28 @@ main { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 2
         "{}",
         layout.svg
     );
+    Ok(())
+}
+
+#[test]
+fn grid_default_alignment_stretches_each_item_to_its_own_row_height() -> TestResult {
+    let mut session = start(
+        r#"<main style="display:grid;grid-template-columns:100px 100px;gap:10px;width:210px">
+<section style="padding:4px;background:#ef4444">A</section>
+<section style="padding:24px 4px;background:#35a853">B</section>
+<section style="padding:4px;background:#2457d6">C</section>
+<section style="padding:12px 4px;background:#b99aff">D</section>
+</main>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let first = rect_height_for_fill(&layout.svg, "#ef4444")?;
+    let second = rect_height_for_fill(&layout.svg, "#35a853")?;
+    let third = rect_height_for_fill(&layout.svg, "#2457d6")?;
+    let fourth = rect_height_for_fill(&layout.svg, "#b99aff")?;
+
+    assert!((first - second).abs() < 0.1, "{}", layout.svg);
+    assert!((third - fourth).abs() < 0.1, "{}", layout.svg);
+    assert!(first > third, "{}", layout.svg);
     Ok(())
 }
 
@@ -668,6 +719,19 @@ a { display: inline-block; margin-right: 8px; padding: 6px; background: #b99aff;
 }
 
 #[test]
+fn default_link_keeps_a_click_target_after_inline_flow_layout() -> TestResult {
+    let mut session = start("<a href=guide/next.html>Next</a>")?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert_eq!(layout.hit_targets.len(), 1, "{}", layout.svg);
+    assert_eq!(
+        layout.hit_targets[0].node_id,
+        session.hit_targets[0].node_id
+    );
+    Ok(())
+}
+
+#[test]
 fn nested_phrasing_content_shares_one_inline_line_inside_a_flex_item() -> TestResult {
     let mut session = start(
         r#"<main style="display:flex;align-items:center;width:280px">
@@ -682,6 +746,26 @@ fn nested_phrasing_content_shares_one_inline_line_inside_a_flex_item() -> TestRe
 
     assert_eq!(separator_y, first_y, "{}", layout.svg);
     assert_eq!(total_y, first_y, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn styled_inline_text_can_fragment_across_browser_line_boundaries() -> TestResult {
+    let mut session = start_with_viewport(
+        r#"<main style='width:220px;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,system-ui,sans-serif;font-size:19px;line-height:1.65;font-feature-settings:"palt" 1'>選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと <em style="color:#2c4ac6;font-style:normal;font-weight:600">MCP Hub がツール呼び出しを拒否</em> する様子を見せる（動的ツール制御の実演）</main>"#,
+        1230,
+        867,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let emphasized = text_fragments_for_fill(&layout.svg, "#2c4ac6")?;
+
+    assert!(emphasized.len() >= 2, "{}", layout.svg);
+    assert_eq!(
+        emphasized.concat(),
+        "MCP Hub がツール呼び出しを拒否",
+        "{}",
+        layout.svg
+    );
     Ok(())
 }
 
@@ -938,18 +1022,16 @@ fn flex_auto_min_height_keeps_heading_and_margin_outside_flexible_content() -> T
 fn slide_heading_wraps_with_browser_font_shaping_at_the_declared_content_width() -> TestResult {
     let mut session = start_with_viewport(SLIDE_HEADING_DOCUMENT, 1_382, 744)?;
     let layout = session.layout().map_err(to_string)?;
+    let lines = svg_text_contents(&layout.svg);
 
-    assert!(
-        layout
-            .svg
-            .contains(">LibreChat fork to MCP Hub to Code Sandbox in three layers</text>"),
+    assert_eq!(
+        lines,
+        [
+            "LibreChat fork to MCP Hub to Code Sandbox in three layers",
+            "architecture"
+        ],
         "{}",
-        layout.svg
-    );
-    assert!(
-        layout.svg.contains(">architecture</text>"),
-        "{}",
-        layout.svg
+        layout.svg,
     );
     assert!(
         !layout.svg.contains(
@@ -1042,6 +1124,34 @@ fn disabled_pseudo_class_applies_stateful_control_style() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn text_transform_and_font_features_reach_the_painted_svg() -> TestResult {
+    let mut session = start(
+        r#"<p style='font-family:"Hiragino Sans";text-transform:uppercase;font-feature-settings:"palt" 1'>（LibreChat）</p>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains(">（LIBRECHAT）</text>"),
+        "{}",
+        layout.svg
+    );
+    assert!(
+        layout.svg.contains(" dx=\"") || layout.svg.contains(" textLength=\""),
+        "{}",
+        layout.svg
+    );
+    assert!(!layout.svg.contains(">ibreChat</"), "{}", layout.svg);
+    assert!(
+        layout
+            .svg
+            .contains("font-feature-settings=\"&quot;palt&quot; 1\""),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
 fn rect_y_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
     let marker = format!(r#" fill="{fill}""#);
     let marker_start = svg
@@ -1060,6 +1170,37 @@ fn rect_y_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
         .ok_or_else(|| format!("unterminated y for {fill}: {element}"))?
         + y_start;
     element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+fn text_fragments_for_fill(svg: &str, fill: &str) -> TestResult<Vec<String>> {
+    let root = xmltree::Element::parse(svg.as_bytes()).map_err(|error| error.to_string())?;
+    let mut fragments = Vec::new();
+    collect_text_fragments_for_fill(&root, fill, &mut fragments)?;
+    Ok(fragments)
+}
+
+fn collect_text_fragments_for_fill(
+    element: &xmltree::Element,
+    fill: &str,
+    fragments: &mut Vec<String>,
+) -> TestResult {
+    if element.name == "text"
+        && element
+            .attributes
+            .get("fill")
+            .is_some_and(|value| value == fill)
+    {
+        let text = element
+            .get_text()
+            .ok_or_else(|| format!("text element with fill {fill} has no content"))?;
+        fragments.push(text.into_owned());
+    }
+    for child in &element.children {
+        if let xmltree::XMLNode::Element(child) = child {
+            collect_text_fragments_for_fill(child, fill, fragments)?;
+        }
+    }
+    Ok(())
 }
 
 fn rect_width_for_fill(svg: &str, fill: &str) -> TestResult<f32> {
@@ -1131,6 +1272,33 @@ fn text_baseline_for(svg: &str, text: &str) -> TestResult<f32> {
         .ok_or_else(|| format!("unterminated y attribute for {text}: {element}"))?
         + y_start;
     element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+fn svg_text_contents(svg: &str) -> Vec<String> {
+    let mut remaining = svg;
+    let mut contents = Vec::new();
+    while let Some(text_start) = remaining.find("<text ") {
+        remaining = &remaining[text_start..];
+        let Some(content_start) = remaining.find('>') else {
+            break;
+        };
+        let Some(content_end) = remaining.find("</text>") else {
+            break;
+        };
+        let mut content = String::new();
+        let mut inside_tag = false;
+        for character in remaining[content_start + 1..content_end].chars() {
+            match character {
+                '<' => inside_tag = true,
+                '>' => inside_tag = false,
+                value if !inside_tag => content.push(value),
+                _ => {}
+            }
+        }
+        contents.push(content);
+        remaining = &remaining[content_end + "</text>".len()..];
+    }
+    contents
 }
 
 #[test]

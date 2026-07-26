@@ -58,6 +58,22 @@ pub(in crate::renderer::backends::html_interactive) enum CssTextAlign {
     End,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::renderer::backends::html_interactive) enum CssTextTransform {
+    #[default]
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::renderer::backends::html_interactive) enum CssWhiteSpace {
+    #[default]
+    Normal,
+    NoWrap,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::renderer::backends::html_interactive) struct CssBoxShadow {
     pub(in crate::renderer::backends::html_interactive) offset_x: f32,
@@ -102,6 +118,8 @@ pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) font_feature_settings: Option<String>,
     pub(in crate::renderer::backends::html_interactive) italic: bool,
     pub(in crate::renderer::backends::html_interactive) text_align: CssTextAlign,
+    pub(in crate::renderer::backends::html_interactive) text_transform: CssTextTransform,
+    pub(in crate::renderer::backends::html_interactive) white_space: CssWhiteSpace,
     pub(in crate::renderer::backends::html_interactive) list_style_none: bool,
     pub(in crate::renderer::backends::html_interactive) letter_spacing: f32,
     pub(in crate::renderer::backends::html_interactive) padding_top: f32,
@@ -126,10 +144,11 @@ pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) inset_right: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) inset_bottom: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) inset_left: Option<f32>,
-    pub(in crate::renderer::backends::html_interactive) bold: bool,
+    pub(in crate::renderer::backends::html_interactive) font_weight: u16,
     pub(in crate::renderer::backends::html_interactive) underline: bool,
     pub(in crate::renderer::backends::html_interactive) display: Display,
     pub(in crate::renderer::backends::html_interactive) inline_block: bool,
+    pub(in crate::renderer::backends::html_interactive) inline_atomic: bool,
     pub(in crate::renderer::backends::html_interactive) gap: f32,
     pub(in crate::renderer::backends::html_interactive) flex_direction: FlexDirection,
     pub(in crate::renderer::backends::html_interactive) flex_wrap: FlexWrap,

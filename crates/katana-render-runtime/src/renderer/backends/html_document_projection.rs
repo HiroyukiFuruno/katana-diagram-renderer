@@ -1,11 +1,25 @@
 use super::super::html_css::{HtmlAttributes, StaticCss};
 use super::super::html_css_selector::CssAncestor;
-use super::svg::{EMBEDDED_SVG_MARKUP_ATTRIBUTE, serialize_embedded_svg};
 use super::{HtmlDocument, HtmlDocumentNode};
 use html5ever::Attribute;
 use markup5ever_rcdom::{Handle, NodeData};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+#[path = "html_document_projection_svg.rs"]
+mod embedded_svg;
+
+use embedded_svg::embedded_svg_node;
+
+struct InteractiveElementProjection<'a> {
+    node: &'a Handle,
+    tag: String,
+    source_attributes: HtmlAttributes,
+    css: &'a StaticCss,
+    ancestors: &'a [CssAncestor],
+    sibling_index: usize,
+    hovered_nodes: &'a HashSet<u64>,
+}
 
 impl HtmlDocument {
     #[cfg(test)]
@@ -16,17 +30,31 @@ impl HtmlDocument {
         self.interactive_nodes_with_styles_at_width(external_stylesheets, 1024.0)
     }
 
+    #[cfg(test)]
     pub(in crate::renderer::backends) fn interactive_nodes_with_styles_at_width(
         &self,
         external_stylesheets: &HashMap<String, String>,
         viewport_width: f32,
+    ) -> Vec<HtmlDocumentNode> {
+        self.interactive_nodes_with_styles_at_width_and_hover(
+            external_stylesheets,
+            viewport_width,
+            &HashSet::new(),
+        )
+    }
+
+    pub(in crate::renderer::backends) fn interactive_nodes_with_styles_at_width_and_hover(
+        &self,
+        external_stylesheets: &HashMap<String, String>,
+        viewport_width: f32,
+        hovered_nodes: &HashSet<u64>,
     ) -> Vec<HtmlDocumentNode> {
         let css = StaticCss::for_interactive_document_with_styles_at_width(
             &self.document,
             external_stylesheets,
             viewport_width,
         );
-        self.interactive_children(&self.document, &css, &[])
+        self.interactive_children(&self.document, &css, &[], hovered_nodes)
     }
 
     fn interactive_children(
@@ -34,11 +62,18 @@ impl HtmlDocument {
         node: &Handle,
         css: &StaticCss,
         ancestors: &[CssAncestor],
+        hovered_nodes: &HashSet<u64>,
     ) -> Vec<HtmlDocumentNode> {
+        let mut sibling_index = 0;
         node.children
             .borrow()
             .iter()
-            .filter_map(|child| self.interactive_node(child, css, ancestors))
+            .filter_map(|child| {
+                if matches!(child.data, NodeData::Element { .. }) {
+                    sibling_index += 1;
+                }
+                self.interactive_node(child, css, ancestors, sibling_index, hovered_nodes)
+            })
             .collect()
     }
 
@@ -47,70 +82,73 @@ impl HtmlDocument {
         node: &Handle,
         css: &StaticCss,
         ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered_nodes: &HashSet<u64>,
     ) -> Option<HtmlDocumentNode> {
         match &node.data {
             NodeData::Text { contents } => {
                 let text = contents.borrow().to_string();
                 (!text.is_empty()).then_some(HtmlDocumentNode::Text(text))
             }
-            NodeData::Element { name, attrs, .. } => self.interactive_element(
+            NodeData::Element { name, attrs, .. } => InteractiveElementProjection {
                 node,
-                name.local.to_string().to_ascii_lowercase(),
-                attributes(&attrs.borrow()),
+                tag: name.local.to_string().to_ascii_lowercase(),
+                source_attributes: attributes(&attrs.borrow()),
                 css,
                 ancestors,
-            ),
+                sibling_index,
+                hovered_nodes,
+            }
+            .project(self),
             NodeData::Document => None,
             _ => None,
         }
     }
+}
 
-    fn interactive_element(
-        &self,
-        node: &Handle,
-        tag: String,
-        source_attributes: HtmlAttributes,
-        css: &StaticCss,
-        ancestors: &[CssAncestor],
-    ) -> Option<HtmlDocumentNode> {
-        if is_non_rendered_tag(&tag) {
+impl InteractiveElementProjection<'_> {
+    fn project(self, document: &HtmlDocument) -> Option<HtmlDocumentNode> {
+        if is_non_rendered_tag(&self.tag) {
             return None;
         }
-        let attributes = css.apply_with_ancestors(&tag, &source_attributes, ancestors);
-        let mut child_ancestors = ancestors.to_vec();
-        child_ancestors.push(CssAncestor::new(&tag, &attributes));
-        let node_id = self.node_ids.get(&(Rc::as_ptr(node) as usize)).copied()?;
-        if tag == "svg" {
-            return Some(embedded_svg_node(node_id, tag, attributes, node));
+        let node_id = document
+            .node_ids
+            .get(&(Rc::as_ptr(self.node) as usize))
+            .copied()?;
+        let hovered = self.hovered_nodes.contains(&node_id);
+        let (attributes, child_ancestors) = self.attributes_and_ancestors(hovered);
+        if self.tag == "svg" {
+            return Some(embedded_svg_node(node_id, self.tag, attributes, self.node));
         }
         Some(HtmlDocumentNode::Element {
             node_id,
-            tag,
+            tag: self.tag,
             attributes,
-            children: self.interactive_children(node, css, &child_ancestors),
+            children: document.interactive_children(
+                self.node,
+                self.css,
+                &child_ancestors,
+                self.hovered_nodes,
+            ),
         })
     }
-}
 
-fn embedded_svg_node(
-    node_id: u64,
-    tag: String,
-    mut attributes: HtmlAttributes,
-    node: &Handle,
-) -> HtmlDocumentNode {
-    let root_style = attributes
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("style"))
-        .map(|(_, value)| value.as_str());
-    attributes.push((
-        EMBEDDED_SVG_MARKUP_ATTRIBUTE.to_string(),
-        serialize_embedded_svg(node, root_style),
-    ));
-    HtmlDocumentNode::Element {
-        node_id,
-        tag,
-        attributes,
-        children: Vec::new(),
+    fn attributes_and_ancestors(&self, hovered: bool) -> (HtmlAttributes, Vec<CssAncestor>) {
+        let attributes = self.css.apply_with_ancestors_at_state(
+            &self.tag,
+            &self.source_attributes,
+            self.ancestors,
+            self.sibling_index,
+            hovered,
+        );
+        let mut child_ancestors = self.ancestors.to_vec();
+        child_ancestors.push(CssAncestor::new_at_state(
+            &self.tag,
+            &attributes,
+            self.sibling_index,
+            hovered,
+        ));
+        (attributes, child_ancestors)
     }
 }
 

@@ -6,7 +6,7 @@ use super::super::types::{
     HtmlNavigationIntent, HtmlRuntimeDispatch, HtmlRuntimeError, HtmlRuntimeEvent,
     HtmlRuntimeEventKind,
 };
-use super::{StaticHtmlRuntimeSession, discarded_runtime_error};
+use super::StaticHtmlRuntimeSession;
 
 impl StaticHtmlRuntimeSession {
     pub(crate) fn body_node(&mut self) -> Option<HtmlNodeId> {
@@ -41,6 +41,22 @@ impl StaticHtmlRuntimeSession {
         result
     }
 
+    pub(in crate::renderer::backends) fn node_path(
+        &self,
+        node_id: u64,
+    ) -> Result<std::collections::HashSet<u64>, HtmlRuntimeError> {
+        self.isolate
+            .as_ref()
+            .ok_or_else(discarded_runtime_error)?
+            .get_slot::<HtmlDomBridgeState>()
+            .ok_or_else(dom_state_unavailable_error)?
+            .document
+            .borrow()
+            .event_path(node_id)
+            .map(|path| path.into_iter().collect())
+            .map_err(HtmlRuntimeError::DomBridge)
+    }
+
     fn run_event(
         &mut self,
         event: HtmlRuntimeEvent,
@@ -67,6 +83,10 @@ impl StaticHtmlRuntimeSession {
         self.context.take();
         self.isolate.take();
     }
+}
+
+pub(super) fn discarded_runtime_error() -> HtmlRuntimeError {
+    HtmlRuntimeError::DomBridge("HTML runtime session was discarded after timeout".to_string())
 }
 
 fn dispatch_event(
