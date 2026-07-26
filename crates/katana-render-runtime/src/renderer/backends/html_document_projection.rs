@@ -129,6 +129,6 @@ pub(in crate::renderer::backends) fn attributes(source: &[Attribute]) -> HtmlAtt
 fn is_non_rendered_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "head" | "iframe" | "link" | "meta" | "script" | "style" | "template" | "title"
+        "head" | "link" | "meta" | "script" | "style" | "template" | "title"
     )
 }

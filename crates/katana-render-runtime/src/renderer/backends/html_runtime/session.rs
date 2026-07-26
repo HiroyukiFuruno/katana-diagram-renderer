@@ -28,7 +28,7 @@ impl StaticHtmlRuntime {
         let mut isolate = v8::Isolate::new(Default::default());
         isolate.set_slot(HtmlDomBridgeState::new(document));
 
-        let context = Self::execute_inline_scripts(&mut isolate, &scripts)?;
+        let context = Self::execute_inline_scripts(&mut isolate, &scripts, "about:blank")?;
         Ok(StaticHtmlRuntimeSession {
             context: Some(context),
             isolate: Some(isolate),
@@ -48,7 +48,8 @@ impl StaticHtmlRuntime {
         DiagramV8Runtime::ensure_initialized();
         let mut isolate = v8::Isolate::new(Default::default());
         isolate.set_slot(HtmlDomBridgeState::new(document));
-        let context = Self::execute_inline_scripts(&mut isolate, &resources.scripts)?;
+        let context =
+            Self::execute_inline_scripts(&mut isolate, &resources.scripts, source.origin.as_str())?;
         Ok(StaticHtmlRuntimeSession {
             context: Some(context),
             isolate: Some(isolate),
@@ -59,12 +60,13 @@ impl StaticHtmlRuntime {
     fn execute_inline_scripts(
         isolate: &mut v8::OwnedIsolate,
         scripts: &[String],
+        document_url: &str,
     ) -> Result<v8::Global<v8::Context>, HtmlRuntimeError> {
         v8::scope!(let handle_scope, isolate);
         let context = v8::Context::new(handle_scope, Default::default());
         let context_scope = &mut v8::ContextScope::new(handle_scope, context);
         v8::tc_scope!(let scope, &mut **context_scope);
-        install_dom_bridge(scope)?;
+        install_dom_bridge(scope, document_url)?;
         for script in scripts {
             evaluate(scope, "inline-script", script)?;
             perform_microtask_checkpoint(scope)?;

@@ -97,7 +97,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 4.6 Publish and verify KRR `0.4.6`, then refresh KatanA `v0.22.36` to the
   registry artifact and rerun strict coverage, release contracts, platform
   checks, and the headless interactive HTML evidence before user review.
-- [/] 4.7 Pass KRR strict 100% line coverage and package/release gates for
+- [x] 4.7 Pass KRR strict 100% line coverage and package/release gates for
   `0.4.7`, publish and verify the adjacent patch, then validate KatanA
   `v0.22.37` with registry-only dependencies. Before any KatanA commit, push,
   PR, or release, present headless initial/next-slide screenshots and machine
@@ -135,19 +135,39 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   KRR frame dimensions so slide controls, progress, and card accents match the
   browser oracle without fixture-specific selectors or layout exceptions.
 
+### 6. v0.4.8 Local Wrapper Compatibility Follow-up
+
+- [x] 6.1 Resolve same-directory local iframe documents inside KRR without
+  Chromium, WebView, a helper process, or host-side HTML parsing.
+- [x] 6.2 Support wrapper contracts that use iframe `contentDocument`, `load`,
+  synthetic `click()`, `URLSearchParams`, and the complete document `location`.
+- [x] 6.3 Enforce file root, same-directory, source-size, depth, document-count,
+  and cycle limits while keeping remote iframe fetching disabled.
+- [x] 6.4 Render an iframe-local diagnostic and emit structured runtime context
+  when a child document is missing or rejected instead of leaving a silent
+  white surface or stopping the main document.
+- [x] 6.5 Pass focused contracts, full workspace tests, AST lint, and strict
+  coverage at 15,699 / 15,699 lines with 0 uncovered lines. The complete
+  `release-check` passes, including 797 tests, package verification, crate-size
+  enforcement, and `cargo publish --dry-run`. The real 3 MB local slideshow
+  wrapper also renders its first slide at 1440 x 1000 through KRR `0.4.8`.
+- [ ] 6.6 Publish and verify KRR `0.4.8`, then update KatanA `v0.22.37` through
+  the crates.io dependency chain and capture fresh local-file evidence.
+
 ## Local Verification Evidence
 
-- KRR: KRR `0.4.6` is published and verified. The local `0.4.7` patch keeps the
-  in-process Rust/V8 architecture and adds browser-compatible slide layout,
-  per-character cross-platform font fallback, CSS math/gradient/position/flex
-  behavior, DOM selector methods, and input-driven repaint. The full
-  `release-check` passes with 786 tests, strict coverage at 15,482 / 15,482
-  lines (100%, 0 uncovered), package size verification, and publish dry-run.
-  Public release and registry verification remain.
+- KRR: KRR `0.4.7` is published and verified. The local `0.4.8` patch keeps the
+  in-process Rust/V8 architecture and adds policy-bounded same-directory local
+  iframe loading, wrapper DOM APIs, and actionable in-frame failure diagnostics.
+  The full `release-check` passes with 797 tests, AST lint, strict coverage at
+  15,699 / 15,699 lines (100%, 0 uncovered), package verification, crate-size
+  enforcement, and publish dry-run. The real 3 MB local slideshow wrapper
+  renders a non-blank first slide at 1440 x 1000. Public verification remains.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
   line without a local path or Git dependency.
 - KatanA: `v0.22.36` is published. The local `v0.22.37` candidate renders all
   14 slides from the actual Google Drive `slides.html`, passes 43 / 43 scripted
   actions, and changes slides by click and keyboard without a worker stop or
-  JavaScript exception. Registry-only rerun remains pending until KRR `0.4.7`
-  is visible on crates.io; KatanA publication remains user-gated.
+  JavaScript exception. Local `file://` and iframe-wrapper evidence remains
+  pending until KRR `0.4.8` is visible on crates.io; KatanA publication remains
+  user-gated.

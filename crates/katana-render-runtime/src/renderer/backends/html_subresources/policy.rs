@@ -35,6 +35,32 @@ impl HtmlSubresourcePolicy {
             .ok_or_else(|| format!("navigation is not allowed: {reference}"))
     }
 
+    pub(super) fn resolve_local_iframe(&self, reference: &str) -> Result<Url, String> {
+        let url = self.resolve(reference)?;
+        if self.origin.scheme() != "file"
+            || url.scheme() != "file"
+            || !relative_file_reference(reference)
+        {
+            return Err(format!("local iframe is not allowed: {reference}"));
+        }
+        let path = Self::local_file_path(&url, reference)?
+            .canonicalize()
+            .map_err(|error| format!("local iframe could not be resolved: {reference}: {error}"))?;
+        if !self
+            .local_root
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
+        {
+            return Err(format!("local iframe is not allowed: {reference}"));
+        }
+        if path.parent() != self.local_root.as_deref() {
+            return Err(format!(
+                "local iframe must be in the document directory: {reference}"
+            ));
+        }
+        Ok(url)
+    }
+
     fn resolve(&self, reference: &str) -> Result<Url, String> {
         let Ok(url) = Url::parse(reference) else {
             return self
@@ -79,6 +105,11 @@ impl HtmlSubresourcePolicy {
                 .and_then(|path| path.canonicalize().ok())
                 .is_some_and(|path| path.starts_with(root))
         })
+    }
+
+    fn local_file_path(url: &Url, reference: &str) -> Result<PathBuf, String> {
+        url.to_file_path()
+            .map_err(|_| format!("local iframe URL is invalid: {reference}"))
     }
 
     pub(in crate::renderer::backends) fn allows_local_navigation(&self, url: &Url) -> bool {
@@ -126,6 +157,14 @@ mod tests {
         let policy = HtmlSubresourcePolicy::from_source(&source);
 
         assert!(!policy.allows_subresource("ftp://example.test/image.png", &unsupported));
+        Ok(())
+    }
+
+    #[test]
+    fn remote_file_url_is_not_a_local_iframe_path() -> Result<(), Box<dyn std::error::Error>> {
+        let remote = Url::parse("file://example.test/frame.html")?;
+
+        assert!(HtmlSubresourcePolicy::local_file_path(&remote, "frame.html").is_err());
         Ok(())
     }
 }
