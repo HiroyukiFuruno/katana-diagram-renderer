@@ -1,4 +1,5 @@
 mod document;
+mod iframe;
 mod policy;
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,12 @@ impl HtmlSubresourceLoader {
     pub(super) fn load_image_data_url(&self, reference: &str) -> Result<String, String> {
         let url = self.policy.resolve_subresource(reference)?;
         transport::load_image_data_url(&url)
+    }
+
+    fn load_local_iframe(&self, reference: &str) -> Result<HtmlBrowserSource, String> {
+        let url = self.policy.resolve_local_iframe(reference)?;
+        let raw_html = transport::load_text(&url)?;
+        HtmlBrowserSource::new(raw_html, url.as_str()).map_err(|error| error.to_string())
     }
 
     pub(super) fn document_origin(&self) -> &str {

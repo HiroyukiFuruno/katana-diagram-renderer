@@ -31,6 +31,31 @@ class __KrrEvent {
   }
 }
 globalThis.Event = __KrrEvent;
+class __KrrURLSearchParams {
+  constructor(init = "") {
+    const source = String(init).replace(/^\?/, "");
+    this.__krrEntries = source
+      ? source.split("&").map((entry) => {
+          const [name, ...rest] = entry.split("=");
+          const decode = (value) => decodeURIComponent(String(value).replace(/\+/g, " "));
+          return [decode(name), decode(rest.join("="))];
+        })
+      : [];
+  }
+  get(name) {
+    name = String(name);
+    return this.__krrEntries.find(([entry]) => entry === name)?.[1] ?? null;
+  }
+  getAll(name) {
+    name = String(name);
+    return this.__krrEntries.filter(([entry]) => entry === name).map(([, value]) => value);
+  }
+  has(name) {
+    name = String(name);
+    return this.__krrEntries.some(([entry]) => entry === name);
+  }
+}
+globalThis.URLSearchParams = __KrrURLSearchParams;
 Object.assign(__KrrEvent, {
   NONE: 0,
   CAPTURING_PHASE: 1,
@@ -191,6 +216,9 @@ const __krrElement = (nodeId) => {
   return element;
 };
 const __krrElementPrototype = {
+  get contentDocument() {
+    return this.getAttribute("data-krr-local-frame") !== null ? document : null;
+  },
   get onclick() {
     return __krrEventHandlers.get(this)?.get("click") ?? null;
   },
@@ -319,6 +347,9 @@ const __krrElementPrototype = {
     __krrNativeDom("appendChild", this.__krrNodeId, child.__krrNodeId);
     return child;
   },
+  click() {
+    this.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
+  },
   remove() {
     __krrNativeDom("remove", this.__krrNodeId);
   },
@@ -403,5 +434,8 @@ globalThis.__krrDispatchDocumentContentLoaded = () => {
 globalThis.__krrDispatchWindowLoad = () => {
   __krrDocumentReadyState = "complete";
   document.dispatchEvent(new Event("readystatechange"));
+  for (const frame of document.querySelectorAll("iframe")) {
+    if (frame.contentDocument) frame.dispatchEvent(new Event("load"));
+  }
   window.dispatchEvent(new Event("load"));
 };

@@ -71,6 +71,19 @@
 - **WHEN** KatanA が workspace 内 HTML を raw HTML と完全な file document URL origin として供給し、relative local stylesheet と script を参照する
 - **THEN** KRR runtime はそれらを評価して frame を更新する
 
+#### Scenario: local wrapper が同一ディレクトリの iframe を読み込む
+
+- **WHEN** file document が同一ディレクトリの relative HTML を iframe として参照する
+- **THEN** KRR は子文書、relative stylesheet、script、image を同じ in-process Rust/V8 session で評価する
+- **THEN** iframe の `contentDocument`、`load` event、synthetic `click()`、完全な document URL の `location` を評価し、wrapper script が要求した状態を frame に描画する
+- **THEN** iframe の深さ、文書数、cycle、source size を上限で制御する
+
+#### Scenario: local iframe を読み込めない
+
+- **WHEN** iframe が欠落ファイル、root 外、別ディレクトリ、容量超過、無効 URL、cycle、または上限超過を参照する
+- **THEN** KRR は主文書 session を停止せず、当該 iframe 内に document URL、resource、原因を含む診断を表示する
+- **THEN** KRR は同じ原因を structured runtime log に出力する
+
 #### Scenario: workspace 外 resource を参照する
 
 - **WHEN** HTML が symlink escape、absolute path、許可外 origin の network URL、remote iframe を参照する

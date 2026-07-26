@@ -13,6 +13,7 @@ pub(super) type HtmlTryCatchScope<'pin, 'scope, 'object, 'isolate> =
 
 pub(super) fn install_dom_bridge(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
+    document_url: &str,
 ) -> Result<(), HtmlRuntimeError> {
     let context = scope.get_current_context();
     let global = context.global(scope);
@@ -25,7 +26,35 @@ pub(super) fn install_dom_bridge(
     global
         .set(scope, name.into(), callback.into())
         .ok_or(registration_error)?;
-    evaluate(scope, "krr-html-dom-bootstrap", DOM_BOOTSTRAP)
+    evaluate(scope, "krr-html-dom-bootstrap", DOM_BOOTSTRAP)?;
+    install_location(scope, document_url)
+}
+
+fn install_location(
+    scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
+    document_url: &str,
+) -> Result<(), HtmlRuntimeError> {
+    let location = location_value(document_url)?;
+    evaluate(
+        scope,
+        "krr-html-location",
+        &format!("globalThis.location = Object.freeze({location});"),
+    )
+}
+
+fn location_value(document_url: &str) -> Result<serde_json::Value, HtmlRuntimeError> {
+    let parsed = url::Url::parse(document_url)
+        .map_err(|error| HtmlRuntimeError::DomBridge(format!("invalid document URL: {error}")))?;
+    Ok(serde_json::json!({
+        "hash": parsed.fragment().map(|value| format!("#{value}")).unwrap_or_default(),
+        "host": parsed.host_str().unwrap_or_default(),
+        "hostname": parsed.host_str().unwrap_or_default(),
+        "href": parsed.as_str(),
+        "origin": parsed.origin().ascii_serialization(),
+        "pathname": parsed.path(),
+        "protocol": format!("{}:", parsed.scheme()),
+        "search": parsed.query().map(|value| format!("?{value}")).unwrap_or_default(),
+    }))
 }
 
 pub(super) fn evaluate(
@@ -167,6 +196,24 @@ mod tests {
         assert!(matches!(
             dom_state_unavailable_error(),
             HtmlRuntimeError::DomBridge(message) if message == "HTML DOM state is unavailable"
+        ));
+    }
+
+    #[test]
+    fn location_value_preserves_document_url_and_rejects_invalid_input() {
+        let value = location_value("file:///tmp/index.html?slide=2#deck");
+        assert!(matches!(
+            value,
+            Ok(value)
+                if value["protocol"] == "file:"
+                    && value["pathname"] == "/tmp/index.html"
+                    && value["search"] == "?slide=2"
+                    && value["hash"] == "#deck"
+        ));
+        assert!(matches!(
+            location_value("not a URL"),
+            Err(HtmlRuntimeError::DomBridge(message))
+                if message.contains("invalid document URL")
         ));
     }
 

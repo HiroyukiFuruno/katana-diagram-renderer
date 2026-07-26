@@ -1,8 +1,8 @@
 use super::{HtmlSubresourceLoader, HtmlSubresourcePolicy};
 use crate::renderer::backends::{HtmlBrowserSource, HtmlRuntime};
-use std::net::TcpListener;
 use url::Url;
 
+mod iframe;
 #[path = "test_support.rs"]
 mod support;
 use support::{
@@ -105,27 +105,6 @@ fn https_documents_reject_mixed_content_but_allow_cross_origin_https() -> TestRe
             .resolve_subresource("https://user:pass@cdn.example/style.css")
             .is_err()
     );
-    Ok(())
-}
-
-#[test]
-fn iframe_sources_are_not_fetched_by_the_subresource_loader() -> TestResult {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(to_string)?;
-    let address = listener.local_addr().map_err(to_string)?;
-    listener.set_nonblocking(true).map_err(to_string)?;
-    let source = HtmlBrowserSource::new(
-        format!("<iframe src=http://{address}/frame.html></iframe><p>Visible</p>"),
-        "https://example.test/site/index.html",
-    )
-    .map_err(to_string)?;
-
-    let _session = HtmlRuntime.open(source, viewport()?).map_err(to_string)?;
-    let error = match listener.accept() {
-        Err(error) => error,
-        Ok(_) => return Err("iframe must not be fetched".to_string()),
-    };
-
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     Ok(())
 }
 

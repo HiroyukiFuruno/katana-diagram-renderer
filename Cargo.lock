@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "katana-render-runtime"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "katana-render-runtime-cli"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "kdr-linter"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "ignore",
  "katana-ast-lint",
