@@ -108,6 +108,12 @@ impl HtmlSubresourcePolicy {
     }
 
     fn local_file_path(url: &Url, reference: &str) -> Result<PathBuf, String> {
+        if url
+            .host_str()
+            .is_some_and(|host| !host.is_empty() && host != "localhost")
+        {
+            return Err(format!("local iframe URL is invalid: {reference}"));
+        }
         url.to_file_path()
             .map_err(|_| format!("local iframe URL is invalid: {reference}"))
     }
@@ -163,8 +169,10 @@ mod tests {
     #[test]
     fn remote_file_url_is_not_a_local_iframe_path() -> Result<(), Box<dyn std::error::Error>> {
         let remote = Url::parse("file://example.test/frame.html")?;
+        let non_file = Url::parse("data:text/plain,frame")?;
 
         assert!(HtmlSubresourcePolicy::local_file_path(&remote, "frame.html").is_err());
+        assert!(HtmlSubresourcePolicy::local_file_path(&non_file, "frame.html").is_err());
         Ok(())
     }
 }

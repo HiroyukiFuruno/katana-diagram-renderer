@@ -147,7 +147,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   when a child document is missing or rejected instead of leaving a silent
   white surface or stopping the main document.
 - [x] 6.5 Pass focused contracts, full workspace tests, AST lint, and strict
-  coverage at 15,699 / 15,699 lines with 0 uncovered lines. The complete
+  coverage at 15,705 / 15,705 lines with 0 uncovered lines. The complete
   `release-check` passes, including 797 tests, package verification, crate-size
   enforcement, and `cargo publish --dry-run`. The real 3 MB local slideshow
   wrapper also renders its first slide at 1440 x 1000 through KRR `0.4.8`.
@@ -160,7 +160,7 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   in-process Rust/V8 architecture and adds policy-bounded same-directory local
   iframe loading, wrapper DOM APIs, and actionable in-frame failure diagnostics.
   The full `release-check` passes with 797 tests, AST lint, strict coverage at
-  15,699 / 15,699 lines (100%, 0 uncovered), package verification, crate-size
+  15,705 / 15,705 lines (100%, 0 uncovered), package verification, crate-size
   enforcement, and publish dry-run. The real 3 MB local slideshow wrapper
   renders a non-blank first slide at 1440 x 1000. Public verification remains.
 - KDV: KDV `0.3.3` is published and verified and accepts the KRR `^0.4` patch
