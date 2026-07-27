@@ -44,8 +44,8 @@ impl HtmlSubresourceLoader {
         transport::load_image_data_url(&url)
     }
 
-    fn load_local_iframe(&self, reference: &str) -> Result<HtmlBrowserSource, String> {
-        let url = self.policy.resolve_local_iframe(reference)?;
+    fn load_iframe(&self, reference: &str) -> Result<HtmlBrowserSource, String> {
+        let url = self.policy.resolve_iframe(reference)?;
         let raw_html = transport::load_text(&url)?;
         HtmlBrowserSource::new(raw_html, url.as_str()).map_err(|error| error.to_string())
     }

@@ -181,10 +181,22 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   updates.
 - [x] 8.3 Add deterministic regression coverage for nested flow measurement
   reuse and retain strict 100% line coverage with 0 uncovered lines.
-- [ ] 8.4 Re-run the real slideshow through the registry-only KRR -> KDV ->
+- [x] 8.4 Re-run the real slideshow through the registry-only KRR -> KDV ->
   KatanA chain and record first-frame and input-burst evidence.
-- [ ] 8.5 Pass the complete KRR release gate, publish and verify KRR `0.4.10`,
+- [x] 8.5 Pass the complete KRR release gate, publish and verify KRR `0.4.10`,
   then update KDV and KatanA through crates.io dependencies only.
+
+### 9. v0.4.11 Same-origin Network Iframe Follow-up
+
+- [x] 9.1 Reproduce the KatanA URL-viewer failure where a same-origin relative
+  iframe is rejected after the host supplies the main HTTP document.
+- [x] 9.2 Permit only same-origin `http`/`https` iframe documents while keeping
+  cross-origin, `data:`, `file:`, filesystem escape, depth, count, cycle, and
+  source-size restrictions enforced.
+- [x] 9.3 Prove iframe CSS, JavaScript, `load`, and `contentDocument` behavior
+  through an actual loopback HTTP transport integration test.
+- [ ] 9.4 Pass strict 100% coverage and the complete release gate, publish and
+  verify KRR `0.4.11`, then update KDV and KatanA through crates.io only.
 
 ## Local Verification Evidence
 

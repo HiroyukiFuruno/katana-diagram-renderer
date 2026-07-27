@@ -7,7 +7,7 @@ pub(super) fn load_document_resources(
     loader: &HtmlSubresourceLoader,
     document: &mut HtmlDocument,
 ) -> Result<HtmlDocumentResources, String> {
-    super::iframe::inline_local_iframes(loader, document);
+    super::iframe::inline_iframes(loader, document);
     let stylesheets = load_stylesheets(loader, &document.document);
     let scripts = load_scripts(loader, &document.document);
     inline_images(loader, &document.document);

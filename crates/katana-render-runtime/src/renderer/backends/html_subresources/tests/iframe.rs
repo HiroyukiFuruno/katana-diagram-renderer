@@ -30,7 +30,7 @@ document.getElementById('deck').addEventListener('load', function () {
 </script>"#;
 
 #[test]
-fn remote_iframe_sources_are_not_fetched() -> TestResult {
+fn cross_origin_network_iframe_sources_are_not_fetched() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(to_string)?;
     let address = listener.local_addr().map_err(to_string)?;
     listener.set_nonblocking(true).map_err(to_string)?;
@@ -226,8 +226,8 @@ fn local_iframe_depth_and_document_limits_render_diagnostics() -> TestResult {
         .map_err(to_string)?;
     let rendered = document.render();
 
-    assert!(rendered.contains("local iframe nesting exceeds 8"));
-    assert!(rendered.contains("local iframe count exceeds 16"));
+    assert!(rendered.contains("iframe nesting exceeds 8"));
+    assert!(rendered.contains("iframe count exceeds 16"));
     Ok(())
 }
 
