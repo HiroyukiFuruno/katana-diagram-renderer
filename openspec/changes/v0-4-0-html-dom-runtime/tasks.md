@@ -164,13 +164,27 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   line wrapping, box geometry, or paint output.
 - [x] 7.3 Add generic regression contracts for mixed Japanese/Latin font
   fallback, viewport-dependent typography, and layout/paint metric agreement.
-- [ ] 7.4 Re-run the real `slides.html` oracle comparison and regenerate KatanA
+- [x] 7.4 Re-run the real `slides.html` oracle comparison and regenerate KatanA
   local-file evidence from registry-only KRR `0.4.9`.
 - [x] 7.5 Pass focused tests, the full workspace suite, AST lint, strict 100%
   line coverage with 0 uncovered lines, package verification, release target
   checks, and publish dry-run without exclusions or threshold changes.
-- [ ] 7.6 Publish and verify KRR `0.4.9` before refreshing the uncommitted
+- [x] 7.6 Publish and verify KRR `0.4.9` before refreshing the uncommitted
   KatanA `v0.22.37` candidate.
+
+### 8. v0.4.10 Interactive Layout Performance
+
+- [x] 8.1 Reproduce the real 3 MB `slides.html` first-frame and post-input
+  latency directly through the in-process KRR session.
+- [x] 8.2 Remove repeated recursive flex/grid measurement within a frame
+  without caching layout state across JavaScript, input, hover, or resize
+  updates.
+- [x] 8.3 Add deterministic regression coverage for nested flow measurement
+  reuse and retain strict 100% line coverage with 0 uncovered lines.
+- [ ] 8.4 Re-run the real slideshow through the registry-only KRR -> KDV ->
+  KatanA chain and record first-frame and input-burst evidence.
+- [ ] 8.5 Pass the complete KRR release gate, publish and verify KRR `0.4.10`,
+  then update KDV and KatanA through crates.io dependencies only.
 
 ## Local Verification Evidence
 

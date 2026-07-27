@@ -1,10 +1,11 @@
 use super::super::html_browser::HtmlBrowserViewport;
 use super::super::html_document::HtmlDocumentNode;
 use super::constants::MIN_LAYOUT_WIDTH;
+use super::layout_measurement_cache::FlowMeasurementCache;
 use super::style::CssStyle;
 use super::svg::svg_header;
 use super::types::{DetailsContext, ElementBox, HitTarget, LayoutResult};
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub(super) struct HtmlLayoutRenderer {
     pub(super) scroll_y: f32,
@@ -24,6 +25,7 @@ pub(super) struct HtmlLayoutRenderer {
     pub(super) document_paint_start: usize,
     pub(super) deferred_paint: Vec<DeferredPaint>,
     pub(super) next_paint_order: u64,
+    pub(super) flow_measurements: Rc<RefCell<FlowMeasurementCache>>,
 }
 
 pub(super) struct DeferredPaint {
@@ -73,6 +75,7 @@ impl HtmlLayoutRenderer {
             input_values,
             focused_input,
             clickable_nodes,
+            Rc::new(RefCell::new(FlowMeasurementCache::default())),
         );
         let width = viewport.logical_width().max(MIN_LAYOUT_WIDTH);
         let root_style = CssStyle::browser_default_for_viewport(
@@ -97,11 +100,28 @@ impl HtmlLayoutRenderer {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn new(
         viewport: HtmlBrowserViewport,
         scroll_y: f32,
         input_values: &HashMap<u64, String>,
         focused_input: Option<u64>,
+    ) -> Self {
+        Self::new_with_measurement_cache(
+            viewport,
+            scroll_y,
+            input_values,
+            focused_input,
+            Rc::new(RefCell::new(FlowMeasurementCache::default())),
+        )
+    }
+
+    pub(super) fn new_with_measurement_cache(
+        viewport: HtmlBrowserViewport,
+        scroll_y: f32,
+        input_values: &HashMap<u64, String>,
+        focused_input: Option<u64>,
+        flow_measurements: Rc<RefCell<FlowMeasurementCache>>,
     ) -> Self {
         Self::new_with_clickable_nodes(
             viewport,
@@ -109,6 +129,7 @@ impl HtmlLayoutRenderer {
             input_values,
             focused_input,
             &std::collections::HashSet::new(),
+            flow_measurements,
         )
     }
 
@@ -118,9 +139,9 @@ impl HtmlLayoutRenderer {
         input_values: &HashMap<u64, String>,
         focused_input: Option<u64>,
         clickable_nodes: &std::collections::HashSet<u64>,
+        flow_measurements: Rc<RefCell<FlowMeasurementCache>>,
     ) -> Self {
-        let svg = svg_header(viewport);
-        let document_paint_start = svg.len();
+        let (svg, document_paint_start) = initial_svg(viewport);
         Self {
             scroll_y,
             svg,
@@ -139,12 +160,19 @@ impl HtmlLayoutRenderer {
             document_paint_start,
             deferred_paint: Vec::new(),
             next_paint_order: 0,
+            flow_measurements,
         }
     }
 
     pub(super) fn ensure_layout_succeeded(&mut self) -> Result<(), String> {
         self.layout_error.take().map_or(Ok(()), Err)
     }
+}
+
+fn initial_svg(viewport: HtmlBrowserViewport) -> (String, usize) {
+    let svg = svg_header(viewport);
+    let document_paint_start = svg.len();
+    (svg, document_paint_start)
 }
 
 #[cfg(test)]

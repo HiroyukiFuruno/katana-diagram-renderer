@@ -16,6 +16,7 @@ mod layout_grid_measure;
 mod layout_grid_track;
 mod layout_inline;
 mod layout_input;
+mod layout_measurement_cache;
 mod layout_media;
 mod layout_paint;
 mod layout_paint_order;
