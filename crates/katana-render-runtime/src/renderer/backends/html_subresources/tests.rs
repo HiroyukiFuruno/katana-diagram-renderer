@@ -3,6 +3,7 @@ use crate::renderer::backends::{HtmlBrowserSource, HtmlRuntime};
 use url::Url;
 
 mod iframe;
+mod network_iframe;
 #[path = "test_support.rs"]
 mod support;
 use support::{

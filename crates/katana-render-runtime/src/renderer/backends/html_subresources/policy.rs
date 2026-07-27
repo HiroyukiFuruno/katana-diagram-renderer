@@ -35,12 +35,19 @@ impl HtmlSubresourcePolicy {
             .ok_or_else(|| format!("navigation is not allowed: {reference}"))
     }
 
-    pub(super) fn resolve_local_iframe(&self, reference: &str) -> Result<Url, String> {
+    pub(super) fn resolve_iframe(&self, reference: &str) -> Result<Url, String> {
         let url = self.resolve(reference)?;
-        if self.origin.scheme() != "file"
-            || url.scheme() != "file"
-            || !relative_file_reference(reference)
-        {
+        match self.origin.scheme() {
+            "file" => self.resolve_local_iframe(reference, url),
+            "http" | "https" if valid_network_url(&url) && url.origin() == self.origin.origin() => {
+                Ok(url)
+            }
+            _ => Err(format!("iframe is not allowed: {reference}")),
+        }
+    }
+
+    fn resolve_local_iframe(&self, reference: &str, url: Url) -> Result<Url, String> {
+        if url.scheme() != "file" || !relative_file_reference(reference) {
             return Err(format!("local iframe is not allowed: {reference}"));
         }
         let path = Self::local_file_path(&url, reference)?

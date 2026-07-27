@@ -64,7 +64,7 @@
 
 ### Requirement: KatanA は主文書を供給し、KRR は subresource と host capability を policy で制御しなければならない
 
-システムは、KatanA が local file または user-entered URL の主文書を取得し、raw HTML と完全な document URL origin を KDV 経由で KRR に供給しなければならない（MUST）。KRR は document URL origin を基準に許可された stylesheet、script、image などの subresource だけを in-process runtime に解決しなければならない（MUST）。KDV はこの値を転送するだけとし、主文書を取得してはならない（MUST NOT）。KRR は network の許可外 origin、root 外 filesystem、subprocess、remote iframe を resource policy で拒否しなければならない（MUST NOT）。
+システムは、KatanA が local file または user-entered URL の主文書を取得し、raw HTML と完全な document URL origin を KDV 経由で KRR に供給しなければならない（MUST）。KRR は document URL origin を基準に許可された stylesheet、script、image などの subresource だけを in-process runtime に解決しなければならない（MUST）。KDV はこの値を転送するだけとし、主文書を取得してはならない（MUST NOT）。KRR は network の許可外 origin、root 外 filesystem、subprocess、cross-origin iframe を resource policy で拒否しなければならない（MUST NOT）。
 
 #### Scenario: local script と stylesheet を読み込む
 
@@ -82,6 +82,12 @@
 
 - **WHEN** iframe が欠落ファイル、root 外、別ディレクトリ、容量超過、無効 URL、cycle、または上限超過を参照する
 - **THEN** KRR は主文書 session を停止せず、当該 iframe 内に document URL、resource、原因を含む診断を表示する
+
+#### Scenario: network document が同一 origin の iframe を読み込む
+
+- **WHEN** `http` または `https` document が同一 origin の HTML を iframe として参照する
+- **THEN** KRR は iframe document、CSS、JavaScript、`load` event、`contentDocument` を同一 in-process runtime 内で評価する
+- **THEN** cross-origin、`data:`、`file:` iframe は取得せず、当該 iframe 内に原因を表示する
 - **THEN** KRR は同じ原因を structured runtime log に出力する
 
 #### Scenario: workspace 外 resource を参照する

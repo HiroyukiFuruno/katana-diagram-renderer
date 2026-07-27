@@ -6,12 +6,12 @@ use markup5ever_rcdom::{Handle, NodeData};
 use std::collections::HashSet;
 use std::rc::Rc;
 
-const MAX_LOCAL_IFRAME_DEPTH: usize = 8;
-const MAX_LOCAL_IFRAME_DOCUMENTS: usize = 16;
-const LOCAL_FRAME_ATTRIBUTE: &str = "data-krr-local-frame";
+const MAX_IFRAME_DEPTH: usize = 8;
+const MAX_IFRAME_DOCUMENTS: usize = 16;
+const FRAME_ATTRIBUTE: &str = "data-krr-local-frame";
 const FRAME_ERROR_ATTRIBUTE: &str = "data-krr-frame-error";
 
-pub(super) fn inline_local_iframes(loader: &HtmlSubresourceLoader, document: &mut HtmlDocument) {
+pub(super) fn inline_iframes(loader: &HtmlSubresourceLoader, document: &mut HtmlDocument) {
     let mut state = LocalIframeState::default();
     inline_document(loader, document, &mut state, 0);
 }
@@ -50,7 +50,7 @@ fn inline_frame(
     reference: &str,
 ) -> Result<(), String> {
     validate_frame_limits(state, depth)?;
-    let source = loader.load_local_iframe(reference)?;
+    let source = loader.load_iframe(reference)?;
     let origin = register_frame_origin(state, &source)?;
     let result = inline_loaded_frame(loader, document, state, depth, frame, &source);
     state.active_origins.remove(&origin);
@@ -58,15 +58,11 @@ fn inline_frame(
 }
 
 fn validate_frame_limits(state: &LocalIframeState, depth: usize) -> Result<(), String> {
-    if depth >= MAX_LOCAL_IFRAME_DEPTH {
-        return Err(format!(
-            "local iframe nesting exceeds {MAX_LOCAL_IFRAME_DEPTH}"
-        ));
+    if depth >= MAX_IFRAME_DEPTH {
+        return Err(format!("iframe nesting exceeds {MAX_IFRAME_DEPTH}"));
     }
-    if state.loaded_documents >= MAX_LOCAL_IFRAME_DOCUMENTS {
-        return Err(format!(
-            "local iframe count exceeds {MAX_LOCAL_IFRAME_DOCUMENTS}"
-        ));
+    if state.loaded_documents >= MAX_IFRAME_DOCUMENTS {
+        return Err(format!("iframe count exceeds {MAX_IFRAME_DOCUMENTS}"));
     }
     Ok(())
 }
@@ -77,7 +73,7 @@ fn register_frame_origin(
 ) -> Result<String, String> {
     let origin = source.origin.as_str().to_string();
     if !state.active_origins.insert(origin.clone()) {
-        return Err("local iframe cycle was rejected".to_string());
+        return Err("iframe cycle was rejected".to_string());
     }
     state.loaded_documents += 1;
     Ok(origin)
@@ -93,8 +89,8 @@ fn inline_loaded_frame(
 ) -> Result<(), String> {
     let mut child = HtmlDocument::parse(&source.raw_html);
     inline_document(loader, &mut child, state, depth + 1);
-    let child_root = required_html_root(&child.document, "local iframe document")?;
-    attach_child_document(document, frame, child_root, LOCAL_FRAME_ATTRIBUTE)
+    let child_root = required_html_root(&child.document, "iframe document")?;
+    attach_child_document(document, frame, child_root, FRAME_ATTRIBUTE)
 }
 
 fn attach_child_document(
@@ -165,7 +161,7 @@ fn log_iframe_failure(loader: &HtmlSubresourceLoader, reference: &str, error: &s
     let document_origin = loader.document_origin();
     tracing::warn!(
         layer = "KRR runtime",
-        operation = "load_local_iframe",
+        operation = "load_iframe",
         document = document_origin,
         resource_kind = "iframe",
         resource = reference,
