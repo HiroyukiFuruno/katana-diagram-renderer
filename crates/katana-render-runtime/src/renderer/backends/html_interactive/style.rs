@@ -134,6 +134,10 @@ impl CssStyle {
         }
     }
 
+    pub(super) fn inherited_text_style(&self) -> Self {
+        self.element_defaults()
+    }
+
     fn resolve_inherited_line_height(&mut self) {
         if let Some(factor) = self.line_height_factor {
             self.line_height = self.font_size * factor;

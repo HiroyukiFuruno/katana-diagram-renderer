@@ -62,7 +62,7 @@ pub(super) fn item_style(
         HtmlDocumentNode::Element {
             tag, attributes, ..
         } => CssStyle::from_element(tag, attributes, inherited),
-        HtmlDocumentNode::Text(_) => inherited.clone(),
+        HtmlDocumentNode::Text(_) => inherited.inherited_text_style(),
     }
 }
 
@@ -182,6 +182,44 @@ mod tests {
             measured_widths(&items, &styles, 100.0, &column),
             [100.0, 100.0]
         );
+    }
+
+    #[test]
+    fn anonymous_flex_text_inherits_typography_without_the_container_box() {
+        let text = HtmlDocumentNode::Text("1".to_string());
+        let mut container = CssStyle::browser_default();
+        container.display = Display::Flex;
+        container.width = Some(CssLength::Px(46.0));
+        container.height = Some(46.0);
+        container.min_width = Some(CssLength::Px(46.0));
+        container.padding_left = 7.0;
+        container.margin_left = 9.0;
+        container.flex_grow = 1.0;
+        container.background = Some("#1e3a8a".to_string());
+        container.font_size = 20.0;
+        container.font_weight = 700;
+        container.color = "#ffffff".to_string();
+
+        let anonymous = item_style(&text, &container, 46.0, 1);
+
+        assert_anonymous_box_defaults(&anonymous);
+        assert_inherited_typography(&anonymous);
+    }
+
+    fn assert_anonymous_box_defaults(anonymous: &CssStyle) {
+        assert_eq!(anonymous.width, None);
+        assert_eq!(anonymous.height, None);
+        assert_eq!(anonymous.min_width, None);
+        assert_eq!(anonymous.padding_left, 0.0);
+        assert_eq!(anonymous.margin_left, 0.0);
+        assert_eq!(anonymous.flex_grow, 0.0);
+        assert_eq!(anonymous.background, None);
+    }
+
+    fn assert_inherited_typography(anonymous: &CssStyle) {
+        assert_eq!(anonymous.font_size, 20.0);
+        assert_eq!(anonymous.font_weight, 700);
+        assert_eq!(anonymous.color, "#ffffff");
     }
 
     #[test]

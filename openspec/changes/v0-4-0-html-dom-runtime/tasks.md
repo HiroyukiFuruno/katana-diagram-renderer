@@ -195,8 +195,19 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   source-size restrictions enforced.
 - [x] 9.3 Prove iframe CSS, JavaScript, `load`, and `contentDocument` behavior
   through an actual loopback HTTP transport integration test.
-- [ ] 9.4 Pass strict 100% coverage and the complete release gate, publish and
+- [x] 9.4 Pass strict 100% coverage and the complete release gate, publish and
   verify KRR `0.4.11`, then update KDV and KatanA through crates.io only.
+
+### 10. v0.4.12 Anonymous Flex Text Alignment
+
+- [x] 10.1 Reproduce the circular badge regression and prove that anonymous
+  flex text inherits typography without inheriting the container's width,
+  height, margin, padding, flex sizing, or paint properties.
+- [x] 10.2 Match the headless Chrome `46x46` badge geometry within the bounded
+  text-position tolerance and retain the existing HTML layout, paint, and
+  interaction contracts.
+- [ ] 10.3 Pass strict 100% coverage and the complete release gate, publish and
+  verify KRR `0.4.12`, then update KatanA through crates.io only.
 
 ## Local Verification Evidence
 
