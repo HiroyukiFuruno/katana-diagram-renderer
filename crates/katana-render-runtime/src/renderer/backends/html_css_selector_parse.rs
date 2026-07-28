@@ -24,12 +24,13 @@ pub(super) fn selector(raw: &str) -> Option<CssSelector> {
 }
 
 fn compound(source: &str) -> Option<CssCompoundSelector> {
-    let (tag, mut remaining) = parse_tag(source.trim())?;
+    let source = source.trim();
+    let (tag, mut remaining) = parse_tag(source)?;
     let mut compound = empty_compound(tag);
     while !remaining.is_empty() {
         remaining = parse_suffix(&mut compound, remaining)?;
     }
-    has_selector_part(&compound).then_some(compound)
+    (source == "*" || has_selector_part(&compound)).then_some(compound)
 }
 
 fn parse_tag(source: &str) -> Option<(Option<String>, &str)> {

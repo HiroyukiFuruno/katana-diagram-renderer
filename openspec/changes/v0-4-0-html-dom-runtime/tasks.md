@@ -206,8 +206,19 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 10.2 Match the headless Chrome `46x46` badge geometry within the bounded
   text-position tolerance and retain the existing HTML layout, paint, and
   interaction contracts.
-- [ ] 10.3 Pass strict 100% coverage and the complete release gate, publish and
+- [x] 10.3 Pass strict 100% coverage and the complete release gate, publish and
   verify KRR `0.4.12`, then update KatanA through crates.io only.
+
+### 11. v0.4.13 Universal Box Sizing and Pager Alignment
+
+- [x] 11.1 Parse the bare universal selector `*` as a zero-specificity selector
+  so global declarations such as `box-sizing: border-box` apply to controls.
+- [x] 11.2 Center button text within its CSS content box when flex main/cross
+  axis alignment requests center. Match Chrome's `40x40` pager button and
+  `x=17` glyph geometry with generic row and column regression contracts.
+- [ ] 11.3 Pass strict 100% coverage and the complete release gate, publish and
+  verify KRR `0.4.13`, then update KatanA through crates.io only and regenerate
+  the native full-deck and cursor-free pager evidence before user approval.
 
 ## Local Verification Evidence
 

@@ -97,6 +97,7 @@ impl CssSelector {
         self.compounds.len() == 1
             && self.compounds[0].classes.len() <= 1
             && self.compounds[0].attributes.is_empty()
+            && self.compounds[0].specificity() > 0
     }
 
     pub(super) fn specificity(&self) -> u16 {
@@ -171,6 +172,24 @@ mod tests {
         assert!(CssSelector::parse("main + p").is_none());
         assert!(CssSelector::parse("main ~ p").is_none());
         assert!(CssSelector::parse("main > > p").is_none());
+    }
+
+    #[test]
+    fn universal_selector_matches_every_element_with_zero_specificity() -> Result<(), String> {
+        let selector = CssSelector::parse("*").ok_or("universal selector must parse")?;
+
+        assert!(selector.matches("button", &Vec::new(), &[]));
+        assert!(selector.matches("section", &Vec::new(), &[]));
+        assert!(!selector.matches_static_snapshot("button", &Vec::new()));
+        assert_eq!(selector.specificity(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn bare_dynamic_pseudo_selectors_parse_without_a_tag_or_class() {
+        for source in [":hover", ":disabled", ":not(:disabled)", ":nth-child(2)"] {
+            assert!(CssSelector::parse(source).is_some(), "{source}");
+        }
     }
 
     #[test]
