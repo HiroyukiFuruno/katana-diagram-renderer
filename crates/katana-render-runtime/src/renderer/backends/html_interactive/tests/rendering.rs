@@ -772,6 +772,37 @@ html, body { margin: 0; }
 }
 
 #[test]
+fn anonymous_text_is_centered_inside_a_border_box_flex_pager_button() -> TestResult {
+    let mut session = start(
+        r#"<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+button {
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 1px solid #bfbfbf; background: #fff; color: #1a1a1a;
+  font-family: Arial, sans-serif; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+}
+</style><button>‹</button>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let text_x = text_x_for(&layout.svg, "‹")?;
+    let text_y = text_baseline_for(&layout.svg, "‹")?;
+    assert_eq!(layout.hit_targets.len(), 1, "{}", layout.svg);
+    let target = &layout.hit_targets[0];
+
+    assert_eq!(
+        [target.width, target.height],
+        [40.0, 40.0],
+        "{}",
+        layout.svg
+    );
+    assert!((text_x - 17.0).abs() <= 1.0, "{}", layout.svg);
+    assert!((text_y - 25.0).abs() <= 2.0, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
 fn styled_inline_text_can_fragment_across_browser_line_boundaries() -> TestResult {
     let mut session = start_with_viewport(
         r#"<main style='width:220px;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,system-ui,sans-serif;font-size:19px;line-height:1.65;font-feature-settings:"palt" 1'>選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと <em style="color:#2c4ac6;font-style:normal;font-weight:600">MCP Hub がツール呼び出しを拒否</em> する様子を見せる（動的ツール制御の実演）</main>"#,
