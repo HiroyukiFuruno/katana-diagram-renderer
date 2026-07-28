@@ -5,8 +5,9 @@ use url::Url;
 const MAX_SUBRESOURCE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(super) fn load_text(url: &Url) -> Result<String, String> {
-    String::from_utf8(load_bytes(url)?)
-        .map_err(|error| format!("subresource is not UTF-8: {error}"))
+    let text = String::from_utf8(load_bytes(url)?)
+        .map_err(|error| format!("subresource is not UTF-8: {error}"))?;
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
 }
 
 pub(super) fn load_image_data_url(url: &Url) -> Result<String, String> {
@@ -83,6 +84,9 @@ mod tests {
     fn data_urls_support_percent_base64_and_image_passthrough() {
         with_url("data:text/plain,hello%20world", |percent| {
             assert_eq!(load_text(percent).ok().as_deref(), Some("hello world"));
+        });
+        with_url("data:text/plain,%EF%BB%BF%7B%22ready%22%3Atrue%7D", |bom| {
+            assert_eq!(load_text(bom).ok().as_deref(), Some("{\"ready\":true}"));
         });
         with_url("data:text/plain;base64,aGVsbG8=", |base64| {
             assert_eq!(load_text(base64).ok().as_deref(), Some("hello"));

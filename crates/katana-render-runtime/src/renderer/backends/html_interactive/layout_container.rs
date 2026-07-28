@@ -1,17 +1,23 @@
-use super::super::html_document::HtmlDocumentNode;
-use super::constants::MIN_LAYOUT_WIDTH;
-use super::document::node_text;
+use super::super::html_browser::HtmlBrowserViewport;
 use super::layout::{ContainingBlock, HtmlLayoutRenderer};
 use super::style::{CssPosition, CssStyle};
-use super::text_metrics::text_width;
 use super::types::{DetailsContext, LayoutContext};
+use std::rc::Rc;
 
-struct ContainerGeometry {
-    start: f32,
-    box_x: f32,
-    box_width: f32,
-    inner_x: f32,
-    inner_width: f32,
+#[path = "layout_container_helpers.rs"]
+mod helpers;
+#[path = "layout_container_tests.rs"]
+#[cfg(test)]
+mod tests;
+
+use super::super::html_document::HtmlDocumentNode;
+use helpers::{
+    ContainerGeometry, accept_flow_result, container_geometry, container_height,
+    inline_container_width,
+};
+
+pub(super) fn horizontal_box_geometry(x: f32, width: f32, style: &CssStyle) -> (f32, f32) {
+    helpers::horizontal_box_geometry(x, width, style)
 }
 
 impl HtmlLayoutRenderer {
@@ -28,7 +34,8 @@ impl HtmlLayoutRenderer {
         let geometry = container_geometry(x, y, width, style);
         let box_start = self.svg.len();
         let content_start = self.svg.len();
-        let containing_block = container_containing_block(&geometry, style, self.viewport_height);
+        let containing_block =
+            self.resolve_container_containing_block(children, &geometry, style, details);
         if let Some(block) = containing_block {
             self.push_containing_block(block);
         }
@@ -39,6 +46,97 @@ impl HtmlLayoutRenderer {
         let height = container_height(bottom, geometry.start, style);
         self.paint_container_box(box_start, content_start, &geometry, height, style);
         geometry.start + height + style.margin_bottom
+    }
+
+    fn resolve_container_containing_block(
+        &mut self,
+        children: &[HtmlDocumentNode],
+        geometry: &ContainerGeometry,
+        style: &CssStyle,
+        details: DetailsContext,
+    ) -> Option<ContainingBlock> {
+        if style.position == CssPosition::Static {
+            return None;
+        }
+        let height = style
+            .height
+            .map(|height| style.outer_height(height))
+            .unwrap_or_else(|| {
+                let measured =
+                    self.measure_auto_container_height(children, geometry, style, details);
+                self.accept_auto_container_height(measured, style)
+            });
+        Some(ContainingBlock {
+            x: geometry.box_x,
+            y: geometry.start,
+            width: geometry.box_width,
+            height,
+        })
+    }
+
+    fn accept_auto_container_height(
+        &mut self,
+        measured: Result<f32, String>,
+        style: &CssStyle,
+    ) -> f32 {
+        measured.unwrap_or_else(|error| {
+            self.layout_error = Some(error);
+            style.minimum_outer_height()
+        })
+    }
+
+    fn measure_auto_container_height(
+        &self,
+        children: &[HtmlDocumentNode],
+        geometry: &ContainerGeometry,
+        style: &CssStyle,
+        details: DetailsContext,
+    ) -> Result<f32, String> {
+        let renderer = self.new_auto_measurement_renderer(geometry);
+        let bottom = self
+            .render_children_for_auto_measurement(renderer, children, geometry, style, details)?;
+        Ok(container_height(bottom, 0.0, style))
+    }
+
+    fn new_auto_measurement_renderer(&self, geometry: &ContainerGeometry) -> Self {
+        let viewport = HtmlBrowserViewport {
+            width: geometry.inner_width.ceil().max(1.0) as u32,
+            height: 1,
+            device_scale_factor: 1.0,
+        };
+        Self::new_with_measurement_cache(
+            viewport,
+            0.0,
+            &self.input_values,
+            self.focused_input,
+            Rc::clone(&self.flow_measurements),
+        )
+    }
+
+    fn render_children_for_auto_measurement(
+        &self,
+        mut renderer: Self,
+        children: &[HtmlDocumentNode],
+        geometry: &ContainerGeometry,
+        style: &CssStyle,
+        details: DetailsContext,
+    ) -> Result<f32, String> {
+        let mut child_style = style.clone();
+        child_style.percentage_height_basis = None;
+        let content_start = style.border_top_width() + style.padding_top;
+        renderer
+            .render_flow_children(
+                children,
+                LayoutContext::new(
+                    0.0,
+                    content_start,
+                    geometry.inner_width,
+                    &child_style,
+                    details,
+                ),
+                None,
+            )
+            .and_then(|bottom| renderer.ensure_layout_succeeded().map(|()| bottom))
     }
 
     fn paint_container_box(
@@ -95,122 +193,104 @@ impl HtmlLayoutRenderer {
     }
 }
 
-fn container_containing_block(
-    geometry: &ContainerGeometry,
-    style: &CssStyle,
-    viewport_height: f32,
-) -> Option<ContainingBlock> {
-    (style.position != CssPosition::Static).then(|| ContainingBlock {
-        x: geometry.box_x,
-        y: geometry.start,
-        width: geometry.box_width,
-        height: style
-            .height
-            .map(|height| style.outer_height(height))
-            .unwrap_or(viewport_height),
-    })
-}
-
-fn inline_container_width(children: &[HtmlDocumentNode], available: f32, style: &CssStyle) -> f32 {
-    if !style.inline_block || style.width.is_some() || style.max_width.is_some() {
-        return available;
-    }
-    let text = node_text(children);
-    let content = text_width(&text, style);
-    (style.outer_width(content) + style.margin_left + style.margin_right)
-        .min(available)
-        .max(MIN_LAYOUT_WIDTH)
-}
-
-fn container_geometry(x: f32, y: f32, width: f32, style: &CssStyle) -> ContainerGeometry {
-    let start = y + style.margin_top;
-    let box_x = x + style.margin_left;
-    let available_width = (width - style.margin_left - style.margin_right).max(MIN_LAYOUT_WIDTH);
-    let box_width = style
-        .box_width(available_width)
-        .min(available_width)
-        .max(MIN_LAYOUT_WIDTH);
-    ContainerGeometry {
-        start,
-        box_x,
-        box_width,
-        inner_x: box_x + style.border_left_width() + style.padding_left,
-        inner_width: style.content_width(box_width).max(MIN_LAYOUT_WIDTH),
-    }
-}
-
-fn container_height(bottom: f32, start: f32, style: &CssStyle) -> f32 {
-    let natural = bottom - start + style.padding_bottom + style.border_bottom_width();
-    let resolved = style.height.map_or_else(
-        || natural.max(style.minimum_outer_height()),
-        |height| style.outer_height(height).max(style.minimum_outer_height()),
-    );
-    style.max_height.map_or(resolved, |maximum| {
-        resolved.min(style.outer_height(maximum))
-    })
-}
-
-fn accept_flow_result(
-    layout_error: &mut Option<String>,
-    result: Result<f32, String>,
-    start: f32,
-) -> f32 {
-    match result {
-        Ok(bottom) => bottom,
-        Err(error) => {
-            *layout_error = Some(error);
-            start
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+mod container_contract_tests {
+    use super::super::style::CssStyle;
+    use super::super::types::DetailsContext;
     use super::{
-        CssStyle, HtmlDocumentNode, accept_flow_result, container_height, inline_container_width,
+        HtmlLayoutRenderer,
+        helpers::{ContainerGeometry, container_geometry},
     };
+    use crate::renderer::backends::html_browser::HtmlBrowserViewport;
+    use crate::renderer::backends::html_document::HtmlDocumentNode;
+    use std::collections::HashMap;
+
+    fn geometry(width: f32, style: &CssStyle) -> ContainerGeometry {
+        container_geometry(0.0, 0.0, width, style)
+    }
 
     #[test]
-    fn flow_errors_are_recorded_at_the_container_start() {
-        let mut layout_error = None;
-
-        assert_eq!(
-            accept_flow_result(&mut layout_error, Err("taffy failed".to_string()), 12.0),
-            12.0
+    fn auto_container_height_uses_auto_measurement_when_height_is_not_explicit() {
+        let viewport = HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        };
+        let mut renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
+        let children = [HtmlDocumentNode::Text("hello".to_string())];
+        let mut style = CssStyle::browser_default();
+        style.position = super::super::style::CssPosition::Absolute;
+        style.height = None;
+        let container = renderer.resolve_container_containing_block(
+            &children,
+            &geometry(300.0, &style),
+            &style,
+            DetailsContext::NONE,
         );
-        assert_eq!(layout_error, Some("taffy failed".to_string()));
+
+        assert!(container.is_some_and(|container| container.height > 0.0));
     }
 
     #[test]
-    fn inline_container_shrinks_to_text_content() {
-        let children = [HtmlDocumentNode::Text("Compact label".to_string())];
-        let mut style = CssStyle::browser_default();
-        style.inline_block = true;
-
-        assert!(inline_container_width(&children, 300.0, &style) < 120.0);
-        assert_eq!(inline_container_width(&children, 40.0, &style), 40.0);
-    }
-
-    #[test]
-    fn inline_container_width_includes_margins_exactly_once() {
-        let children = [HtmlDocumentNode::Text("Label".to_string())];
-        let mut style = CssStyle::browser_default();
-        style.inline_block = true;
-        let without_margins = inline_container_width(&children, 300.0, &style);
-
-        style.margin_left = 10.0;
-        style.margin_right = 5.0;
-        assert_eq!(
-            inline_container_width(&children, 300.0, &style),
-            without_margins + 15.0
+    fn auto_measurement_measure_children_once_without_error() {
+        let viewport = HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        };
+        let renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
+        let children = [HtmlDocumentNode::Text("measure".to_string())];
+        let style = CssStyle::browser_default();
+        let layout_geometry = geometry(300.0, &style);
+        let measuring_renderer = renderer.new_auto_measurement_renderer(&layout_geometry);
+        let bottom = renderer.render_children_for_auto_measurement(
+            measuring_renderer,
+            &children,
+            &layout_geometry,
+            &style,
+            DetailsContext::NONE,
         );
+        assert!(matches!(bottom, Ok(bottom) if bottom > 0.0));
     }
 
     #[test]
-    fn container_height_is_clamped_by_max_height() {
-        let mut style = CssStyle::browser_default();
-        style.max_height = Some(20.0);
+    fn failed_auto_height_measurement_records_error_and_uses_minimum_height() {
+        let viewport = HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        };
+        let mut renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
+        let style = CssStyle::browser_default();
 
-        assert_eq!(container_height(100.0, 0.0, &style), 20.0);
+        let height =
+            renderer.accept_auto_container_height(Err("measurement failed".to_string()), &style);
+
+        assert_eq!(height, style.minimum_outer_height());
+        assert_eq!(renderer.layout_error.as_deref(), Some("measurement failed"));
+    }
+
+    #[test]
+    fn auto_measurement_propagates_existing_layout_error() {
+        let viewport = HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        };
+        let renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
+        let style = CssStyle::browser_default();
+        let layout_geometry = geometry(300.0, &style);
+        let mut measuring_renderer = renderer.new_auto_measurement_renderer(&layout_geometry);
+        measuring_renderer.layout_error = Some("existing failure".to_string());
+
+        let result = renderer.render_children_for_auto_measurement(
+            measuring_renderer,
+            &[],
+            &layout_geometry,
+            &style,
+            DetailsContext::NONE,
+        );
+
+        assert!(matches!(result, Err(error) if error == "existing failure"));
     }
 }

@@ -1,6 +1,6 @@
 use super::{
     CssAncestor, CssAttributeSelector, CssCombinator, CssCompoundSelector, CssNthExpression,
-    CssSelector, HtmlAttributes,
+    CssPseudoElement, CssSelector, HtmlAttributes,
 };
 
 impl CssSelector {
@@ -31,6 +31,21 @@ impl CssSelector {
         sibling_index: usize,
         hovered: bool,
     ) -> bool {
+        self.matches_at_pseudo_state(tag, attributes, ancestors, sibling_index, hovered, None)
+    }
+
+    pub(in crate::renderer::backends) fn matches_at_pseudo_state(
+        &self,
+        tag: &str,
+        attributes: &HtmlAttributes,
+        ancestors: &[CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
+        pseudo_element: Option<CssPseudoElement>,
+    ) -> bool {
+        if self.pseudo_element() != pseudo_element {
+            return false;
+        }
         self.matches_from(
             self.compounds.len() - 1,
             tag,
@@ -98,8 +113,9 @@ impl CssCompoundSelector {
         hovered: bool,
     ) -> bool {
         let disabled = attribute_value(attributes, "disabled").is_some();
+        let checked = attribute_value(attributes, "checked").is_some();
         self.matches_identity(tag, attributes)
-            && self.matches_state(hovered, disabled)
+            && self.matches_state(hovered, disabled, checked)
             && self
                 .nth_child
                 .is_none_or(|expression| expression.matches(sibling_index))
@@ -124,10 +140,11 @@ impl CssCompoundSelector {
             && (!self.root || tag.eq_ignore_ascii_case("html"))
     }
 
-    fn matches_state(&self, hovered: bool, disabled: bool) -> bool {
+    fn matches_state(&self, hovered: bool, disabled: bool, checked: bool) -> bool {
         (!self.hovered || hovered)
             && (!self.disabled || disabled)
             && (!self.not_disabled || !disabled)
+            && (!self.checked || checked)
     }
 }
 

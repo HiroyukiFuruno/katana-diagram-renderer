@@ -8,6 +8,12 @@ mod parse;
 const CLASS_SPECIFICITY: u16 = 10;
 const ID_SPECIFICITY: u16 = 100;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CssPseudoElement {
+    Before,
+    After,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CssAncestor {
     tag: String,
@@ -62,7 +68,9 @@ struct CssCompoundSelector {
     hovered: bool,
     disabled: bool,
     not_disabled: bool,
+    checked: bool,
     nth_child: Option<CssNthExpression>,
+    pseudo_element: Option<CssPseudoElement>,
 }
 
 #[derive(Debug)]
@@ -90,7 +98,9 @@ impl CssSelector {
 
     pub(super) fn matches_static_snapshot(&self, tag: &str, attributes: &HtmlAttributes) -> bool {
         self.inherited_from_body
-            || (self.static_snapshot_supported() && self.matches(tag, attributes, &[]))
+            || (self.pseudo_element().is_none()
+                && self.static_snapshot_supported()
+                && self.matches(tag, attributes, &[]))
     }
 
     fn static_snapshot_supported(&self) -> bool {
@@ -114,6 +124,12 @@ impl CssSelector {
             self.specificity()
         }
     }
+
+    pub(super) fn pseudo_element(&self) -> Option<CssPseudoElement> {
+        self.compounds
+            .last()
+            .and_then(|compound| compound.pseudo_element)
+    }
 }
 
 impl CssCompoundSelector {
@@ -125,8 +141,10 @@ impl CssCompoundSelector {
                 + usize::from(self.hovered)
                 + usize::from(self.disabled)
                 + usize::from(self.not_disabled)
+                + usize::from(self.checked)
                 + usize::from(self.nth_child.is_some())) as u16
                 * CLASS_SPECIFICITY
+            + self.pseudo_element.iter().count() as u16
             + self.id.iter().count() as u16 * ID_SPECIFICITY
     }
 }
@@ -165,7 +183,7 @@ impl CssNthExpression {
 
 #[cfg(test)]
 mod tests {
-    use super::{CssAncestor, CssNthExpression, CssSelector};
+    use super::{CssAncestor, CssNthExpression, CssPseudoElement, CssSelector};
 
     #[test]
     fn selector_parser_rejects_invalid_combinators() {
@@ -187,9 +205,29 @@ mod tests {
 
     #[test]
     fn bare_dynamic_pseudo_selectors_parse_without_a_tag_or_class() {
-        for source in [":hover", ":disabled", ":not(:disabled)", ":nth-child(2)"] {
+        for source in [
+            ":hover",
+            ":disabled",
+            ":not(:disabled)",
+            ":checked",
+            ":nth-child(2)",
+        ] {
             assert!(CssSelector::parse(source).is_some(), "{source}");
         }
+    }
+
+    #[test]
+    fn pseudo_elements_are_terminal_and_add_type_specificity() -> Result<(), String> {
+        let before = CssSelector::parse(".toggle:before").ok_or(":before must parse")?;
+        let after = CssSelector::parse("li > a::after").ok_or("::after must parse")?;
+
+        assert_eq!(before.pseudo_element(), Some(CssPseudoElement::Before));
+        assert_eq!(before.specificity(), 11);
+        assert_eq!(after.pseudo_element(), Some(CssPseudoElement::After));
+        assert_eq!(after.specificity(), 3);
+        assert!(CssSelector::parse("main::before > span").is_none());
+        assert!(CssSelector::parse("main::before::after").is_none());
+        Ok(())
     }
 
     #[test]
@@ -260,6 +298,16 @@ mod tests {
     }
 
     #[test]
+    fn checked_pseudo_class_matches_the_boolean_attribute() -> Result<(), String> {
+        let selector = CssSelector::parse("input:checked").ok_or(":checked selector must parse")?;
+
+        assert!(selector.matches("input", &attributes(&[("checked", "")]), &[]));
+        assert!(!selector.matches("input", &attributes(&[]), &[]));
+        assert_eq!(selector.specificity(), 11);
+        Ok(())
+    }
+
+    #[test]
     fn hover_and_not_disabled_match_dynamic_element_state() -> Result<(), String> {
         let selector = CssSelector::parse(".nav button:hover:not(:disabled)")
             .ok_or("dynamic selector must parse")?;
@@ -319,6 +367,18 @@ mod tests {
 
         assert!(selector.matches("p", &attributes, &ancestors));
         assert_eq!(selector.specificity(), 43);
+        Ok(())
+    }
+
+    #[test]
+    fn descendant_selector_does_not_match_a_child_below_its_terminal_compound() -> Result<(), String>
+    {
+        let selector = CssSelector::parse("#filters li").ok_or("selector must parse")?;
+        let list_ancestors = [ancestor("ul", &[("id", "filters")])];
+        let anchor_ancestors = [ancestor("ul", &[("id", "filters")]), ancestor("li", &[])];
+
+        assert!(selector.matches("li", &Vec::new(), &list_ancestors));
+        assert!(!selector.matches("a", &Vec::new(), &anchor_ancestors));
         Ok(())
     }
 

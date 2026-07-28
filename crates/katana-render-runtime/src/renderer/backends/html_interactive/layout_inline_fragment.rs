@@ -2,7 +2,7 @@ use super::super::super::html_document::HtmlDocumentNode;
 use super::super::document::attribute;
 use super::super::style::{CssPosition, CssStyle};
 use super::InlineFlowState;
-use super::measure::inline_text_width;
+use super::measure::InlineMeasurement;
 
 pub(super) fn inline_flow_style(
     node: &HtmlDocumentNode,
@@ -92,13 +92,13 @@ pub(super) fn advance_inline_text(
         .bottom
         .max(initial_y + lines.len() as f32 * style.line_height);
     if lines.len() == 1 {
-        inline.cursor_x += inline_text_width(text, style).min(remaining_width);
+        inline.cursor_x += InlineMeasurement::text_width(text, style).min(remaining_width);
     } else {
         inline.y = initial_y + (lines.len() - 1) as f32 * style.line_height;
         inline.cursor_x = inline.x
             + lines
                 .last()
-                .map(|line| inline_text_width(line, style))
+                .map(|line| InlineMeasurement::text_width(line, style))
                 .unwrap_or(0.0);
     }
 }

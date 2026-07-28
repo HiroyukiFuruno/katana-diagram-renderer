@@ -97,6 +97,7 @@ pub(super) struct ElementBox {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HitTargetKind {
+    Checkbox,
     Click,
     Input,
     Summary { details_node_id: u64 },

@@ -1,6 +1,6 @@
 use super::HtmlDocument;
 use crate::renderer::backends::html_dom_helpers::{attribute_value, detach, text_content};
-use html5ever::{Attribute, QualName};
+use html5ever::{Attribute, QualName, ns};
 use markup5ever_rcdom::{Node, NodeData};
 use std::rc::Rc;
 
@@ -18,7 +18,7 @@ impl HtmlDocument {
             return Err(format!("unsupported element name: {tag}"));
         }
         let node = Node::new(NodeData::Element {
-            name: QualName::new(None, Default::default(), tag.into()),
+            name: QualName::new(None, ns!(html), tag.into()),
             attrs: Default::default(),
             template_contents: Default::default(),
             mathml_annotation_xml_integration_point: false,

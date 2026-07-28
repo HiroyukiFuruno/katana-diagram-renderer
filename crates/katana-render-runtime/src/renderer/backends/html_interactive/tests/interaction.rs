@@ -313,6 +313,31 @@ fn text_input_updates_the_v8_backed_dom_and_frame() -> TestResult {
 }
 
 #[test]
+fn checkbox_click_toggles_checked_before_the_javascript_click_listener() -> TestResult {
+    let mut session = start(
+        r#"<input id=choice type=checkbox style="width:32px;height:32px"><p id=status>unchecked</p><script>
+const choice = document.getElementById('choice');
+choice.addEventListener('click', () => {
+  document.getElementById('status').textContent = choice.checked ? 'checked' : 'unchecked';
+});
+</script>"#,
+    )?;
+
+    click_element(&mut session, "choice")?;
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert!(snapshot.contains("checked=\"\""), "{snapshot}");
+    assert!(snapshot.contains(">checked</p>"), "{snapshot}");
+    assert!(
+        session
+            .hit_targets
+            .iter()
+            .any(|target| matches!(target.kind, HitTargetKind::Checkbox))
+    );
+    Ok(())
+}
+
+#[test]
 fn attribute_selectors_dataset_and_input_toggle_events_repaint_the_dom() -> TestResult {
     let mut session = start(event_document())?;
     assert_initial_status(&session)?;
@@ -345,6 +370,52 @@ for (const type of ['focus', 'keydown', 'keyup', 'input', 'change', 'blur']) {
         snapshot.contains("focus|keydown:A|input|keyup:A|change|blur|"),
         "{snapshot}"
     );
+    Ok(())
+}
+
+#[test]
+fn enter_commits_a_dirty_input_once_without_dropping_focus() -> TestResult {
+    let mut session = start(
+        r#"<input id=field><p id=status></p><script>
+const field = document.getElementById('field');
+const status = document.getElementById('status');
+for (const type of ['input', 'keydown', 'keyup', 'change', 'blur']) {
+  field.addEventListener(type, (event) => {
+    status.textContent += `${event.type}${event.key ? ':' + event.key : ''}|`;
+  });
+}
+</script>"#,
+    )?;
+
+    click_element(&mut session, "field")?;
+    dispatch_enter_commit_sequence(&mut session)?;
+
+    let snapshot = session.runtime.snapshot().map_err(to_string)?;
+    assert_eq!(snapshot.matches("change|").count(), 1, "{snapshot}");
+    assert!(
+        snapshot.contains("input|keydown:Enter|change|keyup:Enter|blur|"),
+        "{snapshot}"
+    );
+    Ok(())
+}
+
+fn dispatch_enter_commit_sequence(
+    session: &mut super::super::HtmlInteractiveSession,
+) -> TestResult {
+    for input in [
+        HtmlBrowserInput::Text {
+            text: "committed".to_string(),
+        },
+        HtmlBrowserInput::KeyDown {
+            key: "Enter".to_string(),
+        },
+        HtmlBrowserInput::KeyUp {
+            key: "Enter".to_string(),
+        },
+        HtmlBrowserInput::Focus { focused: false },
+    ] {
+        session.dispatch_input(input).map_err(to_string)?;
+    }
     Ok(())
 }
 

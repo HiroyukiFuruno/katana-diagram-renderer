@@ -1,15 +1,23 @@
 use super::super::html_document::HtmlDocument;
-use super::types::DomValue;
+use super::super::html_subresources::HtmlSubresourceLoader;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+#[path = "dom_state_lookup.rs"]
+mod lookup;
 #[path = "dom_state_mutation.rs"]
 mod mutation;
+#[path = "dom_state_request.rs"]
+mod request;
 
 pub(super) struct HtmlDomBridgeState {
     pub(super) document: RefCell<HtmlDocument>,
     pub(super) error: RefCell<Option<String>>,
     event_targets: RefCell<HashMap<String, HashSet<u64>>>,
+    resource_loader: Option<HtmlSubresourceLoader>,
+    host_io_active: Arc<AtomicBool>,
 }
 
 impl HtmlDomBridgeState {
@@ -18,113 +26,30 @@ impl HtmlDomBridgeState {
             document: RefCell::new(document),
             error: RefCell::new(None),
             event_targets: RefCell::new(HashMap::new()),
+            resource_loader: None,
+            host_io_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub(super) fn dispatch(
-        &self,
-        operation: &str,
-        arguments: &[String],
-    ) -> Result<DomValue, String> {
-        match operation {
-            "getElementById" | "querySelector" | "querySelectorAll" | "createElement"
-            | "textContent" | "innerHTML" | "getAttribute" | "eventPath" | "closest" => {
-                self.lookup(operation, arguments)
-            }
-            "appendChild" | "remove" => self.mutate_tree(operation, arguments),
-            "setTextContent" | "setInnerHTML" => self.mutate_content(operation, arguments),
-            "setAttribute" | "removeAttribute" => self.set_attribute(operation, arguments),
-            "styleGet" | "styleSet" => self.style(operation, arguments),
-            "setEventTarget" => self.set_event_target(arguments),
-            _ => Err(format!("unsupported DOM operation: {operation}")),
+    pub(super) fn new_interactive(
+        document: HtmlDocument,
+        resource_loader: HtmlSubresourceLoader,
+    ) -> Self {
+        Self {
+            document: RefCell::new(document),
+            error: RefCell::new(None),
+            event_targets: RefCell::new(HashMap::new()),
+            resource_loader: Some(resource_loader),
+            host_io_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub(super) fn event_target_ids(&self, event_type: &str) -> HashSet<u64> {
-        self.event_targets
-            .borrow()
-            .get(event_type)
-            .cloned()
-            .unwrap_or_else(HashSet::new)
-    }
-
-    fn set_event_target(&self, arguments: &[String]) -> Result<DomValue, String> {
-        let node_id = node_id(argument(arguments, 0)?)?;
-        self.document.borrow().node(node_id)?;
-        let event_type = argument(arguments, 1)?.to_string();
-        let enabled = argument(arguments, 2)? == "true";
-        let mut targets = self.event_targets.borrow_mut();
-        let nodes = targets.entry(event_type.clone()).or_default();
-        if enabled {
-            nodes.insert(node_id);
-        } else {
-            nodes.remove(&node_id);
-            if nodes.is_empty() {
-                targets.remove(&event_type);
-            }
-        }
-        Ok(DomValue::Undefined)
-    }
-
-    fn lookup(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        match operation {
-            "getElementById" | "querySelector" | "querySelectorAll" | "createElement" => {
-                self.lookup_node(operation, arguments)
-            }
-            _ => self.lookup_content(operation, arguments),
-        }
-    }
-
-    fn lookup_node(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let mut document = self.document.borrow_mut();
-        match operation {
-            "getElementById" => Ok(document
-                .get_element_by_id(argument(arguments, 0)?)
-                .map(DomValue::NodeId)
-                .unwrap_or(DomValue::Null)),
-            "querySelector" => Ok(document
-                .query_selector(argument(arguments, 0)?)
-                .map(DomValue::NodeId)
-                .unwrap_or(DomValue::Null)),
-            "querySelectorAll" => Ok(DomValue::NodeIds(
-                document.query_selector_all(argument(arguments, 0)?),
-            )),
-            "createElement" => document
-                .create_element(argument(arguments, 0)?)
-                .map(DomValue::NodeId),
-            _ => Err(format!(
-                "unsupported HTML node lookup operation: {operation}"
-            )),
-        }
-    }
-
-    fn lookup_content(&self, operation: &str, arguments: &[String]) -> Result<DomValue, String> {
-        let document = self.document.borrow();
-        match operation {
-            "textContent" => document
-                .text_content(node_id(argument(arguments, 0)?)?)
-                .map(DomValue::String),
-            "innerHTML" => document
-                .inner_html(node_id(argument(arguments, 0)?)?)
-                .map(DomValue::String),
-            "getAttribute" => Ok(document
-                .attribute(node_id(argument(arguments, 0)?)?, argument(arguments, 1)?)?
-                .map(DomValue::String)
-                .unwrap_or(DomValue::Null)),
-            "eventPath" => document
-                .event_path(node_id(argument(arguments, 0)?)?)
-                .map(DomValue::NodeIds),
-            "closest" => document
-                .closest_selector(node_id(argument(arguments, 0)?)?, argument(arguments, 1)?)
-                .map(|node| node.map(DomValue::NodeId).unwrap_or(DomValue::Null)),
-            _ => Err(format!(
-                "unsupported HTML content lookup operation: {operation}"
-            )),
-        }
+    pub(super) fn host_io_active(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.host_io_active)
     }
 }
 
-fn argument(arguments: &[String], index: usize) -> Result<&str, String> {
+pub(super) fn argument(arguments: &[String], index: usize) -> Result<&str, String> {
     arguments
         .get(index)
         .map(String::as_str)

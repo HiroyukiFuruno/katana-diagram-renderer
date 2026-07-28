@@ -125,10 +125,37 @@ fn collect_selectors_at(
     }
 }
 
+pub(super) fn find_descendant_selector(node: &Handle, selector: &CssSelector) -> Option<Handle> {
+    for child in node.children.borrow().iter() {
+        if matches_selector(child, selector) {
+            return Some(child.clone());
+        }
+        if let Some(found) = find_descendant_selector(child, selector) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+pub(super) fn collect_descendant_selectors(
+    node: &Handle,
+    selector: &CssSelector,
+    matches: &mut Vec<Handle>,
+) {
+    for child in node.children.borrow().iter() {
+        if matches_selector(child, selector) {
+            matches.push(child.clone());
+        }
+        collect_descendant_selectors(child, selector, matches);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::super::html_css_selector::CssSelector;
     use super::super::HtmlDocument;
     use super::{element_sibling_index, parent};
+    use super::{find_descendant_selector, find_selector};
 
     #[test]
     fn detached_child_uses_the_first_sibling_index() -> Result<(), String> {
@@ -142,5 +169,25 @@ mod tests {
 
         assert_eq!(element_sibling_index(&node), 1);
         Ok(())
+    }
+
+    #[test]
+    fn find_selector_recurses_to_descendants_without_root_match() -> Result<(), String> {
+        let document = HtmlDocument::parse("<main><section><p id=target>Text</p></section></main>");
+        let selector = CssSelector::parse("p").ok_or("selector must parse")?;
+        let handle = find_selector(&document.document, &selector, &[]);
+
+        assert!(handle.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn find_descendant_selector_recurses_to_descendant_nodes() {
+        let document = HtmlDocument::parse("<main><section><p id=target>Text</p></section></main>");
+        let selector = CssSelector::parse("p#target");
+        assert!(selector.is_some());
+        selector.into_iter().for_each(|selector| {
+            assert!(find_descendant_selector(&document.document, &selector).is_some());
+        });
     }
 }

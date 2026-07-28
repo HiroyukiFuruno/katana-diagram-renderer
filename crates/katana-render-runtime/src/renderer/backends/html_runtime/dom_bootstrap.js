@@ -56,6 +56,50 @@ class __KrrURLSearchParams {
   }
 }
 globalThis.URLSearchParams = __KrrURLSearchParams;
+globalThis.NodeList = Array;
+class __KrrStorage {
+  constructor() {
+    this.__krrEntries = new Map();
+  }
+  get length() {
+    return this.__krrEntries.size;
+  }
+  key(index) {
+    return Array.from(this.__krrEntries.keys())[Number(index)] ?? null;
+  }
+  getItem(name) {
+    name = String(name);
+    return this.__krrEntries.has(name) ? this.__krrEntries.get(name) : null;
+  }
+  setItem(name, value) {
+    this.__krrEntries.set(String(name), String(value));
+  }
+  removeItem(name) {
+    this.__krrEntries.delete(String(name));
+  }
+  clear() {
+    this.__krrEntries.clear();
+  }
+}
+globalThis.Storage = __KrrStorage;
+const __krrLocalStorage = new __KrrStorage();
+globalThis.localStorage = new Proxy(__krrLocalStorage, {
+  get(target, property) {
+    if (Reflect.has(target, property)) {
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return target.getItem(property) ?? undefined;
+  },
+  set(target, property, value) {
+    target.setItem(property, value);
+    return true;
+  },
+  deleteProperty(target, property) {
+    target.removeItem(property);
+    return true;
+  },
+});
 Object.assign(__KrrEvent, {
   NONE: 0,
   CAPTURING_PHASE: 1,
@@ -197,6 +241,52 @@ const __krrInstallEventTarget = (target) => {
   });
   return target;
 };
+class __KrrXMLHttpRequest {
+  constructor() {
+    __krrInstallEventTarget(this);
+    this.readyState = 0;
+    this.status = 0;
+    this.statusText = "";
+    this.response = "";
+    this.responseText = "";
+    this.responseURL = "";
+    this.__krrMethod = "";
+    this.__krrUrl = "";
+  }
+  open(method, url) {
+    this.__krrMethod = String(method);
+    this.__krrUrl = String(url);
+    this.readyState = 1;
+  }
+  send() {
+    if (this.readyState !== 1) throw new Error("XMLHttpRequest is not opened");
+    const result = JSON.parse(__krrNativeDom("requestText", this.__krrMethod, this.__krrUrl));
+    this.status = Number(result.status);
+    this.statusText = String(result.statusText);
+    this.response = String(result.responseText);
+    this.responseText = this.response;
+    this.responseURL = this.__krrUrl;
+    this.readyState = 4;
+    Promise.resolve().then(() => {
+      this.dispatchEvent(new Event(result.ok ? "load" : "error"));
+    });
+  }
+}
+Object.assign(__KrrXMLHttpRequest, {
+  UNSENT: 0,
+  OPENED: 1,
+  HEADERS_RECEIVED: 2,
+  LOADING: 3,
+  DONE: 4,
+});
+Object.assign(__KrrXMLHttpRequest.prototype, {
+  UNSENT: 0,
+  OPENED: 1,
+  HEADERS_RECEIVED: 2,
+  LOADING: 3,
+  DONE: 4,
+});
+globalThis.XMLHttpRequest = __KrrXMLHttpRequest;
 const __krrDatasetAttribute = (property) =>
   `data-${String(property).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
 const __krrClassToken = (token) => {
@@ -245,6 +335,15 @@ const __krrElementPrototype = {
   set innerHTML(value) {
     __krrNativeDom("setInnerHTML", this.__krrNodeId, String(value));
   },
+  get outerHTML() {
+    return __krrNativeDom("outerHTML", this.__krrNodeId);
+  },
+  get firstElementChild() {
+    return __krrElement(__krrNativeDom("firstElementChild", this.__krrNodeId));
+  },
+  get lastElementChild() {
+    return __krrElement(__krrNativeDom("lastElementChild", this.__krrNodeId));
+  },
   get className() {
     return __krrNativeDom("getAttribute", this.__krrNodeId, "class") || "";
   },
@@ -289,11 +388,24 @@ const __krrElementPrototype = {
   set id(value) {
     __krrNativeDom("setAttribute", this.__krrNodeId, "id", String(value));
   },
+  get href() {
+    return __krrNativeDom("getAttribute", this.__krrNodeId, "href") || "";
+  },
+  set href(value) {
+    __krrNativeDom("setAttribute", this.__krrNodeId, "href", String(value));
+  },
   get value() {
     return __krrNativeDom("getAttribute", this.__krrNodeId, "value") || "";
   },
   set value(value) {
     __krrNativeDom("setAttribute", this.__krrNodeId, "value", String(value));
+  },
+  get checked() {
+    return __krrNativeDom("getAttribute", this.__krrNodeId, "checked") !== null;
+  },
+  set checked(value) {
+    if (value) __krrNativeDom("setAttribute", this.__krrNodeId, "checked", "");
+    else __krrNativeDom("removeAttribute", this.__krrNodeId, "checked");
   },
   get open() {
     return __krrNativeDom("getAttribute", this.__krrNodeId, "open") !== null;
@@ -343,9 +455,20 @@ const __krrElementPrototype = {
   removeAttribute(name) {
     __krrNativeDom("removeAttribute", this.__krrNodeId, String(name));
   },
+  querySelector(selector) {
+    return __krrElement(__krrNativeDom("elementQuerySelector", this.__krrNodeId, String(selector)));
+  },
+  querySelectorAll(selector) {
+    return __krrNativeDom("elementQuerySelectorAll", this.__krrNodeId, String(selector)).map(
+      __krrElement,
+    );
+  },
   appendChild(child) {
     __krrNativeDom("appendChild", this.__krrNodeId, child.__krrNodeId);
     return child;
+  },
+  insertAdjacentHTML(position, value) {
+    __krrNativeDom("insertAdjacentHTML", this.__krrNodeId, String(position), String(value));
   },
   click() {
     this.dispatchEvent(new Event("click", { bubbles: true, cancelable: true }));
@@ -419,6 +542,9 @@ globalThis.document = __krrInstallEventTarget({
   },
   get body() {
     return __krrElement(__krrNativeDom("querySelector", "body"));
+  },
+  get location() {
+    return globalThis.location;
   },
   get readyState() {
     return __krrDocumentReadyState;

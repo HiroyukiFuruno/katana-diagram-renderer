@@ -175,12 +175,36 @@ fn css_number(value: &str) -> Option<f32> {
 }
 
 pub(super) fn border_color(value: &str) -> Option<String> {
-    let parts = value.split_whitespace().collect::<Vec<_>>();
+    let parts = css_value_components(value);
     parts
         .iter()
         .find(|part| part.starts_with('#') || part.starts_with("rgb"))
         .or_else(|| parts.iter().find(|part| is_named_border_color(part)))
         .map(|part| (*part).to_string())
+}
+
+fn css_value_components(value: &str) -> Vec<&str> {
+    let mut components = Vec::new();
+    let mut start = None;
+    let mut depth = 0_usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if character.is_ascii_whitespace() && depth == 0 {
+            if let Some(component_start) = start.take() {
+                components.push(&value[component_start..index]);
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(component_start) = start {
+        components.push(&value[component_start..]);
+    }
+    components
 }
 
 fn is_named_border_color(value: &&str) -> bool {
@@ -232,6 +256,15 @@ mod tests {
         assert_eq!(wrap_text("Summary text", 105.0, 16.0), ["Summary text"]);
         assert_eq!(text_capacity(105.0, 16.0, TEXT_CHARACTER_WIDTH_FACTOR), 12);
         assert_eq!(text_capacity(104.0, 16.0, TEXT_CHARACTER_WIDTH_FACTOR), 11);
+    }
+
+    #[test]
+    fn css_value_components_respects_nested_function_depth() {
+        let components = css_value_components("  linear-gradient(red, blue)   1px solid  ");
+        assert_eq!(
+            components,
+            vec!["linear-gradient(red, blue)", "1px", "solid"]
+        );
     }
 
     #[test]

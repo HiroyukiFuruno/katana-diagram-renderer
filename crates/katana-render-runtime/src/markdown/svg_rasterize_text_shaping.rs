@@ -188,7 +188,8 @@ mod tests {
         font_has_char, font_runs, fontdb_family, matching_fallback_face, matching_font_face,
     };
     use super::{
-        rustybuzz_features, shape_face_character_metrics, shape_text_with_face, shaped_html_text_dx,
+        collect_character_metrics, rustybuzz_features, shape_face_character_metrics,
+        shape_text_with_face, shaped_html_text_dx,
     };
     use crate::markdown::svg_rasterize::font::{bundled_font_db, html_font_db};
     use resvg::usvg;
@@ -276,5 +277,29 @@ mod tests {
             .flatten();
 
         assert!(metrics.is_none());
+    }
+
+    #[test]
+    fn character_metrics_reuses_first_offset_for_multi_glyph_cluster() {
+        let database = bundled_font_db();
+        let metrics = matching_font_face(&database, "Noto Sans", 400, false).and_then(|face_id| {
+            database
+                .with_face_data(face_id, |data, face_index| {
+                    rustybuzz::Face::from_slice(data, face_index).and_then(|face| {
+                        let mut buffer = rustybuzz::UnicodeBuffer::new();
+                        buffer.add('a', 0);
+                        buffer.add('b', 0);
+                        let glyphs = rustybuzz::shape(&face, &[], buffer);
+                        let glyph_count = glyphs.glyph_infos().len();
+                        collect_character_metrics(&glyphs, "a", 1.0)
+                            .map(|metrics| (glyph_count, metrics))
+                    })
+                })
+                .flatten()
+        });
+
+        assert!(metrics.is_some_and(|(glyph_count, metrics)| {
+            glyph_count > 1 && metrics.len() == 1 && metrics[0].0 > 0.0
+        }));
     }
 }

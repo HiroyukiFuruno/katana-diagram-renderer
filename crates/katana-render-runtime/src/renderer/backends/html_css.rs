@@ -1,16 +1,30 @@
 use super::html_css_cascade::{inherited_custom_properties, resolved_css_values};
-use super::html_css_rule::{CssRule, parse_rules};
-use super::html_css_selector::CssAncestor;
+use super::html_css_rule::{CssRule, CssRuleMatchState, parse_rules};
+use super::html_css_selector::{CssAncestor, CssPseudoElement};
 use super::html_css_sources::{inline_styles, interactive_styles};
 use markup5ever_rcdom::Handle;
 use std::collections::HashMap;
 
+#[path = "html_css_generated_content.rs"]
+mod generated_content;
 #[path = "html_css_resolution.rs"]
 mod resolution;
 
+use generated_content::parse_generated_content;
+pub(super) use generated_content::{CssGeneratedContent, CssPseudoStyle};
 use resolution::select_inline_declarations;
 
 pub(super) type HtmlAttributes = Vec<(String, String)>;
+
+pub(super) struct CssPseudoRequest<'a> {
+    pub(super) tag: &'a str,
+    pub(super) attributes: &'a HtmlAttributes,
+    pub(super) ancestors: &'a [CssAncestor],
+    pub(super) inheritance_ancestors: &'a [CssAncestor],
+    pub(super) sibling_index: usize,
+    pub(super) hovered: bool,
+    pub(super) pseudo_element: CssPseudoElement,
+}
 
 const DEFAULT_CSS_VIEWPORT_WIDTH: f32 = 1024.0;
 
@@ -121,56 +135,61 @@ impl StaticCss {
         hovered: bool,
     ) -> Vec<String> {
         let mut selected = inherited_custom_properties(ancestors);
-        self.select_rule_declarations(
-            tag,
-            attributes,
-            ancestors,
-            sibling_index,
-            hovered,
-            &mut selected,
-        );
+        let state = CssRuleMatchState::element(tag, attributes, ancestors, sibling_index, hovered);
+        self.select_rule_declarations(state, &mut selected);
         select_inline_declarations(attributes, &mut selected);
         resolved_css_values(selected)
     }
 
+    pub(super) fn pseudo_style_at_state(
+        &self,
+        request: CssPseudoRequest<'_>,
+    ) -> Option<CssPseudoStyle> {
+        if self.mode != CssResolutionMode::InteractiveRuntime {
+            return None;
+        }
+        let mut selected = inherited_custom_properties(request.inheritance_ancestors);
+        let state = CssRuleMatchState::element(
+            request.tag,
+            request.attributes,
+            request.ancestors,
+            request.sibling_index,
+            request.hovered,
+        )
+        .for_pseudo(request.pseudo_element);
+        self.select_rule_declarations(state, &mut selected);
+        let declarations = resolved_css_values(selected);
+        let content = declarations
+            .iter()
+            .find_map(|declaration| declaration.strip_prefix("content: "))
+            .and_then(parse_generated_content)?;
+        Some(CssPseudoStyle {
+            attributes: vec![("style".to_string(), declarations.join("; "))],
+            content,
+        })
+    }
+
     fn select_rule_declarations(
         &self,
-        tag: &str,
-        attributes: &HtmlAttributes,
-        ancestors: &[CssAncestor],
-        sibling_index: usize,
-        hovered: bool,
+        state: CssRuleMatchState<'_>,
         selected: &mut Vec<super::html_css_cascade::SelectedDeclaration>,
     ) {
         for (rule_order, rule) in self.rules.iter().enumerate() {
-            let Some(specificity) =
-                self.rule_specificity(rule, tag, attributes, ancestors, sibling_index, hovered)
-            else {
+            let Some(specificity) = self.rule_specificity(rule, state) else {
                 continue;
             };
             self.select_matched_declarations(rule, rule_order, specificity, selected);
         }
     }
 
-    fn rule_specificity(
-        &self,
-        rule: &CssRule,
-        tag: &str,
-        attributes: &HtmlAttributes,
-        ancestors: &[CssAncestor],
-        sibling_index: usize,
-        hovered: bool,
-    ) -> Option<u16> {
+    fn rule_specificity(&self, rule: &CssRule, state: CssRuleMatchState<'_>) -> Option<u16> {
         match self.mode {
-            CssResolutionMode::StaticSnapshot => rule.matches_static_snapshot(tag, attributes),
-            CssResolutionMode::InteractiveRuntime => rule.matches_at_state(
-                tag,
-                attributes,
-                ancestors,
-                sibling_index,
-                self.viewport_width,
-                hovered,
-            ),
+            CssResolutionMode::StaticSnapshot => state
+                .pseudo_element
+                .is_none()
+                .then(|| rule.matches_static_snapshot(state.tag, state.attributes))
+                .flatten(),
+            CssResolutionMode::InteractiveRuntime => rule.matches_state(state, self.viewport_width),
         }
     }
 }
@@ -179,6 +198,7 @@ impl StaticCss {
 mod tests {
     use super::super::html_css_cascade::resolve_css_variables;
     use super::super::html_document::{HtmlDocument, HtmlDocumentNode};
+    use super::{CssPseudoElement, CssPseudoRequest, HtmlAttributes, StaticCss};
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -280,6 +300,24 @@ mod tests {
             resolve_css_variables("var(--cycle)", &custom, &mut HashSet::new()),
             None
         );
+    }
+
+    #[test]
+    fn pseudo_style_is_unavailable_in_static_mode() {
+        let document =
+            HtmlDocument::parse("<style>div:before { content: 'x' }</style><div>Test</div>");
+        let css = StaticCss::from_document(&document.document);
+        let style = css.pseudo_style_at_state(CssPseudoRequest {
+            tag: "div",
+            attributes: &HtmlAttributes::new(),
+            ancestors: &[],
+            inheritance_ancestors: &[],
+            sibling_index: 1,
+            hovered: false,
+            pseudo_element: CssPseudoElement::Before,
+        });
+
+        assert!(style.is_none());
     }
 
     fn find_style_attribute(nodes: &[HtmlDocumentNode], target_tag: &str) -> Option<String> {

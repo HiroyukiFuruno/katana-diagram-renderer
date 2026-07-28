@@ -1,5 +1,5 @@
 use super::super::html_css::{HtmlAttributes, StaticCss};
-use super::super::html_css_selector::CssAncestor;
+use super::super::html_css_selector::{CssAncestor, CssPseudoElement};
 use super::{HtmlDocument, HtmlDocumentNode};
 use html5ever::Attribute;
 use markup5ever_rcdom::{Handle, NodeData};
@@ -8,6 +8,8 @@ use std::rc::Rc;
 
 #[path = "html_document_projection_svg.rs"]
 mod embedded_svg;
+#[path = "html_document_projection_generated.rs"]
+mod generated;
 
 use embedded_svg::embedded_svg_node;
 
@@ -120,17 +122,33 @@ impl InteractiveElementProjection<'_> {
         if self.tag == "svg" {
             return Some(embedded_svg_node(node_id, self.tag, attributes, self.node));
         }
+        let children = self.children_with_pseudo(document, node_id, hovered, &child_ancestors);
         Some(HtmlDocumentNode::Element {
             node_id,
             tag: self.tag,
             attributes,
-            children: document.interactive_children(
-                self.node,
-                self.css,
-                &child_ancestors,
-                self.hovered_nodes,
-            ),
+            children,
         })
+    }
+
+    fn children_with_pseudo(
+        &self,
+        document: &HtmlDocument,
+        node_id: u64,
+        hovered: bool,
+        child_ancestors: &[CssAncestor],
+    ) -> Vec<HtmlDocumentNode> {
+        let before = self.pseudo_node(node_id, CssPseudoElement::Before, hovered, child_ancestors);
+        let after = self.pseudo_node(node_id, CssPseudoElement::After, hovered, child_ancestors);
+        let mut children =
+            document.interactive_children(self.node, self.css, child_ancestors, self.hovered_nodes);
+        if let Some(before) = before {
+            children.insert(0, before);
+        }
+        if let Some(after) = after {
+            children.push(after);
+        }
+        children
     }
 
     fn attributes_and_ancestors(&self, hovered: bool) -> (HtmlAttributes, Vec<CssAncestor>) {

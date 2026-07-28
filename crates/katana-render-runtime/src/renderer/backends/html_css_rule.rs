@@ -1,5 +1,5 @@
 use super::html_css::HtmlAttributes;
-use super::html_css_selector::{CssAncestor, CssSelector};
+use super::html_css_selector::{CssAncestor, CssPseudoElement, CssSelector};
 #[path = "html_css_shorthand.rs"]
 mod html_css_shorthand;
 #[path = "html_css_parser.rs"]
@@ -11,6 +11,40 @@ pub(super) struct CssRule {
     selectors: Vec<CssSelector>,
     pub(super) declarations: Vec<CssDeclaration>,
     media: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CssRuleMatchState<'a> {
+    pub(super) tag: &'a str,
+    pub(super) attributes: &'a HtmlAttributes,
+    pub(super) ancestors: &'a [CssAncestor],
+    pub(super) sibling_index: usize,
+    pub(super) hovered: bool,
+    pub(super) pseudo_element: Option<CssPseudoElement>,
+}
+
+impl<'a> CssRuleMatchState<'a> {
+    pub(super) fn element(
+        tag: &'a str,
+        attributes: &'a HtmlAttributes,
+        ancestors: &'a [CssAncestor],
+        sibling_index: usize,
+        hovered: bool,
+    ) -> Self {
+        Self {
+            tag,
+            attributes,
+            ancestors,
+            sibling_index,
+            hovered,
+            pseudo_element: None,
+        }
+    }
+
+    pub(super) fn for_pseudo(mut self, pseudo_element: CssPseudoElement) -> Self {
+        self.pseudo_element = Some(pseudo_element);
+        self
+    }
 }
 
 impl CssRule {
@@ -34,24 +68,16 @@ impl CssRule {
         sibling_index: usize,
         viewport_width: f32,
     ) -> Option<u16> {
-        self.matches_at_state(
-            tag,
-            attributes,
-            ancestors,
-            sibling_index,
+        self.matches_state(
+            CssRuleMatchState::element(tag, attributes, ancestors, sibling_index, false),
             viewport_width,
-            false,
         )
     }
 
-    pub(super) fn matches_at_state(
+    pub(super) fn matches_state(
         &self,
-        tag: &str,
-        attributes: &HtmlAttributes,
-        ancestors: &[CssAncestor],
-        sibling_index: usize,
+        state: CssRuleMatchState<'_>,
         viewport_width: f32,
-        hovered: bool,
     ) -> Option<u16> {
         if !self
             .media
@@ -63,7 +89,14 @@ impl CssRule {
         self.selectors
             .iter()
             .filter(|selector| {
-                selector.matches_at_state(tag, attributes, ancestors, sibling_index, hovered)
+                selector.matches_at_pseudo_state(
+                    state.tag,
+                    state.attributes,
+                    state.ancestors,
+                    state.sibling_index,
+                    state.hovered,
+                    state.pseudo_element,
+                )
             })
             .map(CssSelector::specificity)
             .max()

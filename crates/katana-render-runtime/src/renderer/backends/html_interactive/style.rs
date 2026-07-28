@@ -30,8 +30,8 @@ mod types;
 mod value;
 
 pub(super) use types::{
-    CssBoxShadow, CssBoxSizing, CssGridTrack, CssGridTrackBreadth, CssLength, CssOverflow,
-    CssPosition, CssStyle, CssTextAlign, CssTextTransform, CssWhiteSpace,
+    CssBoxShadow, CssBoxSizing, CssFloat, CssGridTrack, CssGridTrackBreadth, CssLength,
+    CssOverflow, CssPosition, CssStyle, CssTextAlign, CssTextTransform, CssWhiteSpace,
 };
 
 const DEFAULT_STYLE_VIEWPORT_WIDTH: f32 = 1_024.0;
@@ -232,7 +232,7 @@ mod tests {
     fn invalid_box_shorthand_does_not_erase_existing_edges() {
         let attributes = vec![(
             "style".to_string(),
-            "margin-top: 3px; margin-bottom: 4px; margin: auto auto".to_string(),
+            "margin-top: 3px; margin-bottom: 4px; margin: var(--missing)".to_string(),
         )];
         let style = CssStyle::from_attributes(&attributes, &CssStyle::browser_default());
 

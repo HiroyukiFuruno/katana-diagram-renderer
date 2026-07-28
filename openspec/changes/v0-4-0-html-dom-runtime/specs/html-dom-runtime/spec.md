@@ -10,6 +10,13 @@
 - **THEN** KRR は browser engine が repaint した最新 frame を返す
 - **THEN** KDV または KatanA は DOM/CSS/JavaScript を解釈せずに最新 frame を表示する
 
+#### Scenario: 一つの script が実行時例外を送出する
+
+- **WHEN** interactive document の一つの script が通常の JavaScript 実行時例外を送出する
+- **THEN** KRR は document URL と例外位置を structured runtime log に記録する
+- **THEN** KRR は後続 script、lifecycle event、layout、frame 出力を継続する
+- **THEN** JavaScript 構文エラー、DOM bridge failure、execution timeout は session 起動失敗として返す
+
 #### Scenario: head metadata と executable content を HTML semantics で評価する
 
 - **WHEN** HTML が `title`、`style`、`script` と interactive body content を含む
@@ -70,6 +77,13 @@
 
 - **WHEN** KatanA が workspace 内 HTML を raw HTML と完全な file document URL origin として供給し、relative local stylesheet と script を参照する
 - **THEN** KRR runtime はそれらを評価して frame を更新する
+
+#### Scenario: dynamic application が同一 origin の text resource を取得する
+
+- **WHEN** interactive script が `XMLHttpRequest` の `GET` で document と同一 origin の relative text resource を取得する
+- **THEN** KRR は既存の subresource policy と transport を通して resource を取得し、`load` または `error` event を dispatch する
+- **THEN** controlled host I/O の待機時間を JavaScript execution timeout に算入しない
+- **THEN** cross-origin、mixed-content、`POST` などの許可外 request は取得せず、当該 request の `error` event 後も document frame を継続する
 
 #### Scenario: local wrapper が同一ディレクトリの iframe を読み込む
 

@@ -1,6 +1,7 @@
 use super::support::{TestResult, frame_contains_rgb, start, start_with_viewport, to_string};
 use crate::renderer::backends::html_browser::{
-    HTML_BROWSER_MAX_SOURCE_BYTES, HtmlBrowserError, HtmlBrowserSource, HtmlBrowserViewport,
+    HTML_BROWSER_MAX_SOURCE_BYTES, HtmlBrowserError, HtmlBrowserFrame, HtmlBrowserSource,
+    HtmlBrowserViewport,
 };
 use crate::renderer::backends::html_document::HtmlDocumentNode;
 
@@ -131,6 +132,250 @@ fn body_layout_rules_do_not_expand_descendant_boxes() -> TestResult {
 
     assert!(frame_contains_rgb(frame, [239, 68, 68]));
     assert!(session.content_height < 800.0, "{}", session.content_height);
+    Ok(())
+}
+
+#[test]
+fn pseudo_content_appearance_and_rotation_render_as_css_generated_boxes() -> TestResult {
+    let mut session = start(pseudo_content_and_rotation_html())?;
+    assert_pseudo_content_and_rotation_has_expected_frame(
+        session
+            .latest_frame()
+            .ok_or_else(|| "generated content frame must exist".to_string())?,
+    )?;
+    assert_pseudo_content_and_rotation_layout(&mut session)?;
+    Ok(())
+}
+
+fn pseudo_content_and_rotation_html() -> &'static str {
+    r#"<style>
+html, body { margin: 0; }
+.host { position: relative; width: 100px; height: 50px; }
+.host:after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 10px; background: #123456; }
+.toggle { position: absolute; left: 0; top: 0; width: 60px; height: 34px; appearance: none; transform: rotate(90deg); }
+.toggle:before { content: '❯'; color: #e6e6e6; font-size: 22px; padding: 6px; }
+.toggle:checked:before { color: #737373; }
+</style>
+<main class=host><input id=toggle class=toggle type=checkbox checked></main>"#
+}
+
+fn assert_pseudo_content_and_rotation_has_expected_frame(frame: &HtmlBrowserFrame) -> TestResult {
+    assert!(frame_contains_rgb(frame, [18, 52, 86]));
+    Ok(())
+}
+
+fn assert_pseudo_content_and_rotation_layout(
+    session: &mut super::super::HtmlInteractiveSession,
+) -> TestResult {
+    assert_target_exists(session, "toggle")?;
+    let layout = session.layout().map_err(to_string)?;
+    assert!(layout.svg.contains('❯'), "{}", layout.svg);
+    assert!(
+        layout.svg.contains(r#"transform="rotate(90 "#),
+        "{}",
+        layout.svg
+    );
+    assert!(layout.svg.contains(r##"fill="#737373""##), "{}", layout.svg);
+    assert!(
+        !layout.svg.contains(r##"stroke="#8c959f""##),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn horizontal_auto_margins_center_a_max_width_block_in_the_viewport() -> TestResult {
+    let mut session = start(
+        r#"<style>html, body { margin: 0; } #centered { max-width: 100px; margin: 0 auto; height: 20px; background: #ef4444; }</style><main id=centered></main>"#,
+    )?;
+    let node_id = session
+        .runtime
+        .node_for_element_id("centered")
+        .ok_or_else(|| "centered node is missing".to_string())?
+        .0;
+    let element = session
+        .element_boxes
+        .iter()
+        .find(|element| element.node_id == node_id)
+        .ok_or_else(|| "centered layout box is missing".to_string())?;
+
+    assert!((element.x - 110.0).abs() < 0.01, "{element:?}");
+    assert!((element.width - 100.0).abs() < 0.01, "{element:?}");
+    Ok(())
+}
+
+#[test]
+fn markerless_inline_list_items_share_one_inline_row() -> TestResult {
+    let mut session = start(
+        r#"<style>html, body { margin: 0; } ul { margin: 0; padding: 0; list-style: none; } li { display: inline; }</style><ul><li id=all>All</li><li id=active>Active</li><li id=completed>Completed</li></ul>"#,
+    )?;
+    let boxes = ["all", "active", "completed"]
+        .map(|id| element_box_for_id(&mut session, id))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(boxes.windows(2).all(|pair| pair[0].x < pair[1].x));
+    assert!(
+        boxes
+            .windows(2)
+            .all(|pair| (pair[0].y - pair[1].y).abs() < 0.01)
+    );
+    Ok(())
+}
+
+#[test]
+fn inline_anchor_filters_keep_intrinsic_width_and_single_line_height() -> TestResult {
+    let mut session = start(
+        r##"<style>
+html, body { margin: 0; font: 14px/1.4 Arial, sans-serif; }
+#host { position: relative; width: 550px; height: 40px; }
+#filters { position: absolute; left: 0; right: 0; margin: 0; padding: 0; list-style: none; text-align: center; }
+#filters li { display: inline; }
+#filters a { margin: 3px; padding: 3px 7px; border: 1px solid transparent; text-decoration: none; }
+</style>
+<footer id=host><ul id=filters>
+<li><a id=all href="#/">All</a></li>
+<li><a id=active href="#/active">Active</a></li>
+<li><a id=completed href="#/completed">Completed</a></li>
+</ul></footer>"##,
+    )?;
+    let boxes = ["all", "active", "completed"]
+        .map(|id| element_box_for_id(&mut session, id))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_filter_boxes(&boxes);
+    Ok(())
+}
+
+fn assert_filter_boxes(boxes: &[super::super::types::ElementBox]) {
+    assert!(
+        boxes.iter().all(|element| element.height < 30.0),
+        "{boxes:?}"
+    );
+    assert!(
+        boxes
+            .windows(2)
+            .all(|pair| (pair[0].y - pair[1].y).abs() < 0.01),
+        "{boxes:?}"
+    );
+    assert!(
+        boxes.windows(2).all(|pair| pair[0].x < pair[1].x),
+        "{boxes:?}"
+    );
+}
+
+#[test]
+fn floats_leave_absolute_static_position_on_the_parent_content_line() -> TestResult {
+    let mut session = start(
+        r#"<style>
+html, body { margin: 0; font: 14px/1.4 Arial, sans-serif; }
+#host { position: relative; box-sizing: border-box; width: 300px; height: 41px; padding: 10px 15px; border-top: 1px solid #ddd; }
+#count { float: left; }
+#right { float: right; }
+#filters { position: absolute; left: 0; right: 0; margin: 0; padding: 0; }
+</style>
+<footer id=host><span id=count>1 item left</span><ul id=filters></ul><span id=right>Clear</span></footer>"#,
+    )?;
+    let boxes = ["host", "count", "filters", "right"]
+        .map(|id| element_box_for_id(&mut session, id))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!((boxes[0].height - 41.0).abs() < 0.01, "{boxes:?}");
+    assert!((boxes[1].y - boxes[2].y).abs() < 0.01, "{boxes:?}");
+    assert!((boxes[3].y - boxes[2].y).abs() < 0.01, "{boxes:?}");
+    assert!(boxes[3].x > boxes[1].x, "{boxes:?}");
+    Ok(())
+}
+
+#[test]
+fn empty_text_input_paints_its_placeholder() -> TestResult {
+    let mut session = start(
+        r#"<style>html, body { margin: 0; }</style><input placeholder="What needs to be done?">"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(
+        layout.svg.contains("What needs to be done?"),
+        "{}",
+        layout.svg
+    );
+    Ok(())
+}
+
+#[test]
+fn script_cleared_input_value_replaces_the_host_edit_cache_with_its_placeholder() -> TestResult {
+    let mut session = start(
+        r#"<input id=field value=initial placeholder=Ready><script>document.getElementById('field').value='';</script>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+
+    assert!(layout.svg.contains("Ready"), "{}", layout.svg);
+    assert!(!layout.svg.contains(">initial<"), "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
+fn inner_html_fragments_do_not_insert_viewport_height_wrappers() -> TestResult {
+    let mut session = start(
+        r#"<style>
+html, body { margin: 0; }
+ul { margin: 0; padding: 0; list-style: none; }
+li { position: relative; }
+li label { display: block; padding: 10px; }
+</style>
+<main><ul id=list></ul><footer id=footer>Footer</footer></main>
+<script>document.getElementById('list').innerHTML = '<li id="item"><label>Task</label></li>';</script>"#,
+    )?;
+    let item = element_box_for_id(&mut session, "item")?;
+    let footer = element_box_for_id(&mut session, "footer")?;
+
+    assert!(item.height < 100.0, "{item:?}");
+    assert!(footer.y < 100.0, "item={item:?} footer={footer:?}");
+    Ok(())
+}
+
+#[test]
+fn absolute_checkbox_with_vertical_auto_margins_centers_in_its_relative_container() -> TestResult {
+    let mut session = start(
+        r#"<style>html, body { margin: 0; } #host { position: relative; width: 100px; height: 60px; } #choice { position: absolute; top: 0; bottom: 0; width: 20px; height: auto; margin: auto 0; }</style><div id=host><input id=choice type=checkbox></div>"#,
+    )?;
+    let node_id = session
+        .runtime
+        .node_for_element_id("choice")
+        .ok_or_else(|| "choice node is missing".to_string())?
+        .0;
+    let element = session
+        .element_boxes
+        .iter()
+        .find(|element| element.node_id == node_id)
+        .ok_or_else(|| "choice layout box is missing".to_string())?;
+
+    assert!((element.y - 20.0).abs() < 0.01, "{element:?}");
+    assert!((element.height - 20.0).abs() < 0.01, "{element:?}");
+    Ok(())
+}
+
+#[test]
+fn absolute_checkbox_centers_in_an_auto_height_relative_container() -> TestResult {
+    let mut session = start(
+        r#"<style>
+html, body { margin: 0; }
+#host { position: relative; width: 100px; }
+#host label { display: block; padding: 20px 0; line-height: 20px; }
+#choice { position: absolute; top: 0; bottom: 0; width: 20px; height: auto; margin: auto 0; }
+</style><div id=host><input id=choice type=checkbox><label>Task</label></div>"#,
+    )?;
+    let host = element_box_for_id(&mut session, "host")?;
+    let choice = element_box_for_id(&mut session, "choice")?;
+
+    assert!((host.height - 60.0).abs() < 0.01, "{host:?}");
+    assert!(
+        (choice.y - (host.y + (host.height - choice.height) / 2.0)).abs() < 0.01,
+        "host={host:?} choice={choice:?}"
+    );
     Ok(())
 }
 
@@ -1469,6 +1714,10 @@ fn border_color_uses_the_color_component_not_the_border_style() {
         super::super::document::border_color("2px dashed red"),
         Some("red".to_string())
     );
+    assert_eq!(
+        super::super::document::border_color("1px solid rgba(175, 47, 47, 0.2)"),
+        Some("rgba(175, 47, 47, 0.2)".to_string())
+    );
     assert_eq!(super::super::document::border_color("solid"), None);
 }
 
@@ -1531,4 +1780,21 @@ fn assert_target_exists(
             .any(|target| target.node_id == node_id)
     );
     Ok(())
+}
+
+fn element_box_for_id(
+    session: &mut super::super::HtmlInteractiveSession,
+    id: &str,
+) -> TestResult<super::super::types::ElementBox> {
+    let node_id = session
+        .runtime
+        .node_for_element_id(id)
+        .ok_or_else(|| format!("{id} node is missing"))?
+        .0;
+    session
+        .element_boxes
+        .iter()
+        .find(|element| element.node_id == node_id)
+        .cloned()
+        .ok_or_else(|| format!("{id} layout box is missing"))
 }

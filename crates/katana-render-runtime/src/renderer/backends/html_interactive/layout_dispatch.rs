@@ -130,14 +130,36 @@ impl HtmlLayoutRenderer {
         element: ElementRenderContext<'_>,
         layout: LayoutContext<'_>,
     ) -> f32 {
-        self.render_input(
+        let bottom = self.render_input(
             element.node_id,
             element.attributes,
             layout.x,
             layout.y,
             layout.width,
             layout.style,
-        )
+        );
+        self.render_input_children(element.children, layout);
+        bottom
+    }
+
+    fn render_input_children(&mut self, children: &[HtmlDocumentNode], layout: LayoutContext<'_>) {
+        if children.is_empty() {
+            return;
+        }
+        let child_x = layout.x + layout.style.margin_left;
+        let child_y = layout.y + layout.style.margin_top;
+        let child_width = layout
+            .style
+            .explicit_width(layout.width)
+            .unwrap_or(layout.width);
+        self.render_nodes(
+            children,
+            child_x,
+            child_y,
+            child_width,
+            layout.style,
+            layout.details,
+        );
     }
 
     fn render_table_element(
