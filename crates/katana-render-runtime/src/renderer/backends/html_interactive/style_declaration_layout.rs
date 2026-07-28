@@ -159,10 +159,9 @@ fn css_rotation_degrees(value: &str) -> Option<f32> {
         degrees.trim().parse::<f32>().ok()?
     } else if let Some(turns) = value.strip_suffix("turn") {
         turns.trim().parse::<f32>().ok()? * DEFAULT_ROTATION_DEGREES_PER_TURN
-    } else if let Some(radians) = value.strip_suffix("rad") {
-        radians.trim().parse::<f32>().ok()?.to_degrees()
     } else {
-        return None;
+        let radians = value.strip_suffix("rad")?;
+        radians.trim().parse::<f32>().ok()?.to_degrees()
     };
     rotation.is_finite().then_some(rotation)
 }
