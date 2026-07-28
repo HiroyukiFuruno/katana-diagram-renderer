@@ -156,9 +156,7 @@ fn missing_local_iframe_renders_an_actionable_in_frame_diagnostic() -> TestResul
         "<iframe style='width:300px;height:180px' src='missing&amp;frame.html'></iframe>",
     )?;
     let mut document = HtmlDocument::parse(&source.raw_html);
-    HtmlSubresourceLoader::new(&source)
-        .load(&mut document)
-        .map_err(to_string)?;
+    HtmlSubresourceLoader::new(&source).load(&mut document);
     let rendered = document.render();
 
     assert!(rendered.contains("data-krr-frame-error"));
@@ -176,9 +174,7 @@ fn source_less_iframe_keeps_fallback_content_without_a_diagnostic() -> TestResul
     let fixture = LocalFixture::new()?;
     let source = fixture.source("<iframe><strong>Fallback content</strong></iframe>")?;
     let mut document = HtmlDocument::parse(&source.raw_html);
-    HtmlSubresourceLoader::new(&source)
-        .load(&mut document)
-        .map_err(to_string)?;
+    HtmlSubresourceLoader::new(&source).load(&mut document);
     let rendered = document.render();
 
     assert!(rendered.contains("Fallback content"));
@@ -194,9 +190,7 @@ fn nested_directory_iframe_is_rejected_with_an_in_frame_diagnostic() -> TestResu
     std::fs::write(nested.join("frame.html"), "<p>Nested</p>").map_err(to_string)?;
     let source = fixture.source("<iframe src=nested/frame.html></iframe>")?;
     let mut document = HtmlDocument::parse(&source.raw_html);
-    HtmlSubresourceLoader::new(&source)
-        .load(&mut document)
-        .map_err(to_string)?;
+    HtmlSubresourceLoader::new(&source).load(&mut document);
     let rendered = document.render();
 
     assert!(rendered.contains("data-krr-frame-error"));
@@ -221,9 +215,7 @@ fn local_iframe_depth_and_document_limits_render_diagnostics() -> TestResult {
         .collect::<String>();
     let source = fixture.source(&format!("<iframe src=depth-0.html></iframe>{repeated}"))?;
     let mut document = HtmlDocument::parse(&source.raw_html);
-    HtmlSubresourceLoader::new(&source)
-        .load(&mut document)
-        .map_err(to_string)?;
+    HtmlSubresourceLoader::new(&source).load(&mut document);
     let rendered = document.render();
 
     assert!(rendered.contains("iframe nesting exceeds 8"));
@@ -265,8 +257,6 @@ fn invalid_iframe_reference_is_reported_without_runtime_failure() -> TestResult 
 
 fn load_rendered(source: &HtmlBrowserSource) -> TestResult<String> {
     let mut document = HtmlDocument::parse(&source.raw_html);
-    HtmlSubresourceLoader::new(source)
-        .load(&mut document)
-        .map_err(to_string)?;
+    HtmlSubresourceLoader::new(source).load(&mut document);
     Ok(document.render())
 }

@@ -67,9 +67,61 @@ fn node_id_array<'scope>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
+    use crate::renderer::backends::html_document::HtmlDocument;
+    use crate::renderer::backends::html_runtime::script::{evaluate_value, install_dom_bridge};
 
     #[test]
     fn missing_dom_state_error_preserves_contract_message() {
         assert_eq!(MISSING_DOM_STATE_ERROR, "HTML DOM state is unavailable");
+    }
+
+    #[test]
+    fn dom_callback_stores_unsupported_operation_error() {
+        DiagramV8Runtime::ensure_initialized();
+
+        let state = HtmlDomBridgeState::new(HtmlDocument::parse("<button id=action>Run</button>"));
+        let mut isolate = v8::Isolate::new(Default::default());
+        isolate.set_slot(state);
+
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+        v8::tc_scope!(let scope, &mut **context_scope);
+
+        let installed = install_dom_bridge(scope, "about:blank");
+        assert!(installed.is_ok(), "{installed:?}");
+        let callback = evaluate_value(scope, "krr-html-dom-callback", "__krr_dom('unsupported');");
+        assert!(callback.is_ok(), "{callback:?}");
+
+        let error = scope
+            .get_slot::<HtmlDomBridgeState>()
+            .and_then(|state| state.error.borrow().clone());
+        assert_eq!(
+            error,
+            Some("unsupported DOM operation: unsupported".to_string())
+        );
+    }
+
+    #[test]
+    fn dom_callback_without_state_returns_undefined() {
+        DiagramV8Runtime::ensure_initialized();
+
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+        v8::tc_scope!(let scope, &mut **context_scope);
+
+        let installed = install_dom_bridge(scope, "about:blank");
+        assert!(installed.is_ok(), "{installed:?}");
+        assert!(
+            evaluate_value(
+                scope,
+                "krr-html-dom-missing-state",
+                "__krr_dom('unsupported');"
+            )
+            .is_ok_and(|value| value.is_undefined())
+        );
     }
 }

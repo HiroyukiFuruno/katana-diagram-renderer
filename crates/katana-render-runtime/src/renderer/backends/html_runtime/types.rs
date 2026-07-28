@@ -2,6 +2,7 @@
 pub enum HtmlRuntimeError {
     ExternalScript(String),
     Subresource(String),
+    JavaScriptCompile(String),
     JavaScriptException(String),
     DomBridge(String),
     ExecutionTimeout,
@@ -14,6 +15,9 @@ impl std::fmt::Display for HtmlRuntimeError {
                 write!(formatter, "external script is not supported: {source}")
             }
             Self::Subresource(message) => write!(formatter, "HTML subresource error: {message}"),
+            Self::JavaScriptCompile(message) => {
+                write!(formatter, "JavaScript compile error: {message}")
+            }
             Self::JavaScriptException(message) => {
                 write!(formatter, "JavaScript exception: {message}")
             }

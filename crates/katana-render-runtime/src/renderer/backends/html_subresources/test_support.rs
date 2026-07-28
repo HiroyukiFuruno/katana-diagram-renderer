@@ -33,6 +33,21 @@ pub(super) fn local_resource_server() -> TestResult<LocalResourceServer> {
     Ok((format!("http://{address}"), requests, server))
 }
 
+pub(super) fn delayed_dynamic_server() -> TestResult<(String, ResourceServer)> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(to_string)?;
+    let address = listener.local_addr().map_err(to_string)?;
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        let path = request_path(&mut stream)?;
+        if path != "/state.txt" {
+            return Err(std::io::Error::other("unexpected dynamic request"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        write_response(&mut stream, b"ready")
+    });
+    Ok((format!("http://{address}"), server))
+}
+
 fn serve_resources(listener: TcpListener, requests: &Mutex<Vec<String>>) -> std::io::Result<()> {
     for _ in 0..3 {
         let (mut stream, _) = listener.accept()?;
@@ -147,15 +162,46 @@ pub(super) fn to_string(error: impl ToString) -> String {
     error.to_string()
 }
 
+pub(super) fn must_source(fixture: &LocalFixture, raw_html: &str) -> HtmlBrowserSource {
+    must_result(fixture.source(raw_html))
+}
+
+pub(super) fn must_result<T, E>(result: Result<T, E>) -> T {
+    assert!(result.is_ok());
+    let mut values = result.into_iter().collect::<Vec<_>>();
+    values.remove(0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{file_url_error, missing_request_path, record_request, resource_body, to_string};
+    use super::{
+        delayed_dynamic_server, file_url_error, missing_request_path, record_request,
+        resource_body, to_string,
+    };
     use crate::renderer::backends::html_browser::HtmlBrowserError;
+    use std::io::Write;
+    use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
     use url::Url;
 
     #[test]
-    fn support_helpers_report_unexpected_resources_and_errors() {
+    fn delayed_dynamic_server_rejects_unexpected_request_path() {
+        let (origin, server) = super::must_result(delayed_dynamic_server());
+        let mut stream =
+            super::must_result(TcpStream::connect(origin.trim_start_matches("http://")));
+        super::must_result(stream.write_all(
+            b"GET /unexpected.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        ));
+        super::must_result(stream.shutdown(std::net::Shutdown::Write));
+        let result = super::must_result(server.join());
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string() == "unexpected dynamic request"
+        ));
+    }
+
+    #[test]
+    fn support_helpers_report_unexpected_resources_and_stringify_errors() {
         assert!(resource_body("/missing.css").is_err());
         assert_eq!(to_string("fixture failure"), "fixture failure");
         assert_eq!(to_string("owned failure".to_string()), "owned failure");
@@ -164,11 +210,14 @@ mod tests {
             to_string(HtmlBrowserError::InvalidViewport),
             "browser viewport dimensions must be non-zero"
         );
-        let mut parse_messages = Vec::new();
-        if let Some(error) = Url::parse("http://[").err() {
-            parse_messages.push(to_string(error));
-        }
-        assert_eq!(parse_messages, vec!["invalid IPv6 address"]);
+    }
+
+    #[test]
+    fn support_helpers_preserve_url_and_request_errors() {
+        assert!(matches!(
+            Url::parse("http://[").map_err(to_string),
+            Err(message) if message == "invalid IPv6 address"
+        ));
         assert_eq!(
             missing_request_path().to_string(),
             "request path is missing"

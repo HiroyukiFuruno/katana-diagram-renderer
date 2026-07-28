@@ -107,3 +107,35 @@ fn escape_xml(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EMBEDDED_SVG_HEIGHT_PLACEHOLDER, EMBEDDED_SVG_WIDTH_PLACEHOLDER,
+        EMBEDDED_SVG_X_PLACEHOLDER, EMBEDDED_SVG_Y_PLACEHOLDER, serialize_root_attributes,
+    };
+
+    #[test]
+    fn serialize_root_attributes_adds_missing_xmlns_and_geometry_placeholders() {
+        let mut output = String::new();
+        serialize_root_attributes(&mut output, Some("width: 40px"), false);
+
+        assert!(output.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(output.contains("style=\"width: 40px\""));
+        assert!(output.contains(format!("x=\"{}\"", EMBEDDED_SVG_X_PLACEHOLDER).as_str()));
+        assert!(output.contains(format!("y=\"{}\"", EMBEDDED_SVG_Y_PLACEHOLDER).as_str()));
+        assert!(output.contains(format!("width=\"{}\"", EMBEDDED_SVG_WIDTH_PLACEHOLDER).as_str()));
+        assert!(
+            output.contains(format!("height=\"{}\"", EMBEDDED_SVG_HEIGHT_PLACEHOLDER).as_str())
+        );
+    }
+
+    #[test]
+    fn serialize_root_attributes_keeps_existing_xmlns_if_present() {
+        let mut output = String::new();
+        serialize_root_attributes(&mut output, None, true);
+
+        assert!(!output.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(output.contains(format!("x=\"{}\"", EMBEDDED_SVG_X_PLACEHOLDER).as_str()));
+    }
+}

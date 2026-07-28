@@ -216,9 +216,27 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 11.2 Center button text within its CSS content box when flex main/cross
   axis alignment requests center. Match Chrome's `40x40` pager button and
   `x=17` glyph geometry with generic row and column regression contracts.
-- [ ] 11.3 Pass strict 100% coverage and the complete release gate, publish and
+- [x] 11.3 Pass strict 100% coverage and the complete release gate, publish and
   verify KRR `0.4.13`, then update KatanA through crates.io only and regenerate
   the native full-deck and cursor-free pager evidence before user approval.
+
+### 12. v0.4.14 Dynamic URL Application Compatibility
+
+- [x] 12.1 Keep compile errors strict for the static HTML exporter, while the
+  interactive browser session records an ordinary script exception and
+  continues with later scripts, lifecycle events, layout, and frame output.
+- [x] 12.2 Provide browser globals required by a representative public
+  VanillaJS application: `NodeList`, `document.location`, session-scoped
+  `localStorage`, and policy-controlled same-origin `XMLHttpRequest`.
+- [x] 12.3 Keep unrestricted host/process APIs, WebSocket, cross-origin XHR,
+  mixed content, and Chromium/WebView unavailable; prove blocked requests do
+  not stop the document frame.
+- [x] 12.4 Reproduce the public TodoMVC URL through native headless KatanA,
+  prove JavaScript-driven interaction changes its frame, and classify
+  Cloudflare browser challenges separately from JavaScript compatibility.
+- [ ] 12.5 Pass strict 100% coverage and the complete release gate, publish and
+  verify KRR `0.4.14`, then update KatanA through crates.io and regenerate the
+  dynamic URL evidence before release approval.
 
 ## Local Verification Evidence
 

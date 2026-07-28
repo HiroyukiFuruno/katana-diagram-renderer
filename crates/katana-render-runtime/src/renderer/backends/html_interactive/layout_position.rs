@@ -1,7 +1,7 @@
 use super::layout::{ContainingBlock, HtmlLayoutRenderer};
 use super::style::{CssPosition, CssStyle};
 
-fn horizontal_position(containing: ContainingBlock, style: &CssStyle) -> (f32, f32) {
+fn horizontal_position(containing: ContainingBlock, style: &CssStyle, static_x: f32) -> (f32, f32) {
     let left = style.inset_left;
     let right = style.inset_right;
     let width = match (left, right) {
@@ -10,7 +10,7 @@ fn horizontal_position(containing: ContainingBlock, style: &CssStyle) -> (f32, f
     };
     let x = left.map_or_else(
         || {
-            right.map_or(containing.x, |right| {
+            right.map_or(static_x, |right| {
                 containing.x + containing.width - right - width
             })
         },
@@ -19,29 +19,78 @@ fn horizontal_position(containing: ContainingBlock, style: &CssStyle) -> (f32, f
     (x, width)
 }
 
-fn vertical_position(containing: ContainingBlock, style: &CssStyle) -> (f32, Option<f32>) {
+fn vertical_position(
+    containing: ContainingBlock,
+    style: &CssStyle,
+    static_y: f32,
+) -> (f32, Option<f32>) {
     let top = style.inset_top;
     let bottom = style.inset_bottom;
-    let height = match (top, bottom) {
-        (Some(top), Some(bottom)) => Some((containing.height - top - bottom).max(0.0)),
-        _ => style.height.map(|height| style.outer_height(height)),
-    };
+    let explicit_height = style.height.map(|height| style.outer_height(height));
+    let auto_count = auto_margin_count(style);
+    let height = vertical_height(containing.height, top, bottom, explicit_height, auto_count);
+    let auto_share = auto_vertical_share(containing.height, top, bottom, height, auto_count);
+    let auto_top = top_auto_offset(style.margin_top_auto, auto_share);
     let y = top.map_or_else(
         || {
-            bottom.zip(height).map_or(containing.y, |(bottom, height)| {
-                containing.y + containing.height - bottom - height
+            bottom.zip(height).map_or(static_y, |(bottom, height)| {
+                containing.y + containing.height - bottom - height - auto_top
             })
         },
-        |top| containing.y + top,
+        |top| containing.y + top + auto_top,
     );
     (y, height)
 }
 
+fn vertical_height(
+    container_height: f32,
+    top: Option<f32>,
+    bottom: Option<f32>,
+    explicit_height: Option<f32>,
+    auto_count: usize,
+) -> Option<f32> {
+    match (top, bottom, explicit_height, auto_count == 0) {
+        (Some(top), Some(bottom), None, true) => Some((container_height - top - bottom).max(0.0)),
+        _ => explicit_height,
+    }
+}
+
+fn auto_vertical_share(
+    container_height: f32,
+    top: Option<f32>,
+    bottom: Option<f32>,
+    height: Option<f32>,
+    auto_count: usize,
+) -> f32 {
+    if auto_count == 0 {
+        return 0.0;
+    }
+    let remaining = match (top, bottom, height) {
+        (Some(top), Some(bottom), Some(height)) => {
+            (container_height - top - bottom - height).max(0.0)
+        }
+        _ => 0.0,
+    };
+    remaining / auto_count as f32
+}
+
+fn top_auto_offset(margin_top_auto: bool, auto_share: f32) -> f32 {
+    if margin_top_auto { auto_share } else { 0.0 }
+}
+
+fn auto_margin_count(style: &CssStyle) -> usize {
+    usize::from(style.margin_top_auto) + usize::from(style.margin_bottom_auto)
+}
+
 impl HtmlLayoutRenderer {
-    pub(super) fn positioned_geometry(&self, style: &mut CssStyle) -> (f32, f32, f32) {
+    pub(super) fn positioned_geometry(
+        &self,
+        style: &mut CssStyle,
+        static_position: (f32, f32),
+    ) -> (f32, f32, f32) {
         let containing = self.positioning_containing_block(style.position);
-        let (x, width) = horizontal_position(containing, style);
-        let (y, height) = vertical_position(containing, style);
+        let (x, width) = horizontal_position(containing, style, static_position.0);
+        let (y, height) = vertical_position(containing, style, static_position.1);
         if let Some(height) = height {
             style.assign_outer_height(height);
         }
@@ -81,7 +130,12 @@ impl HtmlLayoutRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainingBlock, CssStyle, horizontal_position};
+    use super::{
+        ContainingBlock, CssStyle, HtmlLayoutRenderer, auto_vertical_share, horizontal_position,
+        vertical_position,
+    };
+    use crate::renderer::backends::html_browser::HtmlBrowserViewport;
+    use std::collections::HashMap;
 
     fn containing_block() -> ContainingBlock {
         ContainingBlock {
@@ -93,10 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_position_defaults_to_containing_block_start() {
+    fn positions_without_insets_preserve_the_static_flow_position() {
+        let style = CssStyle::browser_default();
         assert_eq!(
-            horizontal_position(containing_block(), &CssStyle::browser_default()),
-            (10.0, 200.0)
+            horizontal_position(containing_block(), &style, 35.0),
+            (35.0, 200.0)
+        );
+        assert_eq!(
+            vertical_position(containing_block(), &style, 47.0),
+            (47.0, None)
         );
     }
 
@@ -107,8 +166,53 @@ mod tests {
         style.inset_right = Some(15.0);
 
         assert_eq!(
-            horizontal_position(containing_block(), &style),
+            horizontal_position(containing_block(), &style, 35.0),
             (145.0, 50.0)
         );
+    }
+
+    #[test]
+    fn vertical_auto_margins_center_an_explicit_height_between_insets() {
+        let mut style = CssStyle::browser_default();
+        style.inset_top = Some(0.0);
+        style.inset_bottom = Some(0.0);
+        style.height = Some(40.0);
+        style.margin_top_auto = true;
+        style.margin_bottom_auto = true;
+
+        assert_eq!(
+            vertical_position(containing_block(), &style, 47.0),
+            (50.0, Some(40.0))
+        );
+    }
+
+    #[test]
+    fn vertical_auto_margin_has_no_share_without_complete_geometry() {
+        assert_eq!(
+            auto_vertical_share(100.0, Some(0.0), None, Some(40.0), 1),
+            0.0
+        );
+    }
+
+    #[test]
+    fn container_stacks_are_updated_on_push_and_pop() {
+        let viewport = HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        };
+        let mut renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
+        let block = containing_block();
+
+        assert!(renderer.containing_blocks.is_empty());
+        renderer.push_containing_block(block);
+        assert_eq!(renderer.containing_blocks.len(), 1);
+        assert_eq!(renderer.containing_blocks[0].x, block.x);
+        assert_eq!(renderer.containing_blocks[0].y, block.y);
+        assert_eq!(renderer.containing_blocks[0].width, block.width);
+        assert_eq!(renderer.containing_blocks[0].height, block.height);
+
+        renderer.pop_containing_block();
+        assert!(renderer.containing_blocks.is_empty());
     }
 }

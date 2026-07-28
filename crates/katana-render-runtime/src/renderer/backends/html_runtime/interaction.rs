@@ -38,11 +38,8 @@ pub(super) fn event_default_prevented(
     scope: &mut HtmlTryCatchScope<'_, '_, '_, '_>,
     event: v8::Local<'_, v8::Object>,
 ) -> Result<bool, HtmlRuntimeError> {
-    let key = v8::String::new(scope, "defaultPrevented").ok_or(HtmlRuntimeError::DomBridge(
-        "click event default key allocation failed".to_string(),
-    ))?;
-    event
-        .get(scope, key.into())
+    v8::String::new(scope, "defaultPrevented")
+        .and_then(|key| event.get(scope, key.into()))
         .map(|value| value.is_true())
         .ok_or(HtmlRuntimeError::JavaScriptException(
             "click event defaultPrevented lookup failed".to_string(),
@@ -56,6 +53,8 @@ fn event_error<T>(_error: T) -> HtmlRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
+    use crate::renderer::backends::html_runtime::script::evaluate_value;
 
     #[test]
     fn interaction_error_helpers_preserve_contract_messages() {
@@ -94,5 +93,29 @@ mod tests {
         assert_eq!(event_flags("focus"), (false, false));
         assert_eq!(event_flags("click"), (true, true));
         assert_eq!(event_flags("input"), (true, false));
+    }
+
+    #[test]
+    fn event_default_prevented_returns_js_exception_when_lookup_throws() {
+        DiagramV8Runtime::ensure_initialized();
+
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+        v8::tc_scope!(let scope, &mut **context_scope);
+
+        let event = evaluate_value(
+            scope,
+            "krr-html-event-default-prevented",
+            "const event = {};\nObject.defineProperty(event, 'defaultPrevented', {\n  get() { throw new Error('lookup failed'); }\n});\n\nevent;",
+        )
+        .ok()
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok());
+        assert!(event.is_some_and(|event| matches!(
+            event_default_prevented(scope, event),
+            Err(HtmlRuntimeError::JavaScriptException(message))
+                if message == "click event defaultPrevented lookup failed"
+        )));
     }
 }

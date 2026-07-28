@@ -122,7 +122,9 @@ fn link_style(style: &CssStyle) -> CssStyle {
     if !style.explicit_color {
         style.color = "#0969da".to_string();
     }
-    style.underline = true;
+    if !style.explicit_text_decoration {
+        style.underline = true;
+    }
     style
 }
 
@@ -157,5 +159,17 @@ mod tests {
             renderer.render_text(" \n ", 0.0, 42.0, 100.0, &CssStyle::browser_default()),
             42.0
         );
+    }
+
+    #[test]
+    fn link_default_underline_respects_explicit_text_decoration_none() {
+        let style = CssStyle::browser_default();
+        assert!(super::link_style(&style).underline);
+
+        let without_underline = CssStyle::from_attributes(
+            &[("style".to_string(), "text-decoration: none".to_string())],
+            &style,
+        );
+        assert!(!super::link_style(&without_underline).underline);
     }
 }

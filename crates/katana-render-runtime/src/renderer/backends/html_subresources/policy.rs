@@ -35,6 +35,13 @@ impl HtmlSubresourcePolicy {
             .ok_or_else(|| format!("navigation is not allowed: {reference}"))
     }
 
+    pub(super) fn resolve_same_origin_request(&self, reference: &str) -> Result<Url, String> {
+        let url = self.resolve(reference)?;
+        self.allows_same_origin(reference, &url)
+            .then_some(url)
+            .ok_or_else(|| format!("dynamic request is not allowed: {reference}"))
+    }
+
     pub(super) fn resolve_iframe(&self, reference: &str) -> Result<Url, String> {
         let url = self.resolve(reference)?;
         match self.origin.scheme() {
@@ -180,6 +187,31 @@ mod tests {
 
         assert!(HtmlSubresourcePolicy::local_file_path(&remote, "frame.html").is_err());
         assert!(HtmlSubresourcePolicy::local_file_path(&non_file, "frame.html").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_requests_are_limited_to_the_document_origin()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = HtmlBrowserSource::new("<p>ok</p>", "https://example.test/app/index.html")?;
+        let policy = HtmlSubresourcePolicy::from_source(&source);
+
+        assert_eq!(
+            policy
+                .resolve_same_origin_request("../state.json")?
+                .as_str(),
+            "https://example.test/state.json"
+        );
+        assert!(
+            policy
+                .resolve_same_origin_request("https://other.test/state.json")
+                .is_err()
+        );
+        assert!(
+            policy
+                .resolve_same_origin_request("http://example.test/state.json")
+                .is_err()
+        );
         Ok(())
     }
 }

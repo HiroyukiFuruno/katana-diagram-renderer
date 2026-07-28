@@ -133,6 +133,7 @@ fn flex_center_axes(style: &CssStyle) -> Option<(bool, bool)> {
 #[cfg(test)]
 mod tests {
     use super::{ControlLayout, button_text_layout};
+    use crate::renderer::backends::html_interactive::constants::BUTTON_TEXT_LEFT_PADDING;
     use crate::renderer::backends::html_interactive::{style::CssStyle, text_metrics::text_width};
     use taffy::style::{AlignItems, Display, FlexDirection, JustifyContent};
 
@@ -159,5 +160,62 @@ mod tests {
         assert!((text_layout.width - measured_width).abs() <= f32::EPSILON);
         assert!((text_layout.y - 1.0).abs() <= f32::EPSILON);
         assert!((text_layout.height - 38.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn row_flex_only_horizontally_centers_button_text() {
+        let mut style = CssStyle::browser_default();
+        style.display = Display::Flex;
+        style.flex_direction = FlexDirection::Row;
+        style.justify_content = Some(JustifyContent::CENTER);
+        let layout = ControlLayout {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 20.0,
+            style: &style,
+        };
+        let text = "abc";
+
+        let text_layout = button_text_layout(text, layout);
+        let measured_width = text_width(text, &style);
+        let content_width = style.content_width(layout.width);
+        let expected_x = style.border_left_width()
+            + style.padding_left
+            + (content_width - measured_width.min(content_width)) / 2.0;
+
+        assert!((text_layout.x - expected_x).abs() <= f32::EPSILON);
+        assert_eq!(text_layout.width, measured_width.min(content_width));
+        assert!((text_layout.y - 0.0).abs() <= f32::EPSILON);
+        assert_eq!(text_layout.height, 20.0);
+    }
+
+    #[test]
+    fn column_flex_only_vertically_centers_button_text() {
+        let mut style = CssStyle::browser_default();
+        style.display = Display::Flex;
+        style.flex_direction = FlexDirection::Column;
+        style.justify_content = Some(JustifyContent::CENTER);
+        style.border_width = 0.0;
+        style.padding_top = 0.0;
+        let layout = ControlLayout {
+            x: 0.0,
+            y: 5.0,
+            width: 40.0,
+            height: 40.0,
+            style: &style,
+        };
+
+        let text_layout = button_text_layout("abc", layout);
+        let expected_y = layout.y + style.border_top_width() + style.padding_top;
+        let expected_x = layout.x + BUTTON_TEXT_LEFT_PADDING;
+
+        assert_eq!(text_layout.x, expected_x);
+        assert_eq!(text_layout.y, expected_y);
+        assert_eq!(text_layout.height, style.content_height(layout.height));
+        assert_eq!(
+            text_layout.width,
+            layout.width - BUTTON_TEXT_LEFT_PADDING * 2.0
+        );
     }
 }

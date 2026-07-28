@@ -1,6 +1,9 @@
 use super::super::html_document::HtmlDocumentNode;
+use super::constants::CONTROL_HEIGHT;
 use super::document::attribute;
 use super::layout::HtmlLayoutRenderer;
+use super::layout_container::horizontal_box_geometry;
+use super::layout_input::is_checkbox;
 use super::style::{CssPosition, CssStyle};
 use super::types::{
     DetailsContext, ElementBox, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext,
@@ -43,7 +46,7 @@ impl HtmlLayoutRenderer {
         let mut style = CssStyle::from_element(element.tag, element.attributes, layout.style);
         let paint_start = self.svg.len();
         let bottom = self.render_positioned_or_flow_element(element, layout, &mut style);
-        self.finish_element_paint(paint_start, &style);
+        self.finish_element_paint(paint_start, element.node_id, &style);
         bottom
     }
 
@@ -54,7 +57,11 @@ impl HtmlLayoutRenderer {
         style: &mut CssStyle,
     ) -> f32 {
         if matches!(style.position, CssPosition::Absolute | CssPosition::Fixed) {
-            let (x, y, width) = self.positioned_geometry(style);
+            if element.tag == "input" && is_checkbox(element.attributes) && style.height.is_none() {
+                let outer_height = style.explicit_width(layout.width).unwrap_or(CONTROL_HEIGHT);
+                style.assign_outer_height(outer_height);
+            }
+            let (x, y, width) = self.positioned_geometry(style, (layout.x, layout.y));
             self.render_styled_element(
                 element,
                 LayoutContext::new(x, y, width, style, layout.details),
@@ -65,7 +72,21 @@ impl HtmlLayoutRenderer {
         }
     }
 
-    fn finish_element_paint(&mut self, paint_start: usize, style: &CssStyle) {
+    fn finish_element_paint(&mut self, paint_start: usize, node_id: u64, style: &CssStyle) {
+        if style.rotation_degrees != 0.0
+            && let Some(element_box) = self
+                .element_boxes
+                .iter()
+                .rev()
+                .find(|element_box| element_box.node_id == node_id)
+        {
+            self.wrap_rotated_range(
+                paint_start,
+                style.rotation_degrees,
+                element_box.x + element_box.width / 2.0,
+                element_box.y - self.scroll_y + element_box.height / 2.0,
+            );
+        }
         if style.opacity < 1.0 {
             self.wrap_painted_range(paint_start, style.opacity);
         }
@@ -114,15 +135,13 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
         bottom: f32,
     ) {
-        let x = layout.x + layout.style.margin_left;
+        let (x, width) = horizontal_box_geometry(layout.x, layout.width, layout.style);
         let y = layout.y + layout.style.margin_top;
-        let available =
-            (layout.width - layout.style.margin_left - layout.style.margin_right).max(0.0);
         self.element_boxes[index] = ElementBox {
             node_id,
             x,
             y,
-            width: layout.style.box_width(available).min(available),
+            width,
             height: (bottom - y - layout.style.margin_bottom).max(0.0),
         };
     }
@@ -151,15 +170,13 @@ impl HtmlLayoutRenderer {
         layout: LayoutContext<'_>,
         bottom: f32,
     ) {
-        let x = layout.x + layout.style.margin_left;
+        let (x, width) = horizontal_box_geometry(layout.x, layout.width, layout.style);
         let y = layout.y + layout.style.margin_top;
-        let available =
-            (layout.width - layout.style.margin_left - layout.style.margin_right).max(0.0);
         self.hit_targets[index] = HitTarget {
             node_id,
             x,
             y,
-            width: layout.style.box_width(available).min(available),
+            width,
             height: (bottom - y - layout.style.margin_bottom).max(0.0),
             kind: HitTargetKind::Click,
         };

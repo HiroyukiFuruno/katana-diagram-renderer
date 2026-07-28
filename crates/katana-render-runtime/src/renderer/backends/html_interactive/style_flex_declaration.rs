@@ -84,6 +84,9 @@ mod tests {
 
         style.apply_flex_basis("12px");
         assert_eq!(style.flex_basis, Some(CssLength::Px(12.0)));
+
+        style.apply_flex_basis("invalid");
+        assert_eq!(style.flex_basis, Some(CssLength::Px(12.0)));
     }
 
     #[test]
@@ -94,5 +97,15 @@ mod tests {
 
         assert_eq!((style.flex_grow, style.flex_shrink), (2.0, 1.0));
         assert!(style.flex_basis.is_none());
+    }
+
+    #[test]
+    fn flex_basis_accepts_percentage_length() {
+        let mut style = CssStyle::browser_default();
+        style.flex_basis = Some(CssLength::Px(1.0));
+
+        style.apply_flex_basis("50%");
+
+        assert_eq!(style.flex_basis, Some(CssLength::Percent(0.5)));
     }
 }

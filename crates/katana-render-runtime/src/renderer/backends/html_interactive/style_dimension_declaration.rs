@@ -111,4 +111,20 @@ mod tests {
         assert!(style.block_length("-1%").is_none());
         assert!(style.block_length("NaN%").is_none());
     }
+
+    #[test]
+    fn minimum_height_updates_value_when_length_is_specified() {
+        let mut style = CssStyle::browser_default();
+        style.automatic_min_height = true;
+        style.min_height = 5.0;
+
+        style.apply_minimum_height("10px");
+
+        assert_eq!(style.min_height, 10.0);
+        assert!(!style.automatic_min_height);
+
+        style.apply_minimum_height("invalid");
+        assert_eq!(style.min_height, 10.0);
+        assert!(!style.automatic_min_height);
+    }
 }

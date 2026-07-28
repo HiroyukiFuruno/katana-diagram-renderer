@@ -97,7 +97,7 @@ fn evaluate_value_unbounded<'scope>(
         None,
     );
     let script = v8::Script::compile(scope, source, Some(&origin))
-        .ok_or_else(|| HtmlRuntimeError::JavaScriptException(exception_message(scope)))?;
+        .ok_or_else(|| HtmlRuntimeError::JavaScriptCompile(exception_message(scope)))?;
     script
         .run(scope)
         .ok_or_else(|| HtmlRuntimeError::JavaScriptException(exception_message(scope)))
@@ -240,7 +240,7 @@ mod tests {
 
         assert!(matches!(
             evaluate(scope, "", "const = ;"),
-            Err(HtmlRuntimeError::JavaScriptException(message))
+            Err(HtmlRuntimeError::JavaScriptCompile(message))
                 if message.contains("inline-script:1:") && message.contains("const = ;")
         ));
     }

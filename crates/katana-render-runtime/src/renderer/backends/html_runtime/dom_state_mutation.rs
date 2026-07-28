@@ -22,6 +22,15 @@ impl HtmlDomBridgeState {
                 document.remove(node_id(argument(arguments, 0)?)?)?;
                 Ok(DomValue::Undefined)
             }
+            "insertAdjacentHTML" => {
+                let target = node_id(argument(arguments, 0)?)?;
+                document.insert_adjacent_html(
+                    target,
+                    argument(arguments, 1)?,
+                    argument(arguments, 2)?,
+                )?;
+                Ok(DomValue::Undefined)
+            }
             _ => Err(format!("unsupported HTML mutation operation: {operation}")),
         }
     }

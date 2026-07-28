@@ -32,7 +32,7 @@ impl CssStyle {
 fn is_phrasing_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "abbr"
+        "a" | "abbr"
             | "b"
             | "bdi"
             | "bdo"

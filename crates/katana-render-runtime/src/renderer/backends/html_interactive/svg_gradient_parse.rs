@@ -104,7 +104,7 @@ pub(super) fn split_top_level_whitespace(value: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::gradient_direction;
+    use super::{gradient_direction, split_top_level_whitespace};
 
     #[test]
     fn gradient_direction_supports_every_corner_and_cardinal_alias() {
@@ -119,5 +119,23 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(gradient_direction(value), Some(expected));
         }
+    }
+
+    #[test]
+    fn top_level_whitespace_split_preserves_nested_parentheses() {
+        assert_eq!(
+            split_top_level_whitespace("url(image.svg) 10px 20px"),
+            vec!["url(image.svg)", "10px", "20px"]
+        );
+    }
+
+    #[test]
+    fn top_level_whitespace_split_handles_single_token_without_trailing_whitespace() {
+        assert_eq!(split_top_level_whitespace("45deg"), vec!["45deg"]);
+    }
+
+    #[test]
+    fn top_level_whitespace_split_ignores_surrounding_whitespace() {
+        assert_eq!(split_top_level_whitespace("  red  "), vec!["red"]);
     }
 }

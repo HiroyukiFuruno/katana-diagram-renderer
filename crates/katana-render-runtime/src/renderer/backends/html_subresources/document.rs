@@ -6,15 +6,15 @@ use std::collections::HashMap;
 pub(super) fn load_document_resources(
     loader: &HtmlSubresourceLoader,
     document: &mut HtmlDocument,
-) -> Result<HtmlDocumentResources, String> {
+) -> HtmlDocumentResources {
     super::iframe::inline_iframes(loader, document);
     let stylesheets = load_stylesheets(loader, &document.document);
     let scripts = load_scripts(loader, &document.document);
     inline_images(loader, &document.document);
-    Ok(HtmlDocumentResources {
+    HtmlDocumentResources {
         stylesheets,
         scripts,
-    })
+    }
 }
 
 fn load_stylesheets(loader: &HtmlSubresourceLoader, document: &Handle) -> HashMap<String, String> {

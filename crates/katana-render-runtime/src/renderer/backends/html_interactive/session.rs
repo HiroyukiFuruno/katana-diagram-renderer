@@ -131,6 +131,7 @@ impl HtmlInteractiveSession {
             .runtime
             .event_target_ids("click")
             .map_err(runtime_failure)?;
+        self.input_values.clear();
         seed_input_values(&nodes, &mut self.input_values);
         HtmlLayoutRenderer::render_with_clickable_nodes(
             &nodes,

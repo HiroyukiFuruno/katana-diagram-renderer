@@ -139,6 +139,9 @@ mod tests {
 
         style.apply_border_side_color("border-top-color", "");
         assert!(style.border_top_color.is_none());
+
+        style.apply_border_side_color("color", "red");
+        assert!(style.border_top_color.is_none());
     }
 
     #[test]
@@ -161,5 +164,14 @@ mod tests {
         style.set_border_side_width("diagonal", 7.0);
         style.set_border_side_color("diagonal", "red".to_string());
         assert_eq!(style.border_width, 3.0);
+    }
+
+    #[test]
+    fn border_side_color_sets_valid_edges() {
+        let mut style = CssStyle::browser_default();
+
+        style.apply_border_side_color("border-left-color", "blue");
+
+        assert_eq!(style.border_left_color.as_deref(), Some("blue"));
     }
 }

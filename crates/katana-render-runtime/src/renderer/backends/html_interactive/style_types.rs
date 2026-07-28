@@ -92,6 +92,14 @@ pub(in crate::renderer::backends::html_interactive) enum CssPosition {
     Fixed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::renderer::backends::html_interactive) enum CssFloat {
+    #[default]
+    None,
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) color: String,
@@ -130,6 +138,10 @@ pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) margin_right: f32,
     pub(in crate::renderer::backends::html_interactive) margin_bottom: f32,
     pub(in crate::renderer::backends::html_interactive) margin_left: f32,
+    pub(in crate::renderer::backends::html_interactive) margin_top_auto: bool,
+    pub(in crate::renderer::backends::html_interactive) margin_right_auto: bool,
+    pub(in crate::renderer::backends::html_interactive) margin_bottom_auto: bool,
+    pub(in crate::renderer::backends::html_interactive) margin_left_auto: bool,
     pub(in crate::renderer::backends::html_interactive) min_height: f32,
     pub(in crate::renderer::backends::html_interactive) automatic_min_height: bool,
     pub(in crate::renderer::backends::html_interactive) width: Option<CssLength>,
@@ -139,6 +151,9 @@ pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) max_height: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) percentage_height_basis: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) position: CssPosition,
+    pub(in crate::renderer::backends::html_interactive) float: CssFloat,
+    pub(in crate::renderer::backends::html_interactive) appearance_none: bool,
+    pub(in crate::renderer::backends::html_interactive) rotation_degrees: f32,
     pub(in crate::renderer::backends::html_interactive) z_index: Option<i32>,
     pub(in crate::renderer::backends::html_interactive) inset_top: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) inset_right: Option<f32>,
@@ -146,6 +161,7 @@ pub(in crate::renderer::backends::html_interactive) struct CssStyle {
     pub(in crate::renderer::backends::html_interactive) inset_left: Option<f32>,
     pub(in crate::renderer::backends::html_interactive) font_weight: u16,
     pub(in crate::renderer::backends::html_interactive) underline: bool,
+    pub(in crate::renderer::backends::html_interactive) explicit_text_decoration: bool,
     pub(in crate::renderer::backends::html_interactive) display: Display,
     pub(in crate::renderer::backends::html_interactive) inline_block: bool,
     pub(in crate::renderer::backends::html_interactive) inline_atomic: bool,

@@ -27,15 +27,17 @@ impl HtmlSubresourceLoader {
         }
     }
 
-    pub(super) fn load(
-        &self,
-        document: &mut HtmlDocument,
-    ) -> Result<HtmlDocumentResources, String> {
+    pub(super) fn load(&self, document: &mut HtmlDocument) -> HtmlDocumentResources {
         document::load_document_resources(self, document)
     }
 
     pub(super) fn load_text(&self, reference: &str) -> Result<String, String> {
         let url = self.policy.resolve_subresource(reference)?;
+        transport::load_text(&url)
+    }
+
+    pub(super) fn load_same_origin_text(&self, reference: &str) -> Result<String, String> {
+        let url = self.policy.resolve_same_origin_request(reference)?;
         transport::load_text(&url)
     }
 

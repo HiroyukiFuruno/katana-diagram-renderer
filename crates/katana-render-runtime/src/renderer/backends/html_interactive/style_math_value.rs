@@ -160,7 +160,7 @@ fn css_scalar(value: &str) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{css_resolved_px, split_top_level_commas};
+    use super::{css_resolved_px, split_top_level_commas, split_top_level_whitespace};
 
     #[test]
     fn math_function_rejects_unresolvable_nested_values() {
@@ -172,5 +172,18 @@ mod tests {
         assert!(split_top_level_commas(", 1px").is_none());
         assert!(split_top_level_commas("min(1px, 2px").is_none());
         assert!(split_top_level_commas("1px,").is_none());
+    }
+
+    #[test]
+    fn top_level_whitespace_split_preserves_nested_parentheses() {
+        assert_eq!(
+            split_top_level_whitespace("calc(1px + 2px) 3px"),
+            vec!["calc(1px + 2px)", "3px"]
+        );
+    }
+
+    #[test]
+    fn top_level_whitespace_split_returns_final_token_without_trailing_whitespace() {
+        assert_eq!(split_top_level_whitespace("  5px  "), vec!["5px"]);
     }
 }

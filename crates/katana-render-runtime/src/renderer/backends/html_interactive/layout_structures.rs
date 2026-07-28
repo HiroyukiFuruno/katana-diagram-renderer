@@ -27,12 +27,7 @@ impl HtmlLayoutRenderer {
         style: &CssStyle,
         ordered: bool,
     ) -> f32 {
-        if style.list_style_none
-            && matches!(
-                style.display,
-                taffy::style::Display::Flex | taffy::style::Display::Grid
-            )
-        {
+        if style.list_style_none {
             return self.render_container(children, x, y, width, style, DetailsContext::NONE);
         }
         let current = y + style.margin_top;
@@ -76,6 +71,9 @@ impl HtmlLayoutRenderer {
         width: f32,
         style: &CssStyle,
     ) -> f32 {
+        if style.list_style_none {
+            return self.render_container(children, x, y, width, style, DetailsContext::NONE);
+        }
         self.render_list_item_contents(children, x, y, width, style, Some((false, 1)))
     }
 
@@ -166,15 +164,86 @@ fn list_marker(ordered: bool, index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::accept_list_flow_result;
+    use super::HtmlLayoutRenderer;
+    use crate::renderer::backends::html_browser::HtmlBrowserViewport;
+    use crate::renderer::backends::html_document::HtmlDocumentNode;
+    use crate::renderer::backends::html_interactive::style::CssStyle;
+    use std::collections::HashMap;
 
     #[test]
     fn list_flow_errors_are_recorded_at_the_item_start() {
+        use super::accept_list_flow_result;
+
         let mut layout_error = None;
 
         let bottom = accept_list_flow_result(&mut layout_error, Err("layout failed".into()), 12.0);
 
         assert_eq!(bottom, 12.0);
         assert_eq!(layout_error.as_deref(), Some("layout failed"));
+    }
+
+    fn list_item(node_id: u64) -> HtmlDocumentNode {
+        HtmlDocumentNode::Element {
+            node_id,
+            tag: "li".to_string(),
+            attributes: Vec::new(),
+            children: vec![HtmlDocumentNode::Text("item".to_string())],
+        }
+    }
+
+    fn viewport() -> HtmlBrowserViewport {
+        HtmlBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1.0,
+        }
+    }
+
+    #[test]
+    fn list_markers_are_skipped_when_list_style_is_none() {
+        let mut style = CssStyle::browser_default();
+        style.list_style_none = true;
+        let mut renderer = HtmlLayoutRenderer::new(viewport(), 0.0, &HashMap::new(), None);
+
+        let nodes = [list_item(1)];
+        renderer.render_list(&nodes, 0.0, 0.0, 160.0, &style, false);
+
+        assert!(!renderer.svg.contains("•"));
+    }
+
+    #[test]
+    fn marker_width_is_zero_when_list_style_is_none() {
+        let mut style = CssStyle::browser_default();
+        style.list_style_none = true;
+        let mut renderer = HtmlLayoutRenderer::new(viewport(), 0.0, &HashMap::new(), None);
+        let svg_length = renderer.svg.len();
+
+        assert_eq!(renderer.list_marker_width(None, 0.0, 0.0, &style), 0.0);
+        assert_eq!(renderer.svg.len(), svg_length);
+    }
+
+    #[test]
+    fn marker_width_reserves_space_without_painting_when_marker_is_absent() {
+        let style = CssStyle::browser_default();
+        let mut renderer = HtmlLayoutRenderer::new(viewport(), 0.0, &HashMap::new(), None);
+        let svg_length = renderer.svg.len();
+
+        assert_eq!(
+            renderer.list_marker_width(None, 0.0, 0.0, &style),
+            super::LIST_MARKER_WIDTH
+        );
+        assert_eq!(renderer.svg.len(), svg_length);
+    }
+
+    #[test]
+    fn list_markers_are_painted_when_enabled() {
+        let mut style = CssStyle::browser_default();
+        style.list_style_none = false;
+        let mut renderer = HtmlLayoutRenderer::new(viewport(), 0.0, &HashMap::new(), None);
+
+        let nodes = [list_item(1)];
+        renderer.render_list(&nodes, 0.0, 0.0, 160.0, &style, false);
+        assert!(renderer.svg.contains(">•<"));
+        assert!(renderer.svg.contains(">item<"));
     }
 }
