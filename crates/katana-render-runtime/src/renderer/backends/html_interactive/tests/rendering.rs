@@ -750,6 +750,28 @@ fn nested_phrasing_content_shares_one_inline_line_inside_a_flex_item() -> TestRe
 }
 
 #[test]
+fn anonymous_text_is_centered_inside_a_fixed_size_flex_badge() -> TestResult {
+    let mut session = start(
+        r#"<style>
+html, body { margin: 0; }
+.badge {
+  width: 46px; height: 46px; border-radius: 50%;
+  background: #1e3a8a; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-family: Arial, sans-serif; font-weight: 700; font-size: 20px;
+}
+</style><div class="badge">1</div>"#,
+    )?;
+    let layout = session.layout().map_err(to_string)?;
+    let text_x = text_x_for(&layout.svg, "1")?;
+    let text_y = text_baseline_for(&layout.svg, "1")?;
+
+    assert!((text_x - 17.4375).abs() <= 1.5, "{}", layout.svg);
+    assert!((text_y - 28.0).abs() <= 2.0, "{}", layout.svg);
+    Ok(())
+}
+
+#[test]
 fn styled_inline_text_can_fragment_across_browser_line_boundaries() -> TestResult {
     let mut session = start_with_viewport(
         r#"<main style='width:220px;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Hiragino Sans","Yu Gothic",Meiryo,system-ui,sans-serif;font-size:19px;line-height:1.65;font-feature-settings:"palt" 1'>選択 ON で検索できることを確認したのち、選択 OFF で同じツールを呼び出すと <em style="color:#2c4ac6;font-style:normal;font-weight:600">MCP Hub がツール呼び出しを拒否</em> する様子を見せる（動的ツール制御の実演）</main>"#,
@@ -1272,6 +1294,26 @@ fn text_baseline_for(svg: &str, text: &str) -> TestResult<f32> {
         .ok_or_else(|| format!("unterminated y attribute for {text}: {element}"))?
         + y_start;
     element[y_start..y_end].parse::<f32>().map_err(to_string)
+}
+
+fn text_x_for(svg: &str, text: &str) -> TestResult<f32> {
+    let marker = format!(">{text}</text>");
+    let marker_start = svg
+        .find(&marker)
+        .ok_or_else(|| format!("missing text marker {marker}: {svg}"))?;
+    let text_start = svg[..marker_start]
+        .rfind("<text ")
+        .ok_or_else(|| format!("missing text element for {text}: {svg}"))?;
+    let element = &svg[text_start..marker_start];
+    let x_start = element
+        .find(" x=\"")
+        .ok_or_else(|| format!("missing x attribute for {text}: {element}"))?
+        + 4;
+    let x_end = element[x_start..]
+        .find('"')
+        .ok_or_else(|| format!("unterminated x attribute for {text}: {element}"))?
+        + x_start;
+    element[x_start..x_end].parse::<f32>().map_err(to_string)
 }
 
 fn svg_text_contents(svg: &str) -> Vec<String> {

@@ -94,7 +94,7 @@ fn child_style(node: &HtmlDocumentNode, inherited: &CssStyle) -> CssStyle {
         HtmlDocumentNode::Element {
             tag, attributes, ..
         } => CssStyle::from_element(tag, attributes, inherited),
-        HtmlDocumentNode::Text(_) => inherited.clone(),
+        HtmlDocumentNode::Text(_) => inherited.inherited_text_style(),
     }
 }
 
