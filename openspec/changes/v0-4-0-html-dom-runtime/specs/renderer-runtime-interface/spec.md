@@ -22,3 +22,9 @@
 - **WHEN** KatanA が KDV の HTML browser surface を document tab に配置する
 - **THEN** KatanA は KRR engine、DOM、CSS layout、JavaScript event semantics を実装しない
 - **THEN** KRR の DTO または frame contract を縮小して既存 renderer capability を失わせない
+
+#### Scenario: Mermaid cache を複数 consumer が同時に生成する
+
+- **WHEN** 複数のKRR consumerが同じMermaid SVG cache keyを同時に生成する
+- **THEN** KRRは完全なSVGだけを原子的に公開し、途中内容をcache hitとして返さない
+- **THEN** cache親ディレクトリが生成と公開の間に失われても再作成し、失敗時は操作名とpathを含む診断を返す

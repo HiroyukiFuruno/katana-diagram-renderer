@@ -234,9 +234,20 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [x] 12.4 Reproduce the public TodoMVC URL through native headless KatanA,
   prove JavaScript-driven interaction changes its frame, and classify
   Cloudflare browser challenges separately from JavaScript compatibility.
-- [ ] 12.5 Pass strict 100% coverage and the complete release gate, publish and
+- [x] 12.5 Pass strict 100% coverage and the complete release gate, publish and
   verify KRR `0.4.14`, then update KatanA through crates.io and regenerate the
   dynamic URL evidence before release approval.
+
+### 13. v0.4.15 Atomic Mermaid Cache Publication
+
+- [x] 13.1 Reproduce the downstream export failure as a successful warmup
+  followed by a `No such file or directory` cache write failure.
+- [x] 13.2 Publish Mermaid SVG cache entries atomically, recreate missing cache
+  parents, reject incomplete cache entries, and retain operation/path diagnostics.
+- [x] 13.3 Cover missing-parent, incomplete-entry, and parallel-publisher paths
+  with deterministic contracts without changing public APIs or ownership.
+- [ ] 13.4 Pass strict 100% coverage and the complete release gate, publish and
+  verify KRR `0.4.15`, then update KDV and KatanA through crates.io only.
 
 ## Local Verification Evidence
 
