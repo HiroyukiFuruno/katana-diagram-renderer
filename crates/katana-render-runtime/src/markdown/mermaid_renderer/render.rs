@@ -1,3 +1,4 @@
+use super::cache::MermaidSvgCache;
 use super::js_runtime::MermaidJsRuntimeOps;
 use super::types::MermaidRenderOps;
 use crate::markdown::color_preset::DiagramColorPreset;
@@ -49,7 +50,7 @@ impl MermaidRenderOps {
         preset: &DiagramColorPreset,
         cache_file: &Path,
     ) -> DiagramResult {
-        if let Err(error) = Self::ensure_cache_parent(cache_file) {
+        if let Err(error) = MermaidSvgCache::ensure_parent(cache_file) {
             return DiagramResult::Err {
                 source: block.source.clone(),
                 error,
@@ -69,7 +70,7 @@ impl MermaidRenderOps {
         preset: &DiagramColorPreset,
         cache_file: &Path,
     ) -> DiagramResult {
-        match Self::read_cached_svg(cache_file) {
+        match MermaidSvgCache::read(cache_file) {
             Ok(Some(svg)) => return DiagramResult::Ok(Self::unique_svg_instance(svg)),
             Ok(None) => {}
             Err(error) => {
@@ -127,24 +128,9 @@ impl MermaidRenderOps {
             ))
     }
 
-    fn ensure_cache_parent(cache_file: &Path) -> Result<(), String> {
-        let Some(parent) = cache_file.parent() else {
-            return Err("Mermaid cache path has no parent directory".to_string());
-        };
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())
-    }
-
-    fn read_cached_svg(cache_file: &Path) -> Result<Option<String>, String> {
-        match std::fs::read_to_string(cache_file) {
-            Ok(svg) => Ok(Some(svg)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.to_string()),
-        }
-    }
-
     fn write_cached_svg(block: &DiagramBlock, cache_file: &Path, svg: String) -> DiagramResult {
-        if let Err(error) = std::fs::write(cache_file, &svg) {
-            return Self::error(block, error.to_string());
+        if let Err(error) = MermaidSvgCache::write(cache_file, svg.as_bytes()) {
+            return Self::error(block, error);
         }
         DiagramResult::Ok(Self::unique_svg_instance(svg))
     }

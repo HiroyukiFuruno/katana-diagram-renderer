@@ -1,3 +1,4 @@
+use super::super::cache::MermaidSvgCache;
 use super::MermaidRenderOps;
 use crate::markdown::color_preset::DiagramColorPreset;
 use crate::markdown::diagram_runtime::DiagramRuntimeMode;
@@ -114,7 +115,7 @@ fn render_reports_missing_and_empty_inputs_without_runtime() {
 fn private_error_paths_are_explicit() {
     let source = block("graph TD; Z-->Q");
     assert_eq!(MermaidRenderOps::cache_profile(), "rust-managed-js-svg");
-    assert!(MermaidRenderOps::ensure_cache_parent(std::path::Path::new("")).is_err());
+    assert!(MermaidSvgCache::ensure_parent(std::path::Path::new("")).is_err());
     assert!(matches!(
         MermaidRenderOps::render_mermaid_with_cache_file(
             &source,
@@ -125,7 +126,7 @@ fn private_error_paths_are_explicit() {
         DiagramResult::Err { .. }
     ));
     assert!(
-        MermaidRenderOps::read_cached_svg(std::path::Path::new("target/kdr-tests/no-cache.svg"))
+        MermaidSvgCache::read(std::path::Path::new("target/kdr-tests/no-cache.svg"))
             .as_ref()
             .is_ok_and(Option::is_none)
     );
@@ -142,7 +143,7 @@ fn cache_parent_creation_errors_are_not_hidden() -> TestResult<()> {
     std::fs::write(&parent_file, "not a directory")?;
     let cache_file = parent_file.join("cache.svg");
 
-    assert!(MermaidRenderOps::ensure_cache_parent(&cache_file).is_err());
+    assert!(MermaidSvgCache::ensure_parent(&cache_file).is_err());
     std::fs::remove_file(parent_file)?;
     Ok(())
 }
@@ -153,7 +154,9 @@ fn cache_read_and_write_errors_are_not_hidden() -> TestResult<()> {
     std::fs::create_dir_all(&cache_dir)?;
     let block = block("graph TD; X-->Y");
 
-    assert!(MermaidRenderOps::read_cached_svg(&cache_dir).is_err());
+    assert!(MermaidSvgCache::read(&cache_dir).is_err());
+    assert!(MermaidSvgCache::write(std::path::Path::new(""), b"<svg></svg>").is_err());
+    assert!(MermaidSvgCache::write_temporary(&cache_dir, b"<svg></svg>").is_err());
     assert!(matches!(
         MermaidRenderOps::render_svg(
             &block,
@@ -168,6 +171,63 @@ fn cache_read_and_write_errors_are_not_hidden() -> TestResult<()> {
         DiagramResult::Err { .. }
     ));
     Ok(())
+}
+
+#[test]
+fn cache_write_recreates_parent_and_publishes_complete_svg() -> TestResult<()> {
+    let cache_file = isolated_cache_file("recreate-parent");
+    let parent = cache_file.parent().ok_or("cache parent")?;
+    let _ = std::fs::remove_dir_all(parent);
+
+    MermaidSvgCache::write(&cache_file, b"<svg>complete</svg>")?;
+
+    assert_eq!(std::fs::read_to_string(&cache_file)?, "<svg>complete</svg>");
+    std::fs::remove_dir_all(parent)?;
+    Ok(())
+}
+
+#[test]
+fn cache_write_is_atomic_for_parallel_publishers() -> TestResult<()> {
+    let cache_file = isolated_cache_file("parallel-publish");
+    let parent = cache_file.parent().ok_or("cache parent")?;
+    let _ = std::fs::remove_dir_all(parent);
+    let handles = (0..8)
+        .map(|index| {
+            let path = cache_file.clone();
+            std::thread::spawn(move || {
+                MermaidSvgCache::write(&path, format!("<svg>publisher-{index}</svg>").as_bytes())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        handle.join().map_err(|_| "cache publisher panicked")??;
+    }
+    let stored = std::fs::read_to_string(&cache_file)?;
+    assert!(stored.starts_with("<svg>publisher-"));
+    assert!(stored.ends_with("</svg>"));
+    std::fs::remove_dir_all(parent)?;
+    Ok(())
+}
+
+#[test]
+fn invalid_cache_is_treated_as_a_miss() -> TestResult<()> {
+    let cache_file = isolated_cache_file("invalid-cache");
+    let parent = cache_file.parent().ok_or("cache parent")?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::write(&cache_file, "partial")?;
+
+    assert!(MermaidSvgCache::read(&cache_file)?.is_none());
+
+    std::fs::remove_dir_all(parent)?;
+    Ok(())
+}
+
+fn isolated_cache_file(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join(format!("krr-mermaid-cache-{}-{name}", std::process::id()))
+        .join("nested")
+        .join("cache.svg")
 }
 
 fn block(source: &str) -> DiagramBlock {

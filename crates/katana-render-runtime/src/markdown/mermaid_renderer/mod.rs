@@ -1,3 +1,4 @@
+mod cache;
 mod diagram_type;
 mod js_runtime;
 mod js_runtime_scripts;
