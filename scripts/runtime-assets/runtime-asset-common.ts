@@ -67,8 +67,8 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
   {
     kind: "mathjax",
     displayName: "MathJax",
-    version: "4.1.2",
-    checksum: "e201dba4a20191563337e7f95ebeef6724bd2fbdc079c431b4bb8ecdfc059c33",
+    version: "4.1.3",
+    checksum: "23c036deccc0f2374834a47e4032e452419f3ac027bf17e17c104e2746b19f4c",
     fileName: "tex-svg.js",
     rustVersionConst: "MATHJAX_JS_VERSION",
     rustChecksumConst: "MATHJAX_JS_CHECKSUM",

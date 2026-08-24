@@ -246,8 +246,21 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
   parents, reject incomplete cache entries, and retain operation/path diagnostics.
 - [x] 13.3 Cover missing-parent, incomplete-entry, and parallel-publisher paths
   with deterministic contracts without changing public APIs or ownership.
-- [ ] 13.4 Pass strict 100% coverage and the complete release gate, publish and
+- [x] 13.4 Pass strict 100% coverage and the complete release gate, publish and
   verify KRR `0.4.15`, then update KDV and KatanA through crates.io only.
+
+### 14. v0.4.16 HTML Interaction and Rendering Performance
+
+- [x] 14.1 Provide the browser-compatible `IntersectionObserver` surface needed
+  by interactive documents and prove observation callbacks and lifecycle paths.
+- [x] 14.2 Replace linear repeated line-width probing with bounded binary search
+  and cache per-character HTML fallback-font resolution without changing line
+  wrapping or font selection results.
+- [x] 14.3 Update compatible Rust and JavaScript dependencies, MathJax assets,
+  checksums, and tool schemas. Keep Playwright `1.60.0` and TypeScript `6.0.3`
+  because their latest available versions do not preserve the required gates.
+- [/] 14.4 Pass strict 100% line coverage and the complete release gate, publish
+  and verify KRR `0.4.16`, then update KDV and KatanA through crates.io only.
 
 ## Local Verification Evidence
 

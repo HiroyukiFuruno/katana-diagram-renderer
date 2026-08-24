@@ -126,14 +126,10 @@ fn take_styled_line(text: &str, width: f32, style: &CssStyle) -> (String, usize)
     }
     let forced_end = text.find('\n').unwrap_or(text.len());
     let forced_line = &text[..forced_end];
-    let mut fitted_end = 0;
-    for (segment_end, _) in linebreaks(forced_line) {
-        let visible_candidate = forced_line[..segment_end].trim_end();
-        if text_width(visible_candidate, style) > width + LAYOUT_FLOAT_EPSILON {
-            break;
-        }
-        fitted_end = segment_end;
-    }
+    let break_ends = linebreaks(forced_line)
+        .map(|(segment_end, _)| segment_end)
+        .collect::<Vec<_>>();
+    let mut fitted_end = last_fitting_end(forced_line, &break_ends, width, style).unwrap_or(0);
     if fitted_end == forced_line.len() {
         let consumed = forced_end + usize::from(forced_end < text.len());
         return (forced_line.trim_end().to_string(), consumed);
@@ -145,15 +141,33 @@ fn take_styled_line(text: &str, width: f32, style: &CssStyle) -> (String, usize)
 }
 
 fn fitted_character_end(text: &str, width: f32, style: &CssStyle) -> usize {
-    let mut fitted = 0;
-    for (index, character) in text.char_indices() {
-        let end = index + character.len_utf8();
-        if fitted > 0 && text_width(&text[..end], style) > width + LAYOUT_FLOAT_EPSILON {
-            break;
+    let character_ends = text
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .collect::<Vec<_>>();
+    last_fitting_end(text, &character_ends, width, style)
+        .unwrap_or_else(|| character_ends.first().copied().unwrap_or(0))
+}
+
+fn last_fitting_end(
+    text: &str,
+    candidate_ends: &[usize],
+    width: f32,
+    style: &CssStyle,
+) -> Option<usize> {
+    let mut low = 0;
+    let mut high = candidate_ends.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let end = candidate_ends[middle];
+        let fits = text_width(text[..end].trim_end(), style) <= width + LAYOUT_FLOAT_EPSILON;
+        if fits {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
-        fitted = end;
     }
-    fitted.max(text.chars().next().map_or(0, char::len_utf8))
+    low.checked_sub(1).map(|index| candidate_ends[index])
 }
 
 pub(super) fn text_display_columns(text: &str) -> usize {
