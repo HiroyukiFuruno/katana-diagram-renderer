@@ -1093,8 +1093,10 @@ fn orphan_list_item_uses_the_structural_item_layout_path() -> TestResult {
     assert!(
         frame
             .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     Ok(())
 }

@@ -28,10 +28,10 @@ pub const DRAWIO_JS_CHECKSUM: &str =
     "93a96808a703bc389e5dc7f3769ad3f36ea11f4477a7bb4be82bcf6cfde6ee9d";
 pub const DRAWIO_DOWNLOAD_URL: &str = "https://github.com/jgraph/drawio/releases/tag/v30.0.4";
 
-pub const MATHJAX_JS_VERSION: &str = "4.1.2";
+pub const MATHJAX_JS_VERSION: &str = "4.1.3";
 pub const MATHJAX_JS_CHECKSUM: &str =
-    "e201dba4a20191563337e7f95ebeef6724bd2fbdc079c431b4bb8ecdfc059c33";
-pub const MATHJAX_DOWNLOAD_URL: &str = "https://cdn.jsdelivr.net/npm/mathjax@4.1.2/tex-svg.js";
+    "23c036deccc0f2374834a47e4032e452419f3ac027bf17e17c104e2746b19f4c";
+pub const MATHJAX_DOWNLOAD_URL: &str = "https://cdn.jsdelivr.net/npm/mathjax@4.1.3/tex-svg.js";
 
 pub(crate) struct RuntimeAsset {
     kind: &'static str,

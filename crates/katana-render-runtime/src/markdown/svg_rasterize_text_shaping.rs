@@ -1,10 +1,13 @@
 use super::font::html_font_db;
 use resvg::usvg;
 
+#[path = "svg_rasterize_text_fallback.rs"]
+mod fallback;
 #[path = "svg_rasterize_text_font.rs"]
 mod font;
 
-use font::{font_runs, matching_font_face};
+use fallback::html_font_runs;
+use font::matching_font_face;
 
 struct TextDxState {
     values: Vec<f32>,
@@ -24,7 +27,7 @@ pub(super) fn shaped_text_width(
     let database = html_font_db();
     let base_face_id = matching_font_face(&database, font_family, font_weight, italic)?;
     let mut advance = 0.0;
-    for (face_id, run) in font_runs(&database, base_face_id, text) {
+    for (face_id, run) in html_font_runs(&database, base_face_id, text) {
         advance +=
             shape_text_with_face(&database, face_id, &run, font_size, font_feature_settings)?;
     }
@@ -44,7 +47,7 @@ pub(super) fn shaped_html_text_dx(
     let database = html_font_db();
     let base_face_id = matching_font_face(&database, font_family, font_weight, italic)?;
     let mut state = TextDxState::new(text.chars().count());
-    for (face_id, run) in font_runs(&database, base_face_id, text) {
+    for (face_id, run) in html_font_runs(&database, base_face_id, text) {
         state.append_run(&database, face_id, &run, font_size, font_feature_settings)?;
     }
     state.finish()
