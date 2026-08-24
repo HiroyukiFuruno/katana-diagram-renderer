@@ -61,7 +61,7 @@ fn same_root_local_iframe_joins_dom_css_javascript_and_load_event() -> TestResul
     let frame = session.latest_frame().ok_or("frame is missing")?;
     assert_frame_contains(&frame.pixels, [53, 168, 83]);
     assert!(
-        !frame.pixels.chunks_exact(4).any(|pixel| {
+        !frame.pixels.as_chunks::<4>().0.iter().any(|pixel| {
             pixel[0] == 239 && pixel[1] == 68 && pixel[2] == 68 && pixel[3] == 255
         })
     );

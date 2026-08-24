@@ -33,8 +33,10 @@ fn rasterize_svg_renders_text_with_the_bundled_font() -> Result<(), String> {
     assert!(
         image
             .data()
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     Ok(())
 }
@@ -47,7 +49,9 @@ fn rasterize_svg_renders_distinct_japanese_glyphs_with_system_font_fallback() ->
 
     let painted_pixels = image
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| **pixel != [255, 255, 255, 255])
         .count();
     assert!(painted_pixels > 500, "painted pixels: {painted_pixels}");
@@ -184,7 +188,9 @@ fn zenuml_output_rasterizes_to_non_blank_image() {
     assert!(
         image.as_ref().is_ok_and(|img| {
             !img.rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255)
         }),
         "Rasterized image is all white"

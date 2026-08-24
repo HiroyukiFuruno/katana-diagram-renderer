@@ -19,7 +19,11 @@ pub(super) fn viewport() -> TestResult<HtmlBrowserViewport> {
 
 pub(super) fn assert_frame_contains(pixels: &[u8], expected: [u8; 3]) {
     assert!(
-        pixels.chunks_exact(4).any(|pixel| pixel[..3] == expected),
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[..3] == expected),
         "frame does not contain {expected:?}"
     );
 }

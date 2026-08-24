@@ -88,8 +88,10 @@ fn renders_css_and_hides_document_metadata() -> TestResult {
     assert!(
         frame
             .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     let snapshot = session.runtime.snapshot().map_err(to_string)?;
     assert!(snapshot.contains("Visible title"));
@@ -418,8 +420,10 @@ fn secondary_heading_levels_paint_with_their_tag_metrics() -> TestResult {
     assert!(
         frame
             .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     Ok(())
 }
@@ -446,8 +450,10 @@ fn standalone_summary_paints_without_becoming_a_details_toggle_target() -> TestR
     assert!(
         frame
             .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     assert!(session.hit_targets.is_empty());
     Ok(())
@@ -472,8 +478,10 @@ plain text that must use the direct text rendering path rather than a label
     assert!(
         frame
             .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel != [255, 255, 255, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [255, 255, 255, 255])
     );
     let snapshot = session.runtime.snapshot().map_err(to_string)?;
     assert!(snapshot.contains("Direct runtime frame"));
