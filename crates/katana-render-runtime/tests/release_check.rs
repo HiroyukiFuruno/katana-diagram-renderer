@@ -53,6 +53,20 @@ fn crates_publish_retries_transient_registry_failures_with_a_visibility_probe()
 }
 
 #[test]
+fn publish_recovery_uses_the_immutable_release_tag_with_current_retry_tools()
+-> Result<(), Box<dyn std::error::Error>> {
+    let workflow = std::fs::read_to_string(
+        workspace_root()?.join(".github/workflows/release-publish-retry.yml"),
+    )?;
+
+    assert!(workflow.contains("path: release-source"));
+    assert!(workflow.contains("ref: ${{ inputs.version }}"));
+    assert!(workflow.contains("git -C release-source rev-parse HEAD"));
+    assert!(workflow.contains("../release-tools/scripts/release/publish-crates.sh"));
+    Ok(())
+}
+
+#[test]
 fn archive_gate_release_recipe_runs_the_script_contract_test()
 -> Result<(), Box<dyn std::error::Error>> {
     let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
