@@ -1,9 +1,11 @@
 use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
+#[cfg(test)]
 use crate::renderer::backends::html_browser::HtmlBrowserSource;
+#[cfg(test)]
+use crate::renderer::backends::html_debug_trace::HtmlDebugTrace;
 use crate::renderer::backends::html_document::HtmlDocument;
 use crate::renderer::backends::html_runtime::dom_state::HtmlDomBridgeState;
 use crate::renderer::backends::html_runtime::types::HtmlRuntimeError;
-use crate::renderer::backends::html_subresources::HtmlSubresourceLoader;
 use std::collections::HashMap;
 
 use super::super::script::{
@@ -37,30 +39,12 @@ impl StaticHtmlRuntime {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::renderer::backends) fn start_interactive(
         &self,
         source: &HtmlBrowserSource,
     ) -> Result<StaticHtmlRuntimeSession, HtmlRuntimeError> {
-        let mut document = HtmlDocument::parse(&source.raw_html);
-        let resources = HtmlSubresourceLoader::new(source).load(&mut document);
-        let resource_loader = HtmlSubresourceLoader::new(source);
-
-        DiagramV8Runtime::ensure_initialized();
-        let mut isolate = v8::Isolate::new(Default::default());
-        isolate.set_slot(HtmlDomBridgeState::new_interactive(
-            document,
-            resource_loader,
-        ));
-        let context = Self::execute_interactive_scripts(
-            &mut isolate,
-            &resources.scripts,
-            source.origin.as_str(),
-        )?;
-        Ok(StaticHtmlRuntimeSession {
-            context: Some(context),
-            isolate: Some(isolate),
-            external_stylesheets: resources.stylesheets,
-        })
+        self.start_interactive_traced(source, &HtmlDebugTrace::disabled())
     }
 
     fn execute_inline_scripts(
@@ -88,7 +72,7 @@ impl StaticHtmlRuntime {
         Ok(v8::Global::new(scope, context))
     }
 
-    fn execute_interactive_scripts(
+    pub(super) fn execute_interactive_scripts(
         isolate: &mut v8::OwnedIsolate,
         scripts: &[String],
         document_url: &str,

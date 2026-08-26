@@ -262,6 +262,20 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [/] 14.4 Pass strict 100% line coverage and the complete release gate, publish
   and verify KRR `0.4.16`, then update KDV and KatanA through crates.io only.
 
+### 15. v0.4.17 HTML Performance Diagnostics
+
+- [x] 15.1 Keep an opt-in `DEBUG=true` HTML phase trace that records only
+  timings and aggregate metrics, with no phase timing, log allocation, or
+  recursive metric collection in the disabled release path.
+- [x] 15.2 Measure the supplied regression HTML in an optimized build and
+  classify V8 startup/script execution, DOM/CSS projection, layout/SVG,
+  full-frame rasterization, and frame storage separately.
+- [x] 15.3 Update compatible Rust and JavaScript dependencies without lowering
+  any quality gate. Retain TypeScript `6.0.3` because `7.0.2` breaks the Rollup
+  TypeScript plugin's runtime bundle validation.
+- [/] 15.4 Pass the complete release gate, publish and verify KRR `0.4.17`, then
+  update KDV and KatanA through crates.io only.
+
 ## Local Verification Evidence
 
 - KRR: KRR `0.4.8` is published and verified. The `0.4.9` candidate keeps the

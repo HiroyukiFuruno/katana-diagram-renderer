@@ -6,6 +6,7 @@ mod html_css_cascade;
 mod html_css_rule;
 mod html_css_selector;
 mod html_css_sources;
+mod html_debug_trace;
 mod html_document;
 mod html_document_fragment;
 mod html_dom_helpers;

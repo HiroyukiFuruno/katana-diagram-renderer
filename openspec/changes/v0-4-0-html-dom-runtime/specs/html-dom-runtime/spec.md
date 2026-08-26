@@ -40,6 +40,22 @@
 - **THEN** KRR は browser engine の layout/paint を更新する
 - **THEN** 後続 frame は新しい viewport width に対応する
 
+### Requirement: HTML runtime は opt-in の段階別性能診断を保持しなければならない
+
+システムは、将来の性能劣化を再現時に切り分けられるよう、`DEBUG=true` のときだけ interactive HTML session の起動および各 frame の段階別所要時間を structured log に出力しなければならない（MUST）。通常実行では時刻計測とログ文字列生成を行ってはならない（MUST NOT）。HTML source、document URL、入力値などの内容を診断ログへ含めてはならない（MUST NOT）。
+
+#### Scenario: 開発者が HTML 性能診断を有効にする
+
+- **WHEN** host process が `DEBUG=true` で interactive HTML session を起動する
+- **THEN** KRR は session と frame の相関 ID、DOM parse、subresource load、V8 setup、script execution、DOM/CSS projection、layout/SVG、SVG rasterize、frame store、frame total の所要時間を出力する
+- **THEN** KRR は node、hit target、SVG/RGBA byte など内容を含まない集計値だけを併記する
+
+#### Scenario: 通常のリリース実行では性能診断を無効にする
+
+- **WHEN** `DEBUG` が未指定または `true` 以外である
+- **THEN** KRR は HTML 性能診断ログを出力しない
+- **THEN** KRR は性能診断のための phase timestamp と log message を生成しない
+
 #### Scenario: user action が viewport の一部だけを再描画する
 
 - **WHEN** accordion、button、form input の action が DOM、layout、paint の一部だけを変更する
