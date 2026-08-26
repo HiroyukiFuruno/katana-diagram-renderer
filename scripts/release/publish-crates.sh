@@ -8,13 +8,29 @@ if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
   exit 1
 fi
 
+publish_attempts="${PUBLISH_ATTEMPTS:-3}"
+publish_retry_delay_seconds="${PUBLISH_RETRY_DELAY_SECONDS:-10}"
+
 publish_if_needed() {
   local package="$1"
-  if cargo info "${package}@${version}" --registry crates-io >/dev/null 2>&1; then
-    echo "${package} ${version} already published; skipping."
-    return
-  fi
-  cargo publish -p "${package}" --locked --token "${CARGO_REGISTRY_TOKEN}"
+  local attempt
+  local delay
+  for attempt in $(seq 1 "${publish_attempts}"); do
+    if cargo info "${package}@${version}" --registry crates-io >/dev/null 2>&1; then
+      echo "${package} ${version} already published; skipping."
+      return
+    fi
+    if cargo publish -p "${package}" --locked --token "${CARGO_REGISTRY_TOKEN}"; then
+      return
+    fi
+    if [[ "${attempt}" == "${publish_attempts}" ]]; then
+      echo "${package} ${version} publish failed after ${publish_attempts} attempts." >&2
+      exit 1
+    fi
+    delay=$((publish_retry_delay_seconds * attempt))
+    echo "${package} ${version} publish failed; retrying in ${delay}s (${attempt}/${publish_attempts})." >&2
+    sleep "${delay}"
+  done
 }
 
 wait_for_crate() {

@@ -26,14 +26,29 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 #[test]
 fn release_target_check_allows_only_v0_4_17() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.17")?);
+    assert!(release_target_check(root, "0.4.17", "0.4.16")?);
+    assert!(release_target_check(root, "0.4.17", "0.4.17")?);
     for version in [
         "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8",
         "0.4.9", "0.4.10", "0.4.11", "0.4.12", "0.4.13", "0.4.14", "0.4.15", "0.4.16", "0.5.0",
         "1.0.0", "2.0.0",
     ] {
-        assert!(!release_target_check(root, version)?);
+        assert!(!release_target_check(root, version, "0.4.16")?);
     }
+    Ok(())
+}
+
+#[test]
+fn crates_publish_retries_transient_registry_failures_with_a_visibility_probe()
+-> Result<(), Box<dyn std::error::Error>> {
+    let script =
+        std::fs::read_to_string(workspace_root()?.join("scripts/release/publish-crates.sh"))?;
+
+    assert!(script.contains("PUBLISH_ATTEMPTS:-3"));
+    assert!(script.contains("PUBLISH_RETRY_DELAY_SECONDS:-10"));
+    assert!(script.contains("cargo info \"${package}@${version}\""));
+    assert!(script.contains("if cargo publish"));
+    assert!(script.contains("sleep \"${delay}\""));
     Ok(())
 }
 
@@ -262,6 +277,7 @@ fn recipe_body<'a>(justfile: &'a str, recipe: &str) -> Result<&'a str, Box<dyn s
 fn release_target_check(
     root: &Path,
     target_version: &str,
+    latest_version: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let output = Command::new("python3")
         .args([
@@ -269,7 +285,7 @@ fn release_target_check(
             "--target-version",
             target_version,
             "--latest-version",
-            "0.4.16",
+            latest_version,
         ])
         .current_dir(root)
         .output()?;
