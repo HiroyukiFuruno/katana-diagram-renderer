@@ -552,6 +552,36 @@ globalThis.document = __krrInstallEventTarget({
 });
 globalThis.window = globalThis;
 __krrInstallEventTarget(globalThis);
+globalThis.IntersectionObserver = class IntersectionObserver {
+  constructor(callback, options = {}) {
+    if (typeof callback !== "function") {
+      throw new TypeError("IntersectionObserver callback must be a function");
+    }
+    this.callback = callback;
+    this.root = options.root || null;
+    this.rootMargin = options.rootMargin || "0px";
+    this.thresholds = Array.isArray(options.threshold)
+      ? options.threshold
+      : [options.threshold || 0];
+    this.targets = new Set();
+  }
+  observe(target) {
+    if (!target || target.__krrNodeId === undefined) {
+      throw new TypeError("IntersectionObserver target must be an element");
+    }
+    this.targets.add(target);
+    this.callback([{ target, isIntersecting: true, intersectionRatio: 1 }], this);
+  }
+  unobserve(target) {
+    this.targets.delete(target);
+  }
+  disconnect() {
+    this.targets.clear();
+  }
+  takeRecords() {
+    return [];
+  }
+};
 globalThis.__krrDispatchDocumentContentLoaded = () => {
   __krrDocumentReadyState = "interactive";
   document.dispatchEvent(new Event("readystatechange"));

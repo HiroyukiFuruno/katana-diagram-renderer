@@ -12,8 +12,8 @@ import sys
 from dataclasses import dataclass
 from urllib import error, request
 
-REQUIRED_LATEST_RELEASE = "v0.4.14"
-REQUIRED_TARGET_RELEASE = "v0.4.15"
+REQUIRED_LATEST_RELEASE = "v0.4.16"
+REQUIRED_TARGET_RELEASE = "v0.4.17"
 
 
 @dataclass(frozen=True, order=True)
@@ -101,11 +101,13 @@ def main() -> int:
     )
     required_latest = StableVersion.parse(REQUIRED_LATEST_RELEASE)
     required_target = StableVersion.parse(REQUIRED_TARGET_RELEASE)
-    if latest != required_latest or target != required_target:
+    allowed_latest = {required_latest, required_target}
+    if latest not in allowed_latest or target != required_target:
         latest_text = "no remote release" if latest is None else latest.tag()
         print(
             f"Release target sanity check failed: expected {required_target.tag()} after "
-            f"{required_latest.tag()}, resolved {latest_text} and "
+            f"{required_latest.tag()} or an idempotent retry of {required_target.tag()}, "
+            f"resolved {latest_text} and "
             f"got {target.tag()}.",
             file=sys.stderr,
         )

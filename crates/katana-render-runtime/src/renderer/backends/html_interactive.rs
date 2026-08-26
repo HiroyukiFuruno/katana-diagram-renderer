@@ -27,6 +27,7 @@ mod layout_table;
 mod layout_text;
 mod session;
 mod session_geometry;
+mod session_render;
 mod style;
 mod svg;
 #[cfg(test)]

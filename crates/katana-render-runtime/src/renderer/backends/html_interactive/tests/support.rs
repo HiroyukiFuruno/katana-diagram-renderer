@@ -97,7 +97,9 @@ pub(super) fn frame_contains_rgb(frame: &HtmlBrowserFrame, expected: [u8; 3]) ->
 pub(super) fn frame_matching_rgb_pixels(frame: &HtmlBrowserFrame, expected: [u8; 3]) -> usize {
     frame
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| {
             pixel[0] == expected[0]
                 && pixel[1] == expected[1]

@@ -1,0 +1,56 @@
+name: Release Publish Retry
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release tag to publish, for example v0.4.17"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out recovery tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: master
+          path: release-tools
+
+      - name: Check out exact release source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.version }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+
+      - name: Verify immutable release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          test "$(git -C release-source rev-parse HEAD)" = "$(git -C release-source rev-list -n 1 "${RELEASE_TAG}")"
+          cd release-source
+          bash ../release-tools/scripts/release/verify-version.sh "${RELEASE_TAG}"
+
+      - name: Publish crates.io from release tag
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cd release-source
+          bash ../release-tools/scripts/release/publish-crates.sh "${{ inputs.version }}"

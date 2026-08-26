@@ -23,6 +23,7 @@ pub(super) fn matching_font_face(
     })
 }
 
+#[cfg(test)]
 pub(super) fn font_runs(
     database: &usvg::fontdb::Database,
     base_face_id: usvg::fontdb::ID,
