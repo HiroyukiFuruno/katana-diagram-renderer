@@ -1,4 +1,5 @@
 use super::*;
+use crate::renderer::backends::html_interactive::types::LayoutResult;
 
 type TestResult<T = ()> = Result<T, HtmlBrowserError>;
 const TEST_VIEWPORT_WIDTH: u32 = 320;

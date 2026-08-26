@@ -127,6 +127,13 @@ The HTML/CSS rendering path uses system font fallback only and does not bundle J
 If a host does not provide a Japanese-capable system font, `tofu` glyphs (□) may appear for Japanese text.
 Applications consuming this crate must ensure required system fonts are available in their target environments.
 
+## HTML Performance Diagnostics
+
+Set `DEBUG=true` on the host process to emit phase timings for each interactive HTML session and frame.
+The structured `[krr-html-trace]` lines cover DOM parsing, subresource loading, V8 setup, script execution, DOM/CSS projection, layout/SVG generation, SVG rasterization, frame storage, and total frame time.
+Only durations, correlation IDs, dimensions, and aggregate counts/sizes are recorded; HTML source, URLs, and input values are never logged.
+The trace is disabled by default and does not take phase timestamps or allocate log messages unless explicitly enabled.
+
 ## Non-Goals
 
 - Markdown AST parsing.
