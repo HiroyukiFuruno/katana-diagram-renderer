@@ -12,8 +12,8 @@ import sys
 from dataclasses import dataclass
 from urllib import error, request
 
-REQUIRED_LATEST_RELEASE = "v0.4.16"
-REQUIRED_TARGET_RELEASE = "v0.4.17"
+REQUIRED_LATEST_RELEASE = "v0.4.17"
+REQUIRED_TARGET_RELEASE = "v0.4.18"
 
 
 @dataclass(frozen=True, order=True)
