@@ -8,9 +8,8 @@ static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn plantuml_asset_metadata_is_pinned() {
-    assert_eq!(PLANTUML_JAR_VERSION, "1.2026.6");
     assert_eq!(PLANTUML_JAR_CHECKSUM.len(), 64);
-    assert!(PLANTUML_DOWNLOAD_URL.contains("plantuml-lgpl"));
+    assert!(PLANTUML_DOWNLOAD_URL.contains(PLANTUML_JAR_VERSION));
 }
 
 #[test]

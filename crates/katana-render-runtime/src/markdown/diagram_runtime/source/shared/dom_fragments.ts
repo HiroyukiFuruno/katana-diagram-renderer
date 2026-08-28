@@ -32,6 +32,10 @@ export const SharedDomFragments = {
         "dom-computed-style.js",
         `${MERMAID_JS_RUNTIME}/dom_computed_style.js`,
       ),
+      RuntimeFragmentFactory.verbatim(
+        "svg-path-bounds.js",
+        `${MERMAID_JS_RUNTIME}/svg_path_bounds.js`,
+      ),
       RuntimeFragmentFactory.verbatim("dom-measure.js", `${MERMAID_JS_RUNTIME}/dom_measure.js`),
       RuntimeFragmentFactory.verbatim(
         "dom-measure-text-lines.js",

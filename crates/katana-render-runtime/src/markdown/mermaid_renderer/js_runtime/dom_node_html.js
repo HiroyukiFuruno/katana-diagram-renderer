@@ -43,6 +43,7 @@ KatanaNode.prototype.getContext = function getContext() {
 };
 
 Object.defineProperty(KatanaNode.prototype, "innerHTML", {
+  configurable: true,
   get() {
     if (this.children.length === 0) {
       return this.textContent;
@@ -51,7 +52,7 @@ Object.defineProperty(KatanaNode.prototype, "innerHTML", {
   },
   set(value) {
     katanaClearInnerHtml(this);
-    katanaApplyInnerHtml(this, String(value), parseInnerHtml(String(value)));
+    katanaApplyInnerHtml(this, parseInnerHtml(String(value)));
   },
 });
 
@@ -61,9 +62,8 @@ function katanaClearInnerHtml(node) {
   node.childNodes = node.children;
 }
 
-function katanaApplyInnerHtml(node, value, parsed) {
+function katanaApplyInnerHtml(node, parsed) {
   if (parsed.length === 0) {
-    node.textContent = value;
     return;
   }
   katanaAppendParsedHtml(node, parsed);
@@ -78,6 +78,9 @@ function katanaAppendParsedHtml(node, parsed) {
 Object.defineProperty(KatanaNode.prototype, "outerHTML", {
   get() {
     const attrs = katanaSerializedAttributeText(this);
+    if (this.namespaceURI === KATANA_HTML_NAMESPACE && isHtmlVoidTag(this.localName)) {
+      return `<${this.serializedName}${attrs}/>`;
+    }
     const body = katanaOuterHtmlBody(this);
     return `<${this.serializedName}${attrs}>${body}</${this.serializedName}>`;
   },

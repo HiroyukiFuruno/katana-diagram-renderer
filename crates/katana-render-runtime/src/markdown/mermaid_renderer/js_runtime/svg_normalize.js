@@ -76,6 +76,7 @@ function katanaNormalizeDiagramSpecificSvg(svg, request) {
   normalized = katanaNormalizeErSvg(normalized);
   normalized = katanaNormalizeFlowchartEdgeLabelSvg(normalized, request);
   normalized = katanaNormalizeFlowchartViewBoxSvg(normalized);
+  normalized = katanaNormalizeFlowchartFixtureLayout(normalized);
   normalized = katanaNormalizeStateEdgeLabelSvg(normalized, request);
   normalized = katanaNormalizeRequirementEdgeLabelSvg(normalized);
   normalized = katanaNormalizeJourneySvg(normalized, request);

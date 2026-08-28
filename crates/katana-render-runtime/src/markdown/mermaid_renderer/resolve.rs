@@ -56,6 +56,7 @@ impl MermaidBinaryOps {
 #[cfg(test)]
 mod tests {
     use super::MermaidBinaryOps;
+    use crate::markdown::runtime_assets::MERMAID_JS_VERSION;
 
     #[test]
     fn resolve_mermaid_js_reports_missing_default_without_fallback() {
@@ -73,7 +74,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Ok(path) if path.ends_with("vendor/mermaid/11.15.0/mermaid.min.js")
+            Ok(path) if path.ends_with(format!("vendor/mermaid/{MERMAID_JS_VERSION}/mermaid.min.js"))
         ));
     }
 

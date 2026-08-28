@@ -21,8 +21,9 @@ globalThis.location = {
   },
 };
 globalThis.window.location = globalThis.location;
-globalThis.window.innerWidth = 1280;
-globalThis.window.innerHeight = 800;
+globalThis.window.innerWidth = 1520;
+globalThis.window.innerHeight = 845;
+globalThis.__katanaGraphViewerViewportPadding = 24;
 globalThis.window.top = globalThis.window;
 globalThis.document.referrer = "";
 globalThis.document.location = globalThis.location;

@@ -84,9 +84,9 @@ fn fake_bundle_trims_edge_breaks_before_markup_html_label() {
     let source = r#"<mxfile><diagram><mxGraphModel><root><mxCell id="card" value="&lt;br&gt;First line&lt;br&gt;Second line&lt;br&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;fontSize=12;" vertex="1" /></root></mxGraphModel></diagram></mxfile>"#;
     let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
 
-    assert_render_contains(&rendered, "First line<br></br>Second line");
-    assert_render_not_contains(&rendered, "<br></br>First line");
-    assert_render_not_contains(&rendered, "Second line<br></br>");
+    assert_render_contains(&rendered, "First line<br/>Second line");
+    assert_render_not_contains(&rendered, "<br/>First line");
+    assert_render_not_contains(&rendered, "Second line<br/>");
 }
 
 #[test]
@@ -99,13 +99,10 @@ fn fake_bundle_trims_styled_edge_breaks_before_markup_html_label() {
 
     assert_render_contains(
         &rendered,
-        r#"First line<br style="font-size: 12px;"></br>Second line"#,
+        r#"First line<br style="font-size: 12px;"/>Second line"#,
     );
-    assert_render_not_contains(&rendered, r#"<br style="font-size: 12px;"></br>First line"#);
-    assert_render_not_contains(
-        &rendered,
-        r#"Second line<br style="font-size: 12px;"></br>"#,
-    );
+    assert_render_not_contains(&rendered, r#"<br style="font-size: 12px;"/>First line"#);
+    assert_render_not_contains(&rendered, r#"Second line<br style="font-size: 12px;"/>"#);
 }
 
 #[test]
@@ -123,6 +120,34 @@ fn fake_bundle_repositions_html_label_fallback_for_all_vertical_alignments() {
     assert_render_not_contains(&rendered, r#"<text x="370" y="180""#);
     assert_render_not_contains(&rendered, r#"<text x="570" y="180""#);
     assert_render_not_contains(&rendered, r#"<text x="730" y="638" font-size="10px""#);
+}
+
+#[test]
+fn fake_bundle_restores_overflow_fill_table_alignment() {
+    let path = temp_runtime_path("krr-drawio-html-overflow-fill-unit");
+    assert!(std::fs::write(&path, fake_bundle()).is_ok());
+
+    let source = r#"<mxGraphModel><root><mxCell id="fillcard" value="Table" style="html=1;overflow=fill;whiteSpace=wrap;" vertex="1" /></root></mxGraphModel>"#;
+    let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
+
+    assert_render_contains(&rendered, "align-items: unsafe center");
+    assert_render_contains(&rendered, "padding-top: 11px");
+    assert_render_contains(&rendered, "white-space: normal");
+    assert_render_contains(&rendered, "word-wrap: normal");
+    assert_render_not_contains(&rendered, "align-items: unsafe flex-start");
+    assert_render_not_contains(&rendered, "white-space: nowrap");
+}
+
+#[test]
+fn fake_bundle_keeps_complete_native_multiline_html_label() {
+    let path = temp_runtime_path("krr-drawio-html-complete-native-unit");
+    assert!(std::fs::write(&path, fake_bundle()).is_ok());
+
+    let source = r#"<mxGraphModel><root><mxCell id="complete" value="First line&#xa;Second line" style="html=1;whiteSpace=wrap;" vertex="1" /></root></mxGraphModel>"#;
+    let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
+
+    assert_render_contains(&rendered, r#"data-native-complete="1""#);
+    assert_render_contains(&rendered, "First line<br/>Second line");
 }
 
 fn temp_runtime_path(prefix: &str) -> std::path::PathBuf {
@@ -171,6 +196,8 @@ GraphViewer.createViewerForElement = function createViewerForElement(_container,
   svg.appendChild(createGroup("middlecard", 300, 100, 140, 80));
   svg.appendChild(createGroup("bottomcard", 500, 100, 140, 80));
   svg.appendChild(createGroup("m11_note", 540, 600, 380, 90));
+  svg.appendChild(createOverflowFillGroup());
+  svg.appendChild(createCompleteNativeLabelGroup());
   callback({
     graph: {
       getSvg() {
@@ -179,6 +206,42 @@ GraphViewer.createViewerForElement = function createViewerForElement(_container,
     },
   });
 };
+function createCompleteNativeLabelGroup() {
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("data-cell-id", "complete");
+  const shape = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  shape.setAttribute("x", "10");
+  shape.setAttribute("y", "10");
+  shape.setAttribute("width", "120");
+  shape.setAttribute("height", "60");
+  group.appendChild(shape);
+  const foreignObject = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+  const div = document.createElement("div");
+  div.setAttribute("data-native-complete", "1");
+  div.innerHTML = "First line<br>Second line";
+  foreignObject.appendChild(div);
+  group.appendChild(foreignObject);
+  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  text.textContent = "First line\nSecond line";
+  group.appendChild(text);
+  return group;
+}
+function createOverflowFillGroup() {
+  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  group.setAttribute("data-cell-id", "fillcard");
+  const foreignObject = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+  const outer = document.createElement("div");
+  outer.setAttribute("style", "display: flex; align-items: unsafe flex-start; padding-top: 10px");
+  const box = document.createElement("div");
+  const content = document.createElement("div");
+  content.setAttribute("style", "white-space: nowrap");
+  content.textContent = "Table";
+  box.appendChild(content);
+  outer.appendChild(box);
+  foreignObject.appendChild(outer);
+  group.appendChild(foreignObject);
+  return group;
+}
 function createGroup(id, x, y, width, height) {
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
   group.setAttribute("data-cell-id", id);

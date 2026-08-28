@@ -6,6 +6,10 @@ const runtimeScriptNames = MermaidRuntimeScripts.paths().map((it) => path.basena
 
 test("公式参照生成は Mermaid normalizer の依存ファイルを利用側より先に読む", () => {
   expectLoadedBefore("svg_class_layout_fixes.js", "svg_class_fixes.js");
+  expectLoadedBefore("svg_flowchart_fixture_layout_fixes.js", "svg_normalize.js");
+  expectLoadedBefore("svg_block_fixture_layout_fixes.js", "svg_normalize.js");
+  expectLoadedBefore("svg_er_fixture_layout_fixes.js", "svg_normalize.js");
+  expectLoadedBefore("svg_c4_context_full_fixture_layout.js", "svg_review_fixes.js");
   expectLoadedBefore("svg_mindmap_layout_fixes.js", "svg_diagram_normalizers.js");
   expectLoadedBefore("svg_requirement_localized_fixes.js", "svg_visual_fixes.js");
   expectLoadedBefore("svg_sequence_activation_fixes.js", "svg_normalize.js");

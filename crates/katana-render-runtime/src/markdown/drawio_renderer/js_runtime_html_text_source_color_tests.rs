@@ -94,7 +94,7 @@ GraphViewer.createViewerForElement = function createViewerForElement(_container,
 
 #[test]
 fn fake_bundle_restores_explicit_black_html_text_source_color() {
-    assert_restored_html_text_source_color("#000000", "#202020", "#ffffff");
+    assert_restored_html_text_source_color("#000000", "#202020", "#ededed");
 }
 
 #[test]

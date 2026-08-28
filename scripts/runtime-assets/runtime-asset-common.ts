@@ -22,8 +22,8 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
   {
     kind: "mermaid",
     displayName: "Mermaid.js",
-    version: "11.15.0",
-    checksum: "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de",
+    version: "11.17.2",
+    checksum: "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8",
     fileName: "mermaid.min.js",
     rustVersionConst: "MERMAID_JS_VERSION",
     rustChecksumConst: "MERMAID_JS_CHECKSUM",
@@ -52,8 +52,8 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
   {
     kind: "drawio",
     displayName: "Draw.io",
-    version: "30.0.4",
-    checksum: "93a96808a703bc389e5dc7f3769ad3f36ea11f4477a7bb4be82bcf6cfde6ee9d",
+    version: "31.3.2",
+    checksum: "0c44747cb40c92738082b8dc045787df9fa1f309985b0c0d916e65adef8923fd",
     fileName: "drawio.min.js",
     rustVersionConst: "DRAWIO_JS_VERSION",
     rustChecksumConst: "DRAWIO_JS_CHECKSUM",
@@ -81,8 +81,8 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
   {
     kind: "plantuml",
     displayName: "PlantUML JAR",
-    version: "1.2026.6",
-    checksum: "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1",
+    version: "1.2026.7",
+    checksum: "1eb8cd1d0253227f3652586bc3b53cb3d5cfe69b5dcca41ce9b92ab1ce4f58ff",
     fileName: "plantuml.jar",
     rustVersionConst: "PLANTUML_JAR_VERSION",
     rustChecksumConst: "PLANTUML_JAR_CHECKSUM",

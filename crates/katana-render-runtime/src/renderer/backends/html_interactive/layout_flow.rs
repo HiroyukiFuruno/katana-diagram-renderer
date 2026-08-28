@@ -27,7 +27,7 @@ impl HtmlLayoutRenderer {
             Display::Flex | Display::Grid => {
                 self.render_taffy_flow(children, layout, available_height)
             }
-            Display::Block => Ok(self.render_nodes(
+            Display::Block | Display::FlowRoot => Ok(self.render_nodes(
                 children,
                 layout.x,
                 layout.y,
@@ -184,14 +184,10 @@ mod tests {
         let mut renderer = HtmlLayoutRenderer::new(viewport, 0.0, &HashMap::new(), None);
         let mut style = CssStyle::browser_default();
         style.display = Display::None;
-        assert_eq!(
-            renderer.render_flow_children(
-                &[],
-                LayoutContext::new(0.0, 7.0, 100.0, &style, DetailsContext::NONE),
-                None,
-            ),
-            Ok(7.0)
-        );
+        assert_empty_flow_position(&mut renderer, &style, 7.0);
+
+        style.display = Display::FlowRoot;
+        assert_empty_flow_position(&mut renderer, &style, 8.0);
 
         style.display = Display::Flex;
         let whitespace = [HtmlDocumentNode::Text(" \n ".to_string())];
@@ -204,5 +200,16 @@ mod tests {
             Ok(9.0)
         );
         assert_eq!(layout_error("boom"), "CSS flow layout failed: boom");
+    }
+
+    fn assert_empty_flow_position(renderer: &mut HtmlLayoutRenderer, style: &CssStyle, y: f32) {
+        assert_eq!(
+            renderer.render_flow_children(
+                &[],
+                LayoutContext::new(0.0, y, 100.0, style, DetailsContext::NONE),
+                None,
+            ),
+            Ok(y)
+        );
     }
 }

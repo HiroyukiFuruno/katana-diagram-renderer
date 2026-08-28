@@ -5,16 +5,87 @@ function katanaFillMissingDrawioTextLabels(svg) {
 }
 
 function katanaDrawioRequestSource() {
+  const rawSource = katanaDrawioRawRequestSource();
+  const viewerSource = katanaDrawioSourceForViewer(rawSource);
+  return katanaDrawioHasLinkedPageBackground(viewerSource) ? rawSource : viewerSource;
+}
+
+function katanaDrawioRawRequestSource() {
   return String(globalThis.__katanaDrawioRequest?.source ?? "");
+}
+
+function katanaDrawioHasLinkedPageBackground(source) {
+  return /\bbackgroundImage="[^"]*data:page\/id/.test(source);
 }
 
 function katanaFillMissingDrawioCellLabel(svg, entry) {
   [katanaDrawioCellGroup(svg, entry.id)]
     .filter(Boolean)
-    .filter(katanaShouldInsertDrawioText)
-    .forEach((group) => {
-      group.appendChild(katanaCreateDrawioTextLabel(group, entry));
+    .filter((group) => !katanaDrawioCellHasText(group))
+    .map((group) => ({ group, box: katanaDrawioMissingCellLabelBox(svg, group, entry) }))
+    .filter((context) => context.box)
+    .forEach(({ group, box }) => {
+      group.appendChild(katanaCreateDrawioTextLabel(box, entry));
     });
+}
+
+function katanaDrawioMissingCellLabelBox(svg, group, entry) {
+  return katanaDrawioCellShapeBox(group) ?? katanaDrawioRelativeAnchorLabelBox(svg, entry.id);
+}
+
+function katanaDrawioRelativeAnchorLabelBox(svg, id) {
+  const geometry = katanaDrawioAllSourceGeometryEntries().find((entry) => entry.id === id);
+  const style = KATANA_DRAWIO_SOURCE_CELL_STYLE_CACHE.get(id) ?? new Map();
+  if (!geometry?.relative || style.get("shape") !== "mxgraph.bootstrap.anchor") {
+    return null;
+  }
+  return [katanaDrawioCellGroup(svg, geometry.parent)]
+    .filter(Boolean)
+    .map(katanaDrawioCellShapeBox)
+    .filter(Boolean)
+    .map((parentBox) => katanaDrawioRelativeGeometryBox(parentBox, geometry))
+    .concat([null])[0];
+}
+
+function katanaDrawioRelativeGeometryBox(parentBox, geometry) {
+  return {
+    x: parentBox.x + geometry.x * parentBox.width,
+    y: parentBox.y + geometry.y * parentBox.height,
+    width: geometry.width,
+    height: geometry.height,
+  };
+}
+
+function katanaDrawioCellLocalElements(group, selector) {
+  const id = group.getAttribute("data-cell-id");
+  return Array.from(group.querySelectorAll(selector)).filter(
+    (element) => katanaDrawioElementCellId(element) === id,
+  );
+}
+
+function katanaDrawioCellHasText(group) {
+  return katanaDrawioCellLocalElements(group, "text").length > 0;
+}
+
+function katanaCreateDrawioTextLabel(box, entry) {
+  const lines = katanaDrawioTextLines(entry.label);
+  const text = katanaDrawioTextElement(box, entry, lines);
+  lines.forEach((line, index) => {
+    text.appendChild(katanaCreateDrawioTextLine(text, line, index, entry.style));
+  });
+  return text;
+}
+
+function katanaDrawioCellShapeBox(group) {
+  return katanaDrawioUnionBox(
+    katanaDrawioCellShapeElements(group).map(katanaDrawioElementBox).filter(katanaDrawioHasArea),
+  );
+}
+
+function katanaDrawioCellShapeElements(group) {
+  return katanaDrawioCellShapeTagNames().flatMap((tagName) =>
+    katanaDrawioCellLocalElements(group, tagName),
+  );
 }
 
 function katanaDrawioCellGroup(svg, id) {
@@ -23,24 +94,6 @@ function katanaDrawioCellGroup(svg, id) {
       (node) => node.getAttribute("data-cell-id") === id,
     ) ?? null
   );
-}
-
-function katanaShouldInsertDrawioText(group) {
-  return [group, !katanaDrawioCellHasText(group), katanaDrawioCellShapeBox(group)].every(Boolean);
-}
-
-function katanaDrawioCellHasText(group) {
-  return group.querySelectorAll("text").length > 0;
-}
-
-function katanaCreateDrawioTextLabel(group, entry) {
-  const box = katanaDrawioCellShapeBox(group);
-  const lines = katanaDrawioTextLines(entry.label);
-  const text = katanaDrawioTextElement(box, entry, lines);
-  lines.forEach((line, index) => {
-    text.appendChild(katanaCreateDrawioTextLine(text, line, index, entry.style));
-  });
-  return text;
 }
 
 function katanaDrawioTextElement(box, entry, lines) {
@@ -62,18 +115,6 @@ function katanaCreateDrawioTextLine(text, line, index, style) {
   tspan.setAttribute("dy", katanaDrawioTextLineDy(index, katanaDrawioFontSize(style)));
   tspan.textContent = line;
   return tspan;
-}
-
-function katanaDrawioCellShapeBox(group) {
-  return katanaDrawioUnionBox(
-    katanaDrawioCellShapeElements(group).map(katanaDrawioElementBox).filter(katanaDrawioHasArea),
-  );
-}
-
-function katanaDrawioCellShapeElements(group) {
-  return katanaDrawioCellShapeTagNames().flatMap((tagName) =>
-    Array.from(group.querySelectorAll(tagName)),
-  );
 }
 
 function katanaDrawioCellShapeTagNames() {

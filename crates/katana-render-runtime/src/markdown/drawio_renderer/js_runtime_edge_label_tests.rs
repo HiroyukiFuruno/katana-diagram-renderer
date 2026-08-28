@@ -61,6 +61,31 @@ fn fake_bundle_shifts_negative_edge_markup_text_label() {
     );
 }
 
+#[test]
+fn fake_bundle_preserves_stereotype_edge_label() {
+    let path = temp_runtime_path("krr-drawio-tag-like-edge-label-unit");
+    assert!(std::fs::write(&path, fake_bundle_with_edge_labels()).is_ok());
+
+    let rendered = DrawioJsRuntimeOps::render(
+        tag_like_edge_label_source(),
+        &path,
+        DiagramColorPreset::dark(),
+    );
+
+    assert!(
+        rendered
+            .as_ref()
+            .is_ok_and(|svg| svg.contains(r#"data-katana-drawio-html-text="content""#)),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered
+            .as_ref()
+            .is_ok_and(|svg| svg.contains(r#"&lt;&lt;use&gt;&gt;"#)),
+        "{rendered:?}"
+    );
+}
+
 fn temp_runtime_path(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.js", std::process::id()))
 }
@@ -73,6 +98,15 @@ fn edge_label_source() -> &'static str {
 </mxCell>
 <mxCell id="positive" value="Right&lt;div&gt;Label&lt;/div&gt;" style="shape=flexArrow;html=1;fillColor=#AE4132;fontColor=#AE4132;" edge="1" parent="1">
   <mxGeometry x="0.2" width="50" height="50" relative="1" as="geometry"/>
+</mxCell>
+</root></mxGraphModel>"#
+}
+
+fn tag_like_edge_label_source() -> &'static str {
+    r#"<mxGraphModel page="0"><root>
+<mxCell id="1" parent="0"/>
+<mxCell id="negative" value="&lt;&lt;use&gt;&gt;" style="html=1;fontColor=#B3B3B3;" edge="1" parent="1">
+  <mxGeometry width="100" as="geometry"/>
 </mxCell>
 </root></mxGraphModel>"#
 }

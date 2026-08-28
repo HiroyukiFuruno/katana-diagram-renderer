@@ -3,12 +3,142 @@ const KATANA_DEFAULT_CLIENT_TAGS = new Set(["body", "div", "main", "pre", "secti
 function katanaMeasuredClientBox(node) {
   const context = katanaClientBoxContext(node);
   return (
+    katanaGraphViewerClientBox(context) ??
+    katanaDrawioWrappedHtmlClientBox(context) ??
+    katanaDrawioEmptyHtmlClientBox(context) ??
     katanaDefaultExplicitZeroBox(context) ??
     katanaExplicitClientBox(context) ??
     katanaSvgClientBox(context) ??
     katanaEmptyDefaultClientBox(context) ??
     context.box
   );
+}
+
+function katanaDrawioEmptyHtmlClientBox(context) {
+  if (!Number.isFinite(Number(globalThis.__katanaGraphViewerViewportPadding))) {
+    return null;
+  }
+  if (!["div", "span"].includes(context.node.localName)) {
+    return null;
+  }
+  return [
+    context.explicitWidth === null,
+    context.explicitHeight === null,
+    katanaTextContent(context.node).length === 0,
+    katanaIsEmptyBox(context.box),
+  ].every(Boolean)
+    ? context.box
+    : null;
+}
+
+function katanaDrawioWrappedHtmlClientBox(context) {
+  if (
+    !Number.isFinite(Number(globalThis.__katanaGraphViewerViewportPadding)) ||
+    context.explicitWidth !== null
+  ) {
+    return null;
+  }
+  const textNode = katanaWrappedHtmlTextNode(context.node);
+  const width = katanaNearestExplicitClientWidth(context.node.parentNode);
+  if (!textNode || width === null || context.box.width <= width) {
+    return null;
+  }
+  return katanaBox(
+    context.box.x,
+    context.box.y,
+    width,
+    katanaWrappedHtmlTextHeight(textNode, width),
+  );
+}
+
+function katanaWrappedHtmlTextNode(node) {
+  return katanaHtmlElementDescendants(node).find((candidate) =>
+    [
+      String(candidate.style?.getPropertyValue?.("white-space") ?? "").trim() === "normal",
+      katanaTextContent(candidate).trim().length > 0,
+    ].every(Boolean),
+  );
+}
+
+function katanaHtmlElementDescendants(node) {
+  return [node].concat(
+    Array.from(node.children ?? []).flatMap((child) => katanaHtmlElementDescendants(child)),
+  );
+}
+
+function katanaNearestExplicitClientWidth(node) {
+  if (!node) {
+    return null;
+  }
+  return katanaExplicitClientWidth(node) ?? katanaNearestExplicitClientWidth(node.parentNode);
+}
+
+function katanaWrappedHtmlTextHeight(node, width) {
+  return Math.ceil(katanaWrappedHtmlLineCount(node, width) * katanaHtmlCssLineHeight(node));
+}
+
+function katanaWrappedHtmlLineCount(node, width) {
+  const words = katanaTextContent(node).trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return 0;
+  }
+  return words.reduce(
+    (state, word) => katanaAppendWrappedHtmlWord(state, node, word, width),
+    { lines: 1, width: 0 },
+  ).lines;
+}
+
+function katanaAppendWrappedHtmlWord(state, node, word, limit) {
+  const space = state.width === 0 ? 0 : katanaDrawioWrappedHtmlTextWidth(node, " ");
+  const wordWidth = katanaDrawioWrappedHtmlTextWidth(node, word);
+  const nextWidth = state.width + space + wordWidth;
+  return nextWidth <= limit
+    ? { lines: state.lines, width: nextWidth }
+    : { lines: state.lines + 1, width: wordWidth };
+}
+
+function katanaDrawioWrappedHtmlTextWidth(node, text) {
+  const family = String(node.style?.getPropertyValue?.("font-family") ?? "").toLowerCase();
+  const scale = family.includes("helvetica") ? KATANA_DRAWIO_HELVETICA_WRAP_WIDTH_SCALE : 1;
+  return katanaTextNodeWidth(node, text) * scale;
+}
+
+function katanaHtmlCssLineHeight(node) {
+  const raw = String(node.style?.getPropertyValue?.("line-height") ?? "").trim();
+  const match = raw.match(/^(-?\d+(?:\.\d+)?)(px)?$/);
+  if (!match) {
+    return katanaLineHeight(node);
+  }
+  const value = Number(match[1]);
+  return match[2] === "px" ? value : value * Number(katanaLineHeightFontSize(node));
+}
+
+const KATANA_DRAWIO_HELVETICA_WRAP_WIDTH_SCALE = 0.9611192997399751;
+
+function katanaGraphViewerClientBox(context) {
+  const classes = String(context.node.getAttribute?.("class") ?? "").split(/\s+/);
+  if (!classes.includes("mxgraph")) {
+    return null;
+  }
+  if (katanaIsEmptyBox(context.box)) {
+    return katanaBox(0, 0, 0, 0);
+  }
+  const padding = Number(globalThis.__katanaGraphViewerViewportPadding ?? 0);
+  const availableWidth = Math.max(0, katanaDefaultViewportWidth() - padding);
+  const width = katanaGraphViewerUsesAvailableWidth(context.node)
+    ? availableWidth
+    : Math.min(context.explicitWidth ?? context.box.width, availableWidth);
+  const height = context.explicitHeight ?? context.box.height;
+  return katanaBox(
+    context.box.x,
+    context.box.y,
+    width,
+    height,
+  );
+}
+
+function katanaGraphViewerUsesAvailableWidth(node) {
+  return String(node.style?.getPropertyValue?.("min-width") ?? node.style?.minWidth ?? "").trim() === "100%";
 }
 
 function katanaClientBoxContext(node) {

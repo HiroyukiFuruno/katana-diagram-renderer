@@ -50,7 +50,12 @@ function katanaStartsTextLine(tspan, index) {
 }
 
 function katanaStartTextLine(state, tspan) {
-  const line = { text: "", x: katanaNumberAttr(tspan, "x"), y: katanaTspanLineY(tspan) };
+  const line = {
+    node: tspan,
+    text: "",
+    x: katanaNumberAttr(tspan, "x"),
+    y: katanaTspanLineY(tspan),
+  };
   return { lines: [...state.lines, line], current: line };
 }
 

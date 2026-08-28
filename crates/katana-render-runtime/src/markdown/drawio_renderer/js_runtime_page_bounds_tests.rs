@@ -32,7 +32,12 @@ fn fake_bundle_aligns_positive_page_origin_to_source_vertex_bounds() {
 #[test]
 fn fake_bundle_preserves_scaled_page_origin() {
     let path = temp_runtime_path("kdr-drawio-scaled-page-origin-unit");
-    assert!(std::fs::write(&path, fake_bundle_with_shifted_page_origin()).is_ok());
+    let bundle = fake_bundle_with_shifted_page_origin().replace(
+        r#"svg.appendChild(createRectGroup("arrow", 43, 188.44, 120, 62.17));"#,
+        r#"svg.appendChild(createRectGroup("frame", 43, 0, 1463, 285));
+  svg.appendChild(createRectGroup("arrow", 43, 188.44, 120, 62.17));"#,
+    );
+    assert!(std::fs::write(&path, bundle).is_ok());
 
     let rendered = DrawioJsRuntimeOps::render(
         scaled_page_origin_source(),
@@ -43,7 +48,7 @@ fn fake_bundle_preserves_scaled_page_origin() {
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains(r#"width="1507px""#)),
+            .is_ok_and(|svg| svg.contains(r#"width="1520px""#)),
         "{rendered:?}"
     );
     assert!(
@@ -68,7 +73,7 @@ fn fake_bundle_preserves_non_image_page_origin() {
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains(r#"width="1507px""#)),
+            .is_ok_and(|svg| svg.contains(r#"width="1520px""#)),
         "{rendered:?}"
     );
     assert!(
@@ -118,8 +123,11 @@ fn page_origin_source() -> &'static str {
 }
 
 fn scaled_page_origin_source() -> &'static str {
-    r#"<mxGraphModel page="1" pageScale="1.5"><root>
+    r#"<mxfile type="device"><diagram><mxGraphModel page="1" pageScale="1.5"><root>
 <mxCell id="1" parent="0"/>
+<mxCell id="frame" style="html=1;" vertex="1" parent="1">
+  <mxGeometry x="160" y="10" width="1463" height="285" as="geometry"/>
+</mxCell>
 <mxCell id="arrow" style="html=1;" vertex="1" parent="1">
   <mxGeometry x="160" y="198.44" width="120" height="62.17" as="geometry"/>
 </mxCell>
@@ -129,7 +137,7 @@ fn scaled_page_origin_source() -> &'static str {
 <mxCell id="label" value="Cells on membrane" style="html=1;fontSize=18;" vertex="1" parent="1">
   <mxGeometry x="1340" y="170.005" width="282.85" height="110" as="geometry"/>
 </mxCell>
-</root></mxGraphModel>"#
+</root></mxGraphModel></diagram></mxfile>"#
 }
 
 fn non_image_page_origin_source() -> &'static str {

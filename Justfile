@@ -17,13 +17,13 @@ TAG := "v" + VERSION_BARE
 RELEASE_REPO := env_var_or_default("RELEASE_REPO", "HiroyukiFuruno/katana-render-runtime")
 COVERAGE_MIN_LINES := env_var_or_default("COVERAGE_MIN_LINES", "100")
 COVERAGE_MAX_UNCOVERED_LINES := env_var_or_default("COVERAGE_MAX_UNCOVERED_LINES", "0")
-MERMAID_JS_VERSION := "11.15.0"
+MERMAID_JS_VERSION := "11.17.2"
 MERMAID_ZENUML_JS_VERSION := "0.2.3"
-DRAWIO_JS_VERSION := "30.0.4"
+DRAWIO_JS_VERSION := "31.3.2"
 MATHJAX_JS_VERSION := "4.1.3"
 ZENUML_CORE_JS_VERSION := "3.47.9"
-PLANTUML_JAR_VERSION := "1.2026.6"
-PLANTUML_JAR_CHECKSUM := "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1"
+PLANTUML_JAR_VERSION := "1.2026.7"
+PLANTUML_JAR_CHECKSUM := "1eb8cd1d0253227f3652586bc3b53cb3d5cfe69b5dcca41ce9b92ab1ce4f58ff"
 PLAYWRIGHT_VERSION := "1.60.0"
 MERMAID_JS := env_var_or_default("MERMAID_JS", "crates/katana-render-runtime/vendor/mermaid/" + MERMAID_JS_VERSION + "/mermaid.min.js")
 MERMAID_ZENUML_JS := env_var_or_default("MERMAID_ZENUML_JS", "crates/katana-render-runtime/vendor/mermaid-zenuml/" + MERMAID_ZENUML_JS_VERSION + "/mermaid-zenuml.min.js")
@@ -139,7 +139,7 @@ plantuml-runtime-package-check:
 
 # Run TypeScript tests for runtime asset helper scripts
 runtime-asset-script-test:
-    bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts
+    bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts scripts/runtime-assets/depends-update-all_test.ts
 
 # Run the local quality gate
 check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
@@ -152,15 +152,6 @@ sweep:
 # Remove build artifacts
 clean: sweep
     {{CARGO}} clean
-
-# Update dependency crates safely (respects Cargo.toml SemVer)
-update-safe:
-    {{CARGO}} update
-
-# Upgrade all dependencies to latest versions (including breaking changes)
-update:
-    {{CARGO}} upgrade -i
-    {{CARGO}} update
 
 # Verify VERSION follows the remote release line
 release-target-check:
@@ -188,32 +179,28 @@ release-check: release-openspec-archive check coverage release-verify
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:
-    @if ! command -v playwright >/dev/null 2>&1; then npm install --global "playwright@{{PLAYWRIGHT_VERSION}}"; fi
-    @if [[ "$(uname -s)" == "Linux" ]]; then playwright install --with-deps chromium; else playwright install chromium; fi
+    @if [[ "$(uname -s)" == "Linux" ]]; then bunx playwright install --with-deps chromium; else bunx playwright install chromium; fi
 
 # Build the local krr CLI once before parallel fixture compares
 krr-build:
     {{CARGO}} build -p katana-render-runtime-cli
 
-# Show latest Mermaid.js, ZenUML, Draw.io, and MathJax versions without changing files
-runtime-asset-latest runtime='all':
-    bun run scripts/runtime-assets/latest-check.ts "{{runtime}}"
-
-# Show latest Mermaid.js version without changing files
-mermaid-latest:
-    just runtime-asset-latest mermaid
-
-# Show latest Draw.io version without changing files
-drawio-latest:
-    just runtime-asset-latest drawio
-
-# Show latest MathJax version without changing files
-mathjax-latest:
-    just runtime-asset-latest mathjax
-
-# Show latest PlantUML version without changing files
-plantuml-latest:
-    just runtime-asset-latest plantuml
+# Force-update all Rust and JavaScript dependencies plus pinned runtime assets, then run required checks
+depends-update-all:
+    {{CARGO}} upgrade -i
+    {{CARGO}} update
+    bun update --latest
+    bun add -d typescript@6.0.3
+    bun run scripts/runtime-assets/depends-update-all.ts
+    bun run scripts/drawio/resource-update.ts --resources "{{DRAWIO_RESOURCE_DIR}}" --manifest "{{DRAWIO_RESOURCE_MANIFEST}}"
+    just runtime-bundle-build
+    just mermaid-reference-all
+    just mermaid-compare-full
+    just mermaid-compare-ci
+    just drawio-reference-all
+    just drawio-compare-full
+    just drawio-compare-ci
+    just check
 
 # Install pinned PlantUML LGPL JAR into the PlantUML cache
 plantuml-install version=PLANTUML_JAR_VERSION output=PLANTUML_CACHE_JAR:
@@ -233,56 +220,20 @@ plantuml-install version=PLANTUML_JAR_VERSION output=PLANTUML_CACHE_JAR:
     mv "$tmp" "$target"; \
     echo "installed PlantUML {{version}} to $target"
 
-# Update the pinned PlantUML JAR version, URL, and checksum
-plantuml-update version:
-    bun run scripts/runtime-assets/update.ts plantuml "{{version}}"
-
-# Show latest Mermaid ZenUML plugin version without changing files
-zenuml-latest:
-    just runtime-asset-latest mermaid-zenuml
-
-# Update Mermaid.js runtime asset and refresh references
-mermaid-update version:
-    bun run scripts/runtime-assets/update.ts mermaid "{{version}}"
-    just mermaid-reference-all
-    just mermaid-compare-full
-    just mermaid-compare-ci
-
-# Update Mermaid ZenUML plugin runtime asset and refresh Mermaid references
-zenuml-update version:
-    bun run scripts/runtime-assets/update.ts mermaid-zenuml "{{version}}"
-    just mermaid-reference-all
-    just mermaid-compare-full
-    just mermaid-compare-ci
-
-# Update Draw.io runtime asset and refresh references
-drawio-update version:
-    bun run scripts/runtime-assets/update.ts drawio "{{version}}"
-    bun run scripts/drawio/resource-update.ts --resources "{{DRAWIO_RESOURCE_DIR}}" --manifest "{{DRAWIO_RESOURCE_MANIFEST}}"
-    just drawio-reference-all
-    just drawio-compare-full
-    just drawio-compare-ci
-
-# Update MathJax runtime asset
-mathjax-update version:
-    bun run scripts/runtime-assets/update.ts mathjax "{{version}}"
-    bun add -d @mathjax/src@"{{version}}"
-    bun run runtime-bundle:build
-
 # Render krr Mermaid SVG fixtures
-mermaid-render fixtures output='tmp/krr-mermaid-rendered':
+mermaid-render fixtures output='tmp/krr-mermaid-rendered' fixture_glob='*.md':
     @rm -rf "{{output}}"
     @mkdir -p "{{output}}"
-    @for file in "{{fixtures}}"/*.md; do \
+    @for file in "{{fixtures}}"/{{fixture_glob}}; do \
       slug=$(basename "$file" .md); \
       {{CARGO}} run -p katana-render-runtime-cli -- mermaid render --input "$file" --output "{{output}}/$slug.svg"; \
     done
 
 # Render krr Mermaid SVG fixtures with the prebuilt krr binary
-mermaid-render-prebuilt fixtures output='tmp/krr-mermaid-rendered':
+mermaid-render-prebuilt fixtures output='tmp/krr-mermaid-rendered' fixture_glob='*.md':
     @rm -rf "{{output}}"
     @mkdir -p "{{output}}"
-    @for file in "{{fixtures}}"/*.md; do \
+    @for file in "{{fixtures}}"/{{fixture_glob}}; do \
       slug=$(basename "$file" .md); \
       "{{KRR_BIN}}" mermaid render --input "$file" --output "{{output}}/$slug.svg"; \
     done
@@ -302,14 +253,14 @@ mermaid-reference-all:
       | xargs -P "{{FIXTURE_JOBS}}" -I {} bash -c 'slug=${1#tests/fixtures/mermaid/}; log="{{RUNTIME_UPDATE_LOG_DIR}}/mermaid-reference-${slug//\//-}.log"; if just mermaid-reference "$1" "tmp/krr-mermaid-official/$slug" >"$log" 2>&1; then echo "mermaid reference passed: $slug (log: $log)"; else echo "mermaid reference failed: $slug (log: $log)" >&2; tail -n 80 "$log" >&2; exit 1; fi' _ {}
 
 # Compare committed official Mermaid reference with krr rendering through ImageMagick score
-mermaid-compare fixtures min_score='99' output='tmp/krr-mermaid':
-    just mermaid-render "{{fixtures}}" "{{output}}/rendered"
+mermaid-compare fixtures min_score='99' output='tmp/krr-mermaid' fixture_glob='*.md':
+    just mermaid-render "{{fixtures}}" "{{output}}/rendered" "{{fixture_glob}}"
     bun run scripts/mermaid/rasterize-svg-dir.ts --input "{{output}}/rendered" --output "{{output}}/rendered-browser" --theme dark
     bun run scripts/mermaid/reference-compare.ts --official "{{fixtures}}/official-dark" --katana "{{output}}/rendered-browser" --output "{{output}}/comparison" --theme dark --min-score "{{min_score}}"
 
 # Compare Mermaid fixtures using the prebuilt krr binary
-mermaid-compare-prebuilt fixtures min_score='99' output='tmp/krr-mermaid':
-    just mermaid-render-prebuilt "{{fixtures}}" "{{output}}/rendered"
+mermaid-compare-prebuilt fixtures min_score='99' output='tmp/krr-mermaid' fixture_glob='*.md':
+    just mermaid-render-prebuilt "{{fixtures}}" "{{output}}/rendered" "{{fixture_glob}}"
     bun run scripts/mermaid/rasterize-svg-dir.ts --input "{{output}}/rendered" --output "{{output}}/rendered-browser" --theme dark
     bun run scripts/mermaid/reference-compare.ts --official "{{fixtures}}/official-dark" --katana "{{output}}/rendered-browser" --output "{{output}}/comparison" --theme dark --min-score "{{min_score}}"
 

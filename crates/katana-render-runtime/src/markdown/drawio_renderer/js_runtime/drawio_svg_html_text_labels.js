@@ -14,12 +14,17 @@ function katanaDrawioHtmlTextLabelEntries() {
 }
 
 function katanaDrawioHtmlTextLabelEntry(entry) {
+  const forceReplaceExisting = katanaShouldForceReplaceDrawioHtmlTextLabel(
+    entry.value,
+    entry.style,
+  );
   return {
     id: entry.id,
     html: katanaDrawioHtmlTextLabelHtml(entry.value),
     label: entry.label,
     edge: entry.edge,
-    replaceExisting: katanaShouldReplaceDrawioHtmlTextLabel(entry.value),
+    forceReplaceExisting,
+    replaceExisting: katanaShouldReplaceDrawioHtmlTextLabel(entry.value, entry.style),
     style: entry.style,
   };
 }
@@ -62,7 +67,10 @@ function katanaTrimDrawioTrailingHtmlTextBreaks(html) {
 }
 
 function katanaDrawioHtmlTextHasMarkup(html) {
-  return /<\/?[a-zA-Z][^>]*>/.test(String(html));
+  return [
+    !katanaDrawioIsStereotypeLabel(html),
+    /<\/?[a-zA-Z][^>]*>/.test(String(html)),
+  ].every(Boolean);
 }
 
 function katanaDrawioEscapedPlainHtmlText(html) {
@@ -95,11 +103,15 @@ function katanaDrawioEscapePlainHtmlTextLine(line) {
     .replaceAll(">", "&gt;");
 }
 
-function katanaShouldReplaceDrawioHtmlTextLabel(html) {
+function katanaShouldReplaceDrawioHtmlTextLabel(html, style) {
   return [
-    !katanaDrawioHtmlTextHasMarkup(html),
-    String(html).includes("\n"),
-  ].every(Boolean);
+    katanaShouldForceReplaceDrawioHtmlTextLabel(html, style),
+    [!katanaDrawioHtmlTextHasMarkup(html), String(html).includes("\n")].every(Boolean),
+  ].some(Boolean);
+}
+
+function katanaShouldForceReplaceDrawioHtmlTextLabel(html, style) {
+  return katanaDrawioIsFillHtmlTextLabel(style);
 }
 
 function katanaHasDrawioHtmlTextLabel(entry) {
@@ -122,7 +134,11 @@ function katanaShouldInstallDrawioHtmlTextLabel(entry) {
 }
 
 function katanaDrawioShouldKeepNativeEdgeHtmlTextLabel(entry) {
-  return [entry.edge, katanaDrawioHtmlTextHasMarkup(entry.html)].every(Boolean);
+  return [
+    entry.edge,
+    katanaDrawioHtmlTextHasMarkup(entry.html),
+    !entry.replaceExisting,
+  ].every(Boolean);
 }
 
 function katanaNormalizeDrawioNativeEdgeHtmlTextLabels(svg) {
@@ -176,7 +192,32 @@ function katanaInstallDrawioHtmlTextLabel(svg, entry) {
 }
 
 function katanaCanInstallDrawioHtmlTextLabel(group, entry) {
+  if (
+    entry.replaceExisting &&
+    !entry.forceReplaceExisting &&
+    katanaDrawioNativeTextContainsEveryLine(group, entry.label)
+  ) {
+    return false;
+  }
   return [entry.replaceExisting, !katanaDrawioGroupHasForeignObject(group)].some(Boolean);
+}
+
+function katanaDrawioNativeTextContainsEveryLine(group, label) {
+  const content = [
+    ...katanaDrawioCellLocalElements(group, "foreignObject"),
+    ...katanaDrawioCellLocalElements(group, "text"),
+  ]
+    .map((foreignObject) => String(foreignObject.textContent ?? ""))
+    .join(" ");
+  let offset = 0;
+  return katanaDrawioTextLines(label)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .every((line) => {
+      const index = content.indexOf(line, offset);
+      offset = index < 0 ? offset : index + line.length;
+      return index >= 0;
+    });
 }
 
 function katanaDrawioHtmlTextLabelContext(group, entry) {
@@ -201,7 +242,7 @@ function katanaApplyDrawioHtmlTextLabel(context) {
 }
 
 function katanaRemoveDrawioHtmlTextForeignObjects(group) {
-  Array.from(group.querySelectorAll("foreignObject")).forEach(katanaRemoveDrawioNode);
+  katanaDrawioCellLocalElements(group, "foreignObject").forEach(katanaRemoveDrawioNode);
 }
 
 function katanaCreateDrawioHtmlTextLabel(entry, box, fallback) {

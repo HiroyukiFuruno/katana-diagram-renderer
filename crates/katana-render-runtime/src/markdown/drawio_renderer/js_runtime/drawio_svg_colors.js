@@ -63,10 +63,15 @@ function katanaDrawioResolvedExplicitHtmlTextSourceColor(color) {
     return color;
   }
   return (
+    katanaDrawioExplicitDarkHtmlTextColor(color) ||
     katanaDrawioTextColorMapForTheme().get(color) ||
     katanaDrawioOfficialDarkColor(color) ||
     katanaDrawioResolvedTextColor(color)
   );
+}
+
+function katanaDrawioExplicitDarkHtmlTextColor(color) {
+  return ["#000000", "rgb(0, 0, 0)"].includes(katanaDrawioColorKey(color)) ? "#ededed" : "";
 }
 
 function katanaDrawioSourceStyleUsesDarkHtmlTextBackgroundMap(style) {
@@ -100,6 +105,9 @@ function katanaApplyDrawioHtmlTextSourceColor(entry) {
 }
 
 function katanaNormalizeDrawioColorAttribute(element, name) {
+  if (element.getAttribute(katanaDrawioLightDarkAttributeName(name)) === "true") {
+    return;
+  }
   const color = element.getAttribute(name);
   if (color) {
     element.setAttribute(name, katanaDrawioResolvedAttributeColor(element, name, color));

@@ -5,11 +5,11 @@ use std::{
 
 static RUNTIME_ASSET_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-pub const MERMAID_JS_VERSION: &str = "11.15.0";
+pub const MERMAID_JS_VERSION: &str = "11.17.2";
 pub const MERMAID_JS_CHECKSUM: &str =
-    "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de";
+    "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8";
 pub const MERMAID_DOWNLOAD_URL: &str =
-    "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js";
+    "https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js";
 
 pub const MERMAID_ZENUML_JS_VERSION: &str = "0.2.3";
 pub const MERMAID_ZENUML_JS_CHECKSUM: &str =
@@ -23,10 +23,10 @@ pub const ZENUML_CORE_JS_CHECKSUM: &str =
 pub const ZENUML_CORE_DOWNLOAD_URL: &str =
     "https://cdn.jsdelivr.net/npm/@zenuml/core@3.47.9/dist/zenuml.js";
 
-pub const DRAWIO_JS_VERSION: &str = "30.0.4";
+pub const DRAWIO_JS_VERSION: &str = "31.3.2";
 pub const DRAWIO_JS_CHECKSUM: &str =
-    "93a96808a703bc389e5dc7f3769ad3f36ea11f4477a7bb4be82bcf6cfde6ee9d";
-pub const DRAWIO_DOWNLOAD_URL: &str = "https://github.com/jgraph/drawio/releases/tag/v30.0.4";
+    "0c44747cb40c92738082b8dc045787df9fa1f309985b0c0d916e65adef8923fd";
+pub const DRAWIO_DOWNLOAD_URL: &str = "https://github.com/jgraph/drawio/releases/tag/v31.3.2";
 
 pub const MATHJAX_JS_VERSION: &str = "4.1.3";
 pub const MATHJAX_JS_CHECKSUM: &str =
@@ -46,7 +46,7 @@ impl RuntimeAsset {
             kind: "mermaid",
             version: MERMAID_JS_VERSION,
             filename: "mermaid.min.js",
-            bytes: include_bytes!("../../vendor/mermaid/11.15.0/mermaid.min.js"),
+            bytes: include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js"),
         }
     }
 
@@ -55,7 +55,7 @@ impl RuntimeAsset {
             kind: "drawio",
             version: DRAWIO_JS_VERSION,
             filename: "drawio.min.js",
-            bytes: include_bytes!("../../vendor/drawio/30.0.4/drawio.min.js"),
+            bytes: include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js"),
         }
     }
 

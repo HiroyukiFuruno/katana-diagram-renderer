@@ -50,8 +50,8 @@
     <path d="M6.54883 11.2152L17.2025 11.2073M11.7471 8.06641V19.5806V8.06641ZM11.7471 19.4385L6.79789 23.5738L11.7471 19.4385ZM11.7551 19.4385L17.1864 23.3055L11.7551 19.4385Z" stroke="currentColor"></path>
   </g>
   </g>
-  
-  
+
+
   <text x="44.046875" y="47.75" text-anchor="start" dominant-baseline="central" class="participant-label">Client</text>
 </g>
 <g class="participant" data-participant="OrderController">
@@ -61,8 +61,8 @@
 	<path d="M27.3611 39.4482H3.93945" stroke="currentColor" stroke-width="4"></path>
 	<path d="M4.91504 4.37891V74.5168" stroke="currentColor" stroke-width="4"></path>
   </g>
-  
-  
+
+
   <text x="144.87109375" y="47.75" text-anchor="start" dominant-baseline="central" class="participant-label">OrderController</text>
 </g>
 <rect x="180" y="87" width="13" height="34" rx="1" class="occurrence" data-participant="OrderController"></rect>

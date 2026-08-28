@@ -113,8 +113,20 @@ fn rendered_svg(svg: String) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[path = "js_runtime_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "js_runtime_stencil_test_support.rs"]
+mod stencil_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "js_runtime_html_dom_tests.rs"]
+mod html_dom_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_shadow_tests.rs"]
@@ -153,12 +165,24 @@ mod table_color_tests;
 mod page_bounds_tests;
 
 #[cfg(test)]
+#[path = "js_runtime_page_crop_test_support.rs"]
+mod page_crop_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_page_crop_tests.rs"]
 mod page_crop_tests;
 
 #[cfg(test)]
+#[path = "js_runtime_device_page_test_support.rs"]
+mod device_page_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_device_page_crop_tests.rs"]
 mod device_page_crop_tests;
+
+#[cfg(test)]
+#[path = "js_runtime_device_page_export_tests.rs"]
+mod device_page_export_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_page_layout_crop_tests.rs"]
@@ -183,6 +207,10 @@ mod html_label_content_tests;
 #[cfg(test)]
 #[path = "js_runtime_edge_label_tests.rs"]
 mod edge_label_tests;
+
+#[cfg(test)]
+#[path = "js_runtime_geometry_tests.rs"]
+mod geometry_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_html_text_source_color_tests.rs"]

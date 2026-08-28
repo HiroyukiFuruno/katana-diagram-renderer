@@ -86,7 +86,7 @@ impl DrawioRendererOps {
 
 #[cfg(test)]
 mod tests {
-    use super::DrawioRendererOps;
+    use super::{DRAWIO_JS_VERSION, DrawioRendererOps};
     use crate::markdown::{DiagramBlock, DiagramKind, DiagramResult};
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Ok(path) if path.ends_with("vendor/drawio/30.0.4/drawio.min.js")
+            Ok(path) if path.ends_with(format!("vendor/drawio/{DRAWIO_JS_VERSION}/drawio.min.js"))
         ));
     }
 

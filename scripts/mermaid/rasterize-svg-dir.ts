@@ -3,6 +3,7 @@ import path from "node:path";
 import { DiagramTheme, type DiagramThemeName } from "./diagram_theme";
 import { PlaywrightLoader } from "./official-renderer";
 import type { BrowserHandle, FontReadyDocument, PageHandle } from "./official-renderer-types";
+import { SvgSourceFonts } from "./rasterize_svg_fonts";
 import { SvgRasterizeInput } from "./rasterize_svg_input";
 
 interface CliParsedOptions {
@@ -110,6 +111,7 @@ class SvgBrowserRasterizer {
   }
 
   private async capture(page: PageHandle, fileName: string, svg: string) {
+    await this.installSourceFonts(page, svg);
     await page.evaluate(
       (input) => {
         const diagramElement = document.getElementById("diagram") as HTMLElement;
@@ -123,6 +125,24 @@ class SvgBrowserRasterizer {
       path: path.join(this.options.outputDir, fileName.replace(/\.svg$/, ".png")),
       omitBackground: false,
     });
+  }
+
+  private installSourceFonts(page: PageHandle, svg: string): Promise<void> {
+    return page.evaluate(async (urls) => {
+      await Promise.all(
+        urls.map(
+          (url) =>
+            new Promise<void>((resolve) => {
+              const link = document.createElement("link");
+              link.rel = "stylesheet";
+              link.href = url;
+              link.addEventListener("load", () => resolve(), { once: true });
+              link.addEventListener("error", () => resolve(), { once: true });
+              document.head.appendChild(link);
+            }),
+        ),
+      );
+    }, SvgSourceFonts.urls(svg));
   }
 
   private currentBrowser(): BrowserHandle {

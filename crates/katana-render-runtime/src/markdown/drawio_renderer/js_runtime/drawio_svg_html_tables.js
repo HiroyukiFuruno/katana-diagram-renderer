@@ -127,9 +127,13 @@ function katanaDrawioHtmlTableOuterStyle(box) {
     "justify-content: unsafe flex-start",
     `width: ${Math.round(box.width + 2)}px`,
     `height: ${Math.round(box.height)}px`,
-    `padding-top: ${Math.round(box.y)}px`,
+    `padding-top: ${katanaDrawioHtmlTableTopPadding(box)}px`,
     `margin-left: ${Math.round(box.x)}px`,
   ].join("; ");
+}
+
+function katanaDrawioHtmlTableTopPadding(box) {
+  return Math.max(0, Math.round(box.y) - Number(katanaDrawioSourceIsDeviceTemplate()));
 }
 
 function katanaDrawioHtmlTableBoxStyle(style, box) {

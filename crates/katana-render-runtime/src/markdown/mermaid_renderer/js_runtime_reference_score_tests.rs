@@ -77,45 +77,55 @@ fn runtime_normalizes_c4_dynamic_relation_positions() {
     let rendered = render_mermaid_svg(C4_DYNAMIC_SOURCE);
     assert_svg_contains(
         &rendered,
-        r#"<line x1="366" y1="214.051887" x2="466" y2="223.971154""#,
+        r#"<line x1="366" y1="200.998008" x2="466" y2="200.865751""#,
     );
-    assert_svg_contains(&rendered, r#"<text x="436.5" y="219.01152""#);
-    assert_svg_contains(&rendered, r#"<text x="453.5" y="236.01152""#);
-    assert_svg_contains(&rendered, r#"<rect x="150" y="167""#);
-    assert_svg_contains(&rendered, "width=\"216\" height=\"75\"");
-    assert_svg_contains(&rendered, r#"<text x="258" y="205""#);
-    assert_svg_contains(&rendered, r#"<text x="258" y="228""#);
+    assert_svg_contains(&rendered, r#"<text x="438" y="200.931879""#);
+    assert_svg_contains(&rendered, r#"<text x="457.5" y="217.931879""#);
+    assert_svg_contains(&rendered, r#"transform="translate(258, 202.625366)""#);
+    assert_svg_contains(
+        &rendered,
+        r#"x="-108" y="-35.625366" width="216" height="71.250732421875""#,
+    );
+    assert_svg_contains(&rendered, ">Single</tspan>");
+    assert_svg_contains(&rendered, "> Page</tspan>");
+    assert_svg_contains(&rendered, "> Application</tspan>");
+    assert_svg_contains(&rendered, "> Java</tspan>");
+    assert_svg_contains(&rendered, "> Spring</tspan>");
+    assert_svg_contains(&rendered, "> Boot]</tspan>");
 }
 
 #[test]
 fn runtime_normalizes_c4_dynamic_relation_positions_ja_x_offsets() {
     let rendered = render_mermaid_svg(C4_DYNAMIC_SOURCE_JA);
-    assert_svg_contains(&rendered, r#"width="259""#);
-    assert_svg_contains(&rendered, "x=\"509\"");
-    assert_svg_contains(&rendered, "x1=\"409\"");
-    assert_svg_contains(&rendered, "x2=\"509\"");
-    assert_svg_contains(&rendered, "x=\"489.5\"");
-    assert_svg_contains(&rendered, "x=\"496.5\"");
-    assert_svg_contains(&rendered, r#"<text x="279.5" y="205""#);
-    assert_svg_contains(&rendered, "シングルページアプリケーション");
-    assert_svg_contains(&rendered, r#"<text x="279.5" y="228""#);
-    assert_svg_contains(&rendered, "[JavaScript と React]");
-    assert_svg_contains(&rendered, r#"<text x="187.5" y="20""#);
+    assert_svg_contains(&rendered, r#"transform="translate(258, 210.325366)""#);
+    assert_svg_contains(&rendered, r#"width="216" height="86.650732421875""#);
+    assert_svg_contains(&rendered, r#"transform="translate(574, 202.625366)""#);
+    assert_svg_contains(&rendered, "x1=\"368\"");
+    assert_svg_contains(&rendered, "x2=\"468\"");
+    assert_svg_contains(&rendered, r#"<text x="448" y="204.781879""#);
+    assert_svg_contains(&rendered, r#"<text x="459.5" y="221.781879""#);
+    assert_svg_contains(&rendered, "シングルページアプリケー");
+    assert_svg_contains(&rendered, ">ション</tspan>");
+    assert_svg_contains(&rendered, "> JavaScript</tspan>");
+    assert_svg_contains(&rendered, "> React]</tspan>");
+    assert_svg_contains(&rendered, r#"<text x="166" y="20""#);
     assert_svg_contains(&rendered, "APIアプリケーションのダイナミック図");
-    assert_svg_contains(&rendered, r#"x="248" y="187""#);
-    assert_svg_contains(&rendered, r#"x="585.5" y="187""#);
-    assert_svg_contains(&rendered, r#"<text x="617" y="205""#);
     assert_svg_contains(&rendered, "APIアプリケーション");
-    assert_svg_contains(&rendered, r#"<text x="617" y="228""#);
-    assert_svg_contains(&rendered, "[Java と Spring Boot]");
+    assert_svg_contains(&rendered, "> Spring</tspan>");
+    assert_svg_contains(&rendered, "> Boot]</tspan>");
 }
 
 #[test]
 fn runtime_normalizes_c4_deployment_browser_position_corrections() {
     let rendered = render_mermaid_svg(C4_DEPLOYMENT_SOURCE);
-    assert_svg_contains(&rendered, r#"<rect x="150" y="124""#);
-    assert_svg_contains(&rendered, r#"<text x="308" y="285""#);
-    assert_svg_contains(&rendered, r#"<text x="308" y="262""#);
+    assert_svg_contains(&rendered, r#"<rect x="150" y="122""#);
+    assert_svg_contains(&rendered, r#"<text x="308" y="130""#);
+    assert_svg_contains(&rendered, r#"<text x="308" y="153""#);
+    assert_svg_contains(&rendered, r#"transform="translate(308, 259.625366)""#);
+    assert_svg_contains(&rendered, ">Mobile</tspan>");
+    assert_svg_contains(&rendered, "> App</tspan>");
+    assert_svg_contains(&rendered, ">[Container:</tspan>");
+    assert_svg_contains(&rendered, "> Xamarin]</tspan>");
 }
 
 #[test]
@@ -138,19 +148,19 @@ fn runtime_normalizes_architecture_simple_renderer_coordinates_en() {
     );
     assert_svg_contains(
         &rendered,
-        r#"transform="translate(-200.18652784647549,17)""#,
+        r#"transform="translate(-200.43652784647549,17)""#,
     );
-    assert_svg_contains(&rendered, r#"transform="translate(0.5,17)""#);
-    assert_svg_contains(&rendered, r#"transform="translate(201.18652784647549,17)""#);
+    assert_svg_contains(&rendered, r#"transform="translate(0.25,17)""#);
+    assert_svg_contains(&rendered, r#"transform="translate(200.93652784647549,17)""#);
     assert_svg_contains(&rendered, r#"<rect id="katana-mermaid-svg-"#);
     assert_svg_contains(&rendered, r#"class="text-outer-tspan row""#);
     assert_svg_contains(
         &rendered,
-        r#"<path d="M -120.18652784647549,57 L -59.84326392323774,57 L0.5,57 ""#,
+        r#"<path d="M -120.43652784647549,57 L -60.09326392323774,57 L0.25,57 ""#,
     );
     assert_svg_contains(
         &rendered,
-        r#"<path d="M 80.5,57 L 140.84326392323774,57 L201.18652784647549,57 ""#,
+        r#"<path d="M 80.25,57 L 140.59326392323774,57 L200.93652784647549,57 ""#,
     );
 }
 

@@ -257,7 +257,11 @@ export class OfficialMermaidRenderer {
   }
 
   private writeSvg(fixture: RenderFixture, svg: string) {
-    fs.writeFileSync(path.join(this.options.outputDir, `${fixture.slug}.svg`), svg, "utf8");
+    fs.writeFileSync(
+      path.join(this.options.outputDir, `${fixture.slug}.svg`),
+      svg.replace(/[ \t]+$/gm, ""),
+      "utf8",
+    );
   }
 
   private resizeCapture(page: PageHandle): Promise<void> {

@@ -16,7 +16,10 @@ function katanaDrawioShadowTarget(group) {
 }
 
 function katanaDrawioIsShadowShapeGroup(element) {
-  return [element.localName === "g", element.hasAttribute("transform")].every(Boolean);
+  return [
+    element.localName === "g",
+    katanaDrawioCellShapeTagNames().some((tagName) => element.querySelector(tagName)),
+  ].every(Boolean);
 }
 
 function katanaSetDrawioShadowStyle(element) {

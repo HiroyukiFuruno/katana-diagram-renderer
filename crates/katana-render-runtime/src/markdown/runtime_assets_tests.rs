@@ -1,6 +1,6 @@
 use super::{
-    DRAWIO_JS_CHECKSUM, MERMAID_JS_CHECKSUM, MERMAID_ZENUML_JS_CHECKSUM, RuntimeAsset,
-    ZENUML_CORE_JS_CHECKSUM,
+    DRAWIO_JS_CHECKSUM, DRAWIO_JS_VERSION, MERMAID_JS_CHECKSUM, MERMAID_JS_VERSION,
+    MERMAID_ZENUML_JS_CHECKSUM, RuntimeAsset, ZENUML_CORE_JS_CHECKSUM, ZENUML_CORE_JS_VERSION,
 };
 
 const PARALLEL_MATERIALIZE_THREADS: usize = 8;
@@ -11,9 +11,13 @@ fn materialized_paths_are_versioned() {
     let drawio = RuntimeAsset::drawio().materialized_path();
     let zenuml_core = RuntimeAsset::zenuml_core().materialized_path();
 
-    assert!(mermaid.ends_with("vendor/mermaid/11.15.0/mermaid.min.js"));
-    assert!(drawio.ends_with("vendor/drawio/30.0.4/drawio.min.js"));
-    assert!(zenuml_core.ends_with("vendor/zenuml-core/3.47.9/zenuml.js"));
+    assert!(mermaid.ends_with(format!(
+        "vendor/mermaid/{MERMAID_JS_VERSION}/mermaid.min.js"
+    )));
+    assert!(drawio.ends_with(format!("vendor/drawio/{DRAWIO_JS_VERSION}/drawio.min.js")));
+    assert!(zenuml_core.ends_with(format!(
+        "vendor/zenuml-core/{ZENUML_CORE_JS_VERSION}/zenuml.js"
+    )));
 }
 
 #[test]

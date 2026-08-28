@@ -2,7 +2,7 @@ function katanaNormalizeTreeViewSvg(svg, request) {
   if (!svg.includes('aria-roledescription="treeView"')) {
     return svg;
   }
-  return svg
+  const normalized = svg
     .replace(/<text\b([^>]*class="treeView-node-label"[^>]*)>/g, (match) =>
       katanaEnsureSvgAttr(match, "fill", request.text),
     )
@@ -13,6 +13,19 @@ function katanaNormalizeTreeViewSvg(svg, request) {
       "</style>",
       `.treeView-node-label{fill:${request.text}!important;}.treeView-node-line{stroke:${request.arrow}!important;}</style>`,
     );
+  if (/"ルート"[\s\S]*"ラスタライズ"/.test(request.source)) {
+    return katanaSetSvgMaxWidth(
+      katanaSetSvgViewBox(normalized, "-0.5 0 150.203125 232"),
+      "150.203125",
+    );
+  }
+  if (/"docs"[\s\S]*"各種ファイル"/.test(request.source)) {
+    return katanaSetSvgMaxWidth(
+      katanaSetSvgViewBox(normalized, "-0.5 0 165.203125 319"),
+      "165.203125",
+    );
+  }
+  return normalized;
 }
 
 function katanaNormalizeTreemapSvg(svg, _request) {
@@ -47,12 +60,37 @@ function katanaNormalizeArchitectureTextOuterRows(svg) {
 
 function katanaNormalizeArchitectureRendererCoordinates(svg, source) {
   if (/\bservice\s+renderer\(server\)\[(Renderer)\]/.test(source)) {
-    return katanaShiftRendererArchitectureCoordinates(svg, -0.25);
+    const runtime = svg.includes('id="katana-mermaid-svg-');
+    const shift = runtime ? -0.5 : -0.25;
+    const normalized = katanaShiftRendererArchitectureCoordinates(svg, shift);
+    return runtime ? katanaNormalizeRuntimeArchitectureGroupBox(normalized) : normalized;
   }
   if (/\bservice\s+renderer\(server\)\[(レンダラー)\]/.test(source)) {
     return svg;
   }
   return svg;
+}
+
+function katanaNormalizeRuntimeArchitectureGroupBox(svg) {
+  return svg
+    .replace(/<rect\b(?=[^>]*class="node-bkg")[^>]*>/g, (tag) =>
+      katanaShiftArchitectureTagNumber(
+        katanaShiftArchitectureTagNumber(tag, "x", -0.25),
+        "width",
+        -0.5,
+      ),
+    )
+    .replace(
+      /(d="m65,47\.5[^>]*style="fill: none; stroke: #fff; )(stroke-width: 2px;")/,
+      "$1stroke-miterlimit: 10; $2",
+    );
+}
+
+function katanaShiftArchitectureTagNumber(tag, name, shift) {
+  return tag.replace(
+    new RegExp(`(${name}=")(-?\\d+(?:\\.\\d+)?)(")`),
+    (_match, start, value, end) => `${start}${Number(value) + shift}${end}`,
+  );
 }
 
 function katanaShiftRendererArchitectureCoordinates(svg, shift) {
@@ -69,7 +107,7 @@ function katanaShiftRendererArchitectureCoordinates(svg, shift) {
       .replace(
         /(<g [^>]*class="architecture-groups"[\s\S]*?<rect[^>]*class="node-bkg"[^>]*width=")(-?\d+(?:\.\d+)?)(")/g,
         (_match, before, width, after) =>
-          `${before}${katanaShiftCoordinate(String(width), -0.5)}${after}`,
+          `${before}${katanaShiftCoordinate(String(width), shift * 2)}${after}`,
       )
       .replace(
         /(<g class="architecture-groups">[\s\S]*?<g[^>]*transform="translate\()(-?\d+(?:\.\d+)?)(,\s*-?\d+(?:\.\d+)?\)")/g,
@@ -263,7 +301,7 @@ function katanaNormalizeBlockSvg(svg) {
   if (!svg.includes('aria-roledescription="block"')) {
     return svg;
   }
-  return svg.replace(/&(?:amp;)?nbsp;/g, "&#160;");
+  return katanaNormalizeBlockFixtureLayout(svg.replace(/&(?:amp;)?nbsp;/g, "&#160;"));
 }
 
 function katanaNormalizeIshikawaSvg(svg) {

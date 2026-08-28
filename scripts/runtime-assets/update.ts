@@ -131,10 +131,7 @@ export class RuntimeSourceUpdater {
   }
 
   replaceConst(source: string, constName: string, value: string): string {
-    const replacement =
-      value.length > 56
-        ? `pub const ${constName}: &str =\n    "${value}";`
-        : `pub const ${constName}: &str = "${value}";`;
+    const replacement = `pub const ${constName}: &str = "${value}";`;
     const pattern = new RegExp(`pub const ${constName}: &str =\\s*"[^"]+";`);
     return source.replace(pattern, replacement);
   }

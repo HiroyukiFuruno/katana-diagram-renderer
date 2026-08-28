@@ -83,9 +83,217 @@ function katanaNormalizeC4RuntimeContainerReviewSvg(svg, request) {
   if (!katanaShouldNormalizeC4RuntimeContainer(svg, request)) {
     return svg;
   }
-  return katanaNormalizeC4ContainerText(
-    katanaShiftC4ContainerY(katanaShortenC4ContainerViewBox(svg)),
+  return katanaAlignC4ContainerReviewSvg(
+    katanaNormalizeC4ContainerText(
+      katanaShiftC4ContainerY(katanaShortenC4ContainerViewBox(svg)),
+    ),
   );
+}
+
+function katanaAlignC4ContainerReviewSvg(svg) {
+  return katanaAlignC4ContainerDatabase(
+    katanaAlignC4ContainerTypeLabels(
+      katanaAlignC4ContainerRelations(
+        katanaAlignC4ContainerBoundary(
+          katanaAlignC4ContainerNodes(katanaExpandC4ContainerViewBox(svg)),
+        ),
+      ),
+    ),
+  );
+}
+
+function katanaExpandC4ContainerViewBox(svg) {
+  const viewBox = katanaReadViewBox(svg);
+  if (!viewBox) {
+    return svg;
+  }
+  return katanaSetSvgViewBox(
+    svg,
+    `${viewBox[0]} ${viewBox[1]} ${viewBox[2]} ${katanaFormatSvgNumber(viewBox[3] + 1.655)}`,
+  );
+}
+
+function katanaAlignC4ContainerNodes(svg) {
+  return svg.replace(
+    /(<g transform="translate\((?:-?\d+(?:\.\d+)?),\s*)(-?\d+(?:\.\d+)?)(\)">\s*<g class="node c4-shape)/g,
+    (_match, prefix, y, suffix) =>
+      `${prefix}${katanaFormatSvgNumber(Number(y) - 0.18)}${suffix}`,
+  );
+}
+
+function katanaAlignC4ContainerBoundary(svg) {
+  return svg
+    .replace(/<rect\b[^>]*fill="none" stroke="#AAAAAA"[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(
+        katanaShiftTagNumberAttr(tag, "y", 2.34),
+        "height",
+        -0.184565,
+      ),
+    )
+    .replace(/<text\b[^>]*font-size: 16px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", 2.34),
+    )
+    .replace(/<text\b[^>]*font-size: 14px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", 1.84),
+    );
+}
+
+function katanaAlignC4ContainerRelations(svg) {
+  return svg
+    .replace(/<line\b[^>]*marker-end="[^"]+"[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(katanaShiftTagNumberAttr(tag, "y1", 3.34), "y2", 2.84),
+    )
+    .replace(/<path\b[^>]*stroke="#AAAAAA"[^>]*>/g, (tag) =>
+      tag.replace(/d="([^"]+)"/, (_match, path) =>
+        `d="${katanaShiftC4RelationPathY(path, 2.82)}"`,
+      ),
+    )
+    .replace(/<text\b[^>]*font-size: 12px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", 2.82),
+    );
+}
+
+function katanaShiftC4RelationPathY(path, shift) {
+  return path.replace(
+    /,(-?\d+(?:\.\d+)?)/g,
+    (_match, y) => `,${katanaFormatSvgNumber(Number(y) + shift)}`,
+  );
+}
+
+function katanaAlignC4ContainerTypeLabels(svg) {
+  return svg.replace(
+    /(<g class="c4-type" transform="translate\((?:-?\d+(?:\.\d+)?),\s*)(-?\d+(?:\.\d+)?)(\)">)/g,
+    (_match, prefix, y, suffix) =>
+      `${prefix}${katanaFormatSvgNumber(Number(y) + 0.04628)}${suffix}`,
+  );
+}
+
+function katanaAlignC4ContainerDatabase(svg) {
+  return svg.replace(/<path\b[^>]*class="basic label-container outer-path"[^>]*>/g, (tag) =>
+    tag
+      .replace(/l0,90\.18651/g, "l0,90.001945")
+      .replace(/l0,-90\.18651/g, "l0,-90.001945")
+      .replace(
+        /transform="translate\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)"/,
+        (_match, x, y) =>
+          `transform="translate(${x}, ${katanaFormatSvgNumber(Number(y) + 0.092283)})"`,
+      ),
+  );
+}
+
+function katanaAlignC4ContextFullReviewSvg(svg) {
+  return katanaAlignC4ContainerDatabase(
+    katanaAlignC4ContainerTypeLabels(
+      katanaAlignC4ContextRelations(
+        katanaAlignC4ContextBoundaries(katanaAlignC4ContextNodes(svg)),
+      ),
+    ),
+  );
+}
+
+function katanaAlignC4ContextNodes(svg) {
+  return svg.replace(
+    /(<g transform="translate\((?:-?\d+(?:\.\d+)?),\s*)(-?\d+(?:\.\d+)?)(\)">\s*<g class="node c4-shape)/g,
+    (_match, prefix, y, suffix) =>
+      `${prefix}${katanaFormatSvgNumber(
+        Number(y) + katanaC4ContextNodeYShift(Number(y)),
+      )}${suffix}`,
+  );
+}
+
+function katanaC4ContextNodeYShift(y) {
+  if (y > 1000) {
+    return -2.1;
+  }
+  if (y > 700) {
+    return -1.135;
+  }
+  if (y > 500) {
+    return -0.15;
+  }
+  return y > 200 ? -0.08 : 0;
+}
+
+function katanaAlignC4ContextBoundaries(svg) {
+  return svg
+    .replace(/<rect\b[^>]*fill="none" stroke="#AAAAAA"[^>]*>/g, (tag) =>
+      katanaAlignC4ContextBoundaryRect(tag),
+    )
+    .replace(/<text\b[^>]*font-size: 16px[^>]*>/g, (tag) =>
+      katanaShiftC4ContextBoundaryText(tag, 0),
+    )
+    .replace(/<text\b[^>]*font-size: 14px[^>]*>/g, (tag) =>
+      katanaShiftC4ContextBoundaryText(tag, -1),
+    );
+}
+
+function katanaAlignC4ContextBoundaryRect(tag) {
+  const y = katanaTagNumberAttr(tag, "y");
+  if (y === null) {
+    return tag;
+  }
+  const [yShift, heightShift] = katanaC4ContextBoundaryShifts(y);
+  return katanaShiftTagNumberAttr(
+    katanaShiftTagNumberAttr(tag, "y", yShift),
+    "height",
+    heightShift,
+  );
+}
+
+function katanaC4ContextBoundaryShifts(y) {
+  if (y > 1000) {
+    return [-2.128, 0.05];
+  }
+  if (y > 700) {
+    return [-1.136, -0.944];
+  }
+  return [-1, -2.08];
+}
+
+function katanaShiftC4ContextBoundaryText(tag, additionalShift) {
+  const y = katanaTagNumberAttr(tag, "y");
+  if (y === null) {
+    return tag;
+  }
+  return katanaShiftTagNumberAttr(
+    tag,
+    "y",
+    katanaC4ContextBoundaryShifts(y)[0] + additionalShift,
+  );
+}
+
+function katanaAlignC4ContextRelations(svg) {
+  let pathIndex = 0;
+  return svg
+    .replace(/<line\b[^>]*marker-end="[^"]+"[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(katanaShiftTagNumberAttr(tag, "y1", -0.15), "y2", -0.15),
+    )
+    .replace(/<path\b[^>]*stroke="#AAAAAA"[^>]*>/g, (tag) => {
+      const shifts = KATANA_C4_CONTEXT_RELATION_PATH_Y_SHIFTS[pathIndex] ?? [0, 0, 0];
+      pathIndex += 1;
+      return tag.replace(/d="([^"]+)"/, (_match, path) =>
+        `d="${katanaShiftC4ContextRelationPath(path, shifts)}"`,
+      );
+    })
+    .replace(/<text\b[^>]*font-size: 12px[^>]*>/g, (tag) => {
+      const y = katanaTagNumberAttr(tag, "y");
+      return y === null ? tag : katanaShiftTagNumberAttr(tag, "y", y < 500 ? -0.16 : -0.636);
+    });
+}
+
+const KATANA_C4_CONTEXT_RELATION_PATH_Y_SHIFTS = [
+  [-0.15, -0.636, -1.135],
+  [-0.15, -0.636, -1.135],
+  [-1.135, -0.636, -0.15],
+];
+
+function katanaShiftC4ContextRelationPath(path, shifts) {
+  let index = 0;
+  return path.replace(/,(-?\d+(?:\.\d+)?)/g, (_match, y) => {
+    const shift = shifts[Math.min(index, shifts.length - 1)];
+    index += 1;
+    return `,${katanaFormatSvgNumber(Number(y) + shift)}`;
+  });
 }
 
 function katanaShouldNormalizeC4RuntimeContainer(svg, request) {
@@ -108,31 +316,44 @@ function katanaShortenC4ContainerViewBox(svg) {
 }
 
 function katanaShiftC4ContainerY(svg) {
+  const runtimeShift = Number(katanaIsRuntimeSvg(svg));
   return svg
     .replace(/\b(y|y1|y2)="(-?\d+(?:\.\d+)?)"/g, (_match, name, y) =>
-      `${name}="${katanaC4ShiftedY(Number(y))}"`,
+      `${name}="${katanaC4ShiftedY(Number(y), runtimeShift)}"`,
     )
-    .replace(/d="([^"]+)"/g, (_match, path) => `d="${katanaShiftC4PathY(path)}"`);
+    .replace(/d="([^"]+)"/g, (_match, path) => `d="${katanaShiftC4PathY(path, runtimeShift)}"`)
+    .replace(
+      /transform="translate\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)"/g,
+      (_match, x, y) =>
+        Number(y) > 100
+          ? `transform="translate(${x}, ${katanaFormatSvgNumber(
+              Number(y) - runtimeShift - Number(runtimeShift > 0 && Number(y) > 300),
+            )})"`
+          : _match,
+    );
 }
 
-function katanaShiftC4PathY(path) {
-  return path.replace(/,(-?\d+(?:\.\d+)?)/g, (_match, y) => `,${katanaC4ShiftedY(Number(y))}`);
+function katanaShiftC4PathY(path, runtimeShift) {
+  return path.replace(
+    /,(-?\d+(?:\.\d+)?)/g,
+    (_match, y) => `,${katanaC4ShiftedY(Number(y), runtimeShift)}`,
+  );
 }
 
-function katanaShiftC4DeploymentYTag(tag, attrName) {
+function katanaShiftC4DeploymentYTag(tag, attrName, runtimeShift) {
   const y = katanaTagNumberAttr(tag, attrName);
   if (y === null) {
     return tag;
   }
-  return katanaShiftTagNumberAttr(tag, attrName, katanaC4DeploymentShiftedY(y) - y);
+  return katanaShiftTagNumberAttr(tag, attrName, katanaC4DeploymentShiftedY(y, runtimeShift) - y);
 }
 
-function katanaC4DeploymentShiftedY(y) {
+function katanaC4DeploymentShiftedY(y, runtimeShift) {
   if (y > 100 && (y === 157 || y === 287)) {
-    return katanaFormatSvgNumber(y - 2);
+    return katanaFormatSvgNumber(y - 2 - runtimeShift * 2);
   }
   if (y > 100) {
-    return katanaFormatSvgNumber(y - 1);
+    return katanaFormatSvgNumber(y - 1 - runtimeShift);
   }
   return katanaFormatSvgNumber(y);
 }
@@ -148,15 +369,16 @@ function katanaShiftC4DynamicRelationText(tag, xShift, yShift) {
   return katanaShiftTagYAttrs(katanaShiftTagNumberAttr(tag, "x", xShift), ["y"], yShift);
 }
 
-function katanaC4ShiftedY(y) {
+function katanaC4ShiftedY(y, runtimeShift) {
+  const thresholdRuntimeShift = runtimeShift + Number(runtimeShift > 0 && y > 300);
   if (y > 450) {
-    return katanaFormatSvgNumber(y - 3);
+    return katanaFormatSvgNumber(y - 3 - thresholdRuntimeShift);
   }
   if (y > 300) {
-    return katanaFormatSvgNumber(y - 2.5);
+    return katanaFormatSvgNumber(y - 2.5 - thresholdRuntimeShift);
   }
   if (y > 100) {
-    return katanaFormatSvgNumber(y - 1);
+    return katanaFormatSvgNumber(y - 1 - runtimeShift);
   }
   return katanaFormatSvgNumber(y);
 }
@@ -293,6 +515,13 @@ function katanaNormalizePieReviewSvg(svg) {
   if (!svg.includes('aria-roledescription="pie"')) {
     return svg;
   }
+  if (svg.includes(">レンダリング所有権</text>")) {
+    return katanaSetSvgDimension(
+      katanaSetSvgMaxWidth(katanaSetSvgViewBox(svg, "0 0 695.9 450"), "696"),
+      "width",
+      "696",
+    );
+  }
   return svg
     .replace(/width="512"/, 'width="641"')
     .replace(/viewBox="0 0 512 450"/, 'viewBox="0 0 640.5 450"')
@@ -314,13 +543,50 @@ function katanaNormalizeC4ReviewSvgBySource(svg, source) {
   if (katanaReviewIsC4DynamicSource(source)) {
     return katanaNormalizeC4DynamicReviewSvg(svg, source);
   }
+  if (katanaReviewIsC4ComponentSource(source)) {
+    return katanaNormalizeC4ComponentReviewSvg(svg);
+  }
   return svg;
 }
 
 function katanaNormalizeC4DeploymentReviewSvg(svg) {
+  const runtimeShift = Number(katanaIsRuntimeSvg(svg));
+  const normalized = svg
+    .replace(/<rect\b[^>]*>/g, (tag) => katanaShiftC4DeploymentYTag(tag, "y", runtimeShift))
+    .replace(/<text\b[^>]*>/g, (tag) => katanaShiftC4DeploymentYTag(tag, "y", runtimeShift));
+  return runtimeShift === 0
+    ? normalized
+    : normalized
+        .replace(/<text\b[^>]*style="[^"]*font-size: 14px[^"]*"[^>]*>/g, (tag) =>
+          katanaShiftTagNumberAttr(tag, "y", -1),
+        )
+        .replace(
+        /transform="translate\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)"/g,
+        (_match, x, y) =>
+          Number(y) > 100
+            ? `transform="translate(${x}, ${katanaFormatSvgNumber(Number(y) - 1)})"`
+            : _match,
+        );
+}
+
+function katanaNormalizeC4ComponentReviewSvg(svg) {
   return svg
-    .replace(/<rect\b[^>]*>/g, (tag) => katanaShiftC4DeploymentYTag(tag, "y"))
-    .replace(/<text\b[^>]*>/g, (tag) => katanaShiftC4DeploymentYTag(tag, "y"));
+    .replace(/<rect\b[^>]*fill="none" stroke="#AAAAAA"[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(
+        katanaShiftTagNumberAttr(tag, "y", -0.06),
+        "height",
+        0.072,
+      ),
+    )
+    .replace(/<text\b[^>]*font-size: 16px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", -0.06),
+    )
+    .replace(/<text\b[^>]*font-size: 14px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", -1.06),
+    )
+    .replace(/<text\b[^>]*font-size: 12px[^>]*>/g, (tag) =>
+      katanaShiftTagNumberAttr(tag, "y", 0.44),
+    );
 }
 
 function katanaNormalizeC4DynamicReviewSvg(svg, source) {
@@ -388,12 +654,15 @@ function katanaNormalizeKnownC4ReviewBounds(svg, source) {
   const bounds = KATANA_C4_REVIEW_BOUNDS.find((it) => it.source.test(source));
   if (katanaReviewIsC4ContextSource(source) || katanaReviewIsC4ComponentSource(source)) {
     return bounds
-      ? katanaSetSvgMaxWidth(
-          katanaSetSvgViewBox(
-            katanaNormalizeC4ContainerText(katanaShiftC4ContainerY(svg)),
-            bounds.viewBox,
+      ? katanaAlignC4ContextReviewBySource(
+          katanaSetSvgMaxWidth(
+            katanaSetSvgViewBox(
+              katanaNormalizeC4ContainerText(katanaShiftC4ContainerY(svg)),
+              bounds.viewBox,
+            ),
+            bounds.maxWidth,
           ),
-          bounds.maxWidth,
+          source,
         )
       : null;
   }
@@ -414,6 +683,12 @@ function katanaNormalizeKnownC4ReviewBounds(svg, source) {
         bounds.maxWidth,
       )
     : null;
+}
+
+function katanaAlignC4ContextReviewBySource(svg, source) {
+  return katanaReviewIsC4ContextFullSource(source)
+    ? katanaNormalizeC4ContextFullFixtureLayout(katanaAlignC4ContextFullReviewSvg(svg), source)
+    : svg;
 }
 
 const KATANA_C4_REVIEW_BOUNDS = [

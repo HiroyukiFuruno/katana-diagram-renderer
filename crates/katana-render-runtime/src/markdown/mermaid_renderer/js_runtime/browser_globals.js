@@ -207,7 +207,20 @@ class KatanaStyle {
 
 class KatanaCSSRule {
   constructor(cssText) {
-    this.cssText = String(cssText);
+    const source = String(cssText);
+    const match = source.match(/^\s*([^{}]+?)\s*\{([\s\S]*)\}\s*$/);
+    this.selectorText = match?.[1]?.trim() ?? "";
+    this.style = new KatanaStyle();
+    this.rawCssText = source;
+    if (match) {
+      katanaApplyCssText(this.style, match[2]);
+    }
+  }
+  get cssText() {
+    if (this.selectorText.length === 0) {
+      return this.rawCssText;
+    }
+    return `${this.selectorText} { ${this.style.cssText} }`;
   }
 }
 

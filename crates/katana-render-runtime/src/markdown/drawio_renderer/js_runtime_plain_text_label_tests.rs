@@ -49,9 +49,9 @@ fn fake_bundle_trims_padding_newlines_before_plain_text_html_label() {
         DiagramColorPreset::light(),
     );
 
-    assert_render_contains(&rendered, "First line<br></br>Second line");
-    assert_render_not_contains(&rendered, "<br></br>First line");
-    assert_render_not_contains(&rendered, "Second line<br></br>");
+    assert_render_contains(&rendered, "First line<br/>Second line");
+    assert_render_not_contains(&rendered, "<br/>First line");
+    assert_render_not_contains(&rendered, "Second line<br/>");
 }
 
 fn temp_runtime_path(prefix: &str) -> std::path::PathBuf {
@@ -63,9 +63,9 @@ fn fake_bundle_with_truncated_plain_text() -> &'static str {
 }
 
 fn assert_plain_text_svg_contains(rendered: &Result<String, String>) {
-    assert_render_contains(rendered, "First line<br></br>Second line");
-    assert_render_not_contains(rendered, "<br></br>First line");
-    assert_render_not_contains(rendered, "Second line<br></br>");
+    assert_render_contains(rendered, "First line<br/>Second line");
+    assert_render_not_contains(rendered, "<br/>First line");
+    assert_render_not_contains(rendered, "Second line<br/>");
     assert_render_contains(rendered, "width: 118px");
     assert_render_contains(rendered, "padding-top: 32px");
     assert_render_contains(rendered, "margin-left: 22px");

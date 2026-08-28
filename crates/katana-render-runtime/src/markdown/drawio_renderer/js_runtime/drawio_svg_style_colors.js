@@ -37,6 +37,9 @@ function katanaDrawioIsLargeTooltipsPath(element) {
 }
 
 function katanaNormalizeDrawioStyleTextColor(element) {
+  if (element.getAttribute(katanaDrawioLightDarkAttributeName("color")) === "true") {
+    return;
+  }
   if (katanaDrawioShouldPreserveHtmlTextContentColor(element)) {
     return;
   }

@@ -11,6 +11,7 @@ const KATANA_SELECTOR_MATCHERS = [
   { applies: katanaIsNestedFirstChildSelector, matches: katanaMatchesNestedFirstChild },
   { applies: katanaIsWildcardSelector, matches: katanaMatchesWildcard },
   { applies: katanaIsTagIdSelector, matches: katanaMatchesTagId },
+  { applies: katanaIsTagClassSelector, matches: katanaMatchesTagClass },
   { applies: katanaIsBodySelector, matches: katanaMatchesBody },
   { applies: katanaIsIdSelector, matches: katanaMatchesId },
   { applies: katanaIsIdAttributeSelector, matches: katanaMatchesIdAttribute },
@@ -51,12 +52,25 @@ function katanaMatchesTagId(node, selector) {
   return [node.localName === match[1].toLowerCase(), node.id === match[2]].every(Boolean);
 }
 
+function katanaIsTagClassSelector(selector) {
+  return /^[a-zA-Z0-9:_-]+(?:\.[a-zA-Z0-9_-]+)+$/.test(selector);
+}
+
+function katanaMatchesTagClass(node, selector) {
+  const [tagName, ...classNames] = selector.split(".");
+  const actualClasses = String(node.className).split(/\s+/).filter(Boolean);
+  return [
+    node.localName === tagName.toLowerCase(),
+    classNames.every((className) => actualClasses.includes(className)),
+  ].every(Boolean);
+}
+
 function katanaIsBodySelector(selector) {
   return selector === "body";
 }
 
 function katanaMatchesBody(node) {
-  return node === document.body;
+  return node.localName === "body";
 }
 
 function katanaIsIdSelector(selector) {

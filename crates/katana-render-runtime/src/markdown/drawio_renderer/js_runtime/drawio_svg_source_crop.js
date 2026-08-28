@@ -1,5 +1,70 @@
+const KATANA_DRAWIO_SOURCE_PAINT_PADDING_LIMIT = 12;
+
 function katanaDrawioSourceContentBox(svg) {
   return katanaDrawioSourceCropBox(svg, katanaDrawioSourceGeometryEntries());
+}
+
+function katanaDrawioSourcePaintBox(svg) {
+  const entries = katanaDrawioSourceGeometryEntries();
+  const offset = katanaDrawioSourceCropOffset(svg, entries);
+  if (!offset) {
+    return null;
+  }
+  const sourceBox = katanaDrawioSourceCropBox(svg, entries);
+  const paintBox = katanaDrawioOutwardUnionBox(
+    entries.map((entry) => katanaDrawioSourcePaintEntryBox(entry, offset)),
+  );
+  return [sourceBox, paintBox].every(Boolean)
+    ? {
+        x: katanaDrawioSourcePaintOrigin(sourceBox.x),
+        y: sourceBox.y,
+        width: paintBox.width,
+        height: paintBox.height,
+      }
+    : null;
+}
+
+function katanaDrawioSourcePaintOrigin(value) {
+  return value > 0 && value <= KATANA_DRAWIO_SOURCE_PAINT_PADDING_LIMIT ? 0 : value;
+}
+
+function katanaDrawioSourcePaintEntryBox(entry, offset) {
+  const strokeRadius = katanaDrawioSourceGeometryStrokeWidth(entry) / 2;
+  return {
+    x: entry.x + offset.x - strokeRadius,
+    y: entry.y + offset.y - strokeRadius,
+    width: entry.width + strokeRadius * 2,
+    height: entry.height + strokeRadius * 2,
+  };
+}
+
+function katanaDrawioSourceGeometryStrokeWidth(entry) {
+  const style = KATANA_DRAWIO_SOURCE_CELL_STYLE_CACHE.get(entry.id) ?? new Map();
+  if (!katanaDrawioSourceGeometryHasStroke(style)) {
+    return 0;
+  }
+  const width = Number(style.get("strokeWidth") ?? 1);
+  return Number.isFinite(width) && width > 0 ? width : 1;
+}
+
+function katanaDrawioSourceGeometryHasStroke(style) {
+  if (katanaDrawioColorKey(style.get("strokeColor")) === "none") {
+    return false;
+  }
+  return [style.has("text"), style.get("shape") === "text"].some(Boolean)
+    ? style.has("strokeColor")
+    : true;
+}
+
+function katanaDrawioOutwardUnionBox(boxes) {
+  if (boxes.length === 0) {
+    return null;
+  }
+  const left = Math.floor(Math.min(...boxes.map((box) => box.x)));
+  const top = Math.floor(Math.min(...boxes.map((box) => box.y)));
+  const right = Math.ceil(Math.max(...boxes.map(katanaDrawioBoxRight)));
+  const bottom = Math.ceil(Math.max(...boxes.map(katanaDrawioBoxBottom)));
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 function katanaDrawioSourceMinimumTop() {
@@ -8,12 +73,14 @@ function katanaDrawioSourceMinimumTop() {
 }
 
 function katanaDrawioSourceGeometryEntries() {
+  return katanaDrawioAllSourceGeometryEntries().filter(katanaDrawioIsTopLevelSourceGeometryEntry);
+}
+
+function katanaDrawioAllSourceGeometryEntries() {
   return [
     ...katanaDrawioSourceCellGeometryEntries(),
     ...katanaDrawioSourceUserObjectGeometryEntries(),
-  ]
-    .filter(katanaHasDrawioSourceGeometryEntry)
-    .filter(katanaDrawioIsTopLevelSourceGeometryEntry);
+  ].filter(katanaHasDrawioSourceGeometryEntry);
 }
 
 function katanaDrawioSourceVertexGeometryEntries() {
@@ -57,6 +124,7 @@ function katanaDrawioSourceGeometry(cellAttributes, geometryAttributes, fallback
     parent: katanaDrawioSourceParentAttribute(cellAttributes, fallbackAttributes),
     vertex: katanaDrawioBooleanSourceAttribute(cellAttributes, fallbackAttributes, "vertex"),
     edge: katanaDrawioBooleanSourceAttribute(cellAttributes, fallbackAttributes, "edge"),
+    relative: katanaDrawioCellAttribute(geometryAttributes, "relative") === "1",
     x: katanaDrawioCoordinateAttribute(geometryAttributes, "x"),
     y: katanaDrawioCoordinateAttribute(geometryAttributes, "y"),
     width: katanaDrawioRequiredNumberAttribute(geometryAttributes, "width"),
@@ -150,6 +218,53 @@ function katanaDrawioSourceCropOffset(svg, entries) {
   return katanaDrawioMedianOffset(katanaDrawioSourceCropOffsets(svg, entries));
 }
 
+function katanaDrawioPreciseSourceCropOffset(svg, entries) {
+  return katanaDrawioMedianOffset(
+    entries.map((entry) => katanaDrawioPreciseSourceCellOffset(svg, entry)).filter(Boolean),
+  );
+}
+
+function katanaDrawioPreciseSourceCellOffset(svg, entry) {
+  const group = katanaDrawioCellGroup(svg, entry.id);
+  const box = group ? katanaDrawioPreciseCellShapeBox(group) : null;
+  return box && katanaDrawioSimilarSourceBox(box, entry)
+    ? { x: box.x - entry.x, y: box.y - entry.y }
+    : null;
+}
+
+function katanaDrawioPreciseCellShapeBox(group) {
+  const boxes = katanaDrawioCellShapeElements(group)
+    .map(katanaDrawioElementBoxWithoutCrispTranslate)
+    .filter(katanaDrawioHasArea);
+  if (boxes.length === 0) {
+    return null;
+  }
+  const left = Math.min(...boxes.map((box) => box.x));
+  const top = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map(katanaDrawioBoxRight));
+  const bottom = Math.max(...boxes.map(katanaDrawioBoxBottom));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function katanaDrawioElementBoxWithoutCrispTranslate(element) {
+  const box = katanaDrawioElementBox(element);
+  const crisp = katanaDrawioElementAncestors(element)
+    .map(katanaDrawioCrispTranslate)
+    .reduce(katanaDrawioAddPoint, { x: 0, y: 0 });
+  return { x: box.x - crisp.x, y: box.y - crisp.y, width: box.width, height: box.height };
+}
+
+function katanaDrawioCrispTranslate(node) {
+  return String(node.getAttribute?.("transform") ?? "").replaceAll(" ", "") ===
+    "translate(0.5,0.5)"
+    ? { x: 0.5, y: 0.5 }
+    : { x: 0, y: 0 };
+}
+
+function katanaDrawioAddPoint(left, right) {
+  return { x: left.x + right.x, y: left.y + right.y };
+}
+
 function katanaDrawioMeasuredSourceOrigin(svg, entries) {
   const offset = katanaDrawioSourceCropOffset(svg, entries);
   return offset ? { x: -offset.x, y: -offset.y } : null;
@@ -199,10 +314,23 @@ function katanaDrawioMedianValue(values) {
 }
 
 function katanaDrawioShiftedSourceCropBox(box, offset) {
+  const precise = [
+    katanaDrawioSourceIsDeviceTemplate(),
+    katanaDrawioIsGanttGridSource(),
+  ].some(Boolean);
+  const preciseY = box.y + offset.y - Number(katanaDrawioIsGanttGridSource());
   return {
-    x: Math.floor(box.x + offset.x),
-    y: Math.floor(box.y + offset.y),
+    x: precise ? box.x + offset.x : Math.floor(box.x + offset.x),
+    y: precise ? preciseY : Math.floor(box.y + offset.y),
     width: Math.ceil(box.width),
     height: Math.ceil(box.height),
   };
+}
+
+function katanaDrawioIsGanttGridSource() {
+  const source = katanaDrawioRequestSource();
+  return [
+    source.includes("shape=mxgraph.arrows.bent_right_arrow"),
+    (source.match(/shape=mxgraph\.flowchart\.process/g) ?? []).length > 20,
+  ].every(Boolean);
 }

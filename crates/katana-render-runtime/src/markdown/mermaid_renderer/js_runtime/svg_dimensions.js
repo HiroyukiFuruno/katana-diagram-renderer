@@ -43,6 +43,7 @@ function katanaUseContentBox(viewBox, contentBox, svg) {
 function katanaUseExistingContentBox(viewBox, contentBox, svg) {
   return [
     katanaRoleContentBoxDecision(svg, "class", contentBox[3] < viewBox[3] - 8),
+    katanaRoleContentBoxDecision(svg, "classDiagram", contentBox[3] < viewBox[3] - 8),
     katanaRoleContentBoxDecision(svg, "gitGraph", contentBox[3] < viewBox[3] - 8),
     katanaRoleContentBoxDecision(svg, "ishikawa", contentBox[2] < viewBox[2] - 8),
     katanaUseNonClassContentBox(viewBox, contentBox, svg),

@@ -44,6 +44,16 @@ test("Rust runtime asset version const を 1 行形式でも更新できる", ()
   expect(updated).toBe('pub const DRAWIO_JS_VERSION: &str = "30.0.1";\n');
 });
 
+test("長い Rust const も rustfmt と同じ 1 行形式で更新する", () => {
+  const source = 'pub const PLANTUML_DOWNLOAD_URL: &str = "old";\n';
+  const value =
+    "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.7/plantuml-lgpl-1.2026.7.jar";
+
+  const updated = new RuntimeSourceUpdater().replaceConst(source, "PLANTUML_DOWNLOAD_URL", value);
+
+  expect(updated).toBe(`pub const PLANTUML_DOWNLOAD_URL: &str = "${value}";\n`);
+});
+
 test("PlantUML package include は checksum manifest だけを更新する", () => {
   const plantuml = {
     kind: "plantuml",

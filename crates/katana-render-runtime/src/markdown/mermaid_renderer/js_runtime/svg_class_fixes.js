@@ -1,5 +1,5 @@
 function katanaNormalizeClassSvg(svg) {
-  if (!svg.includes('aria-roledescription="class"')) {
+  if (!katanaIsClassDiagramSvg(svg)) {
     return svg;
   }
   const normalized = katanaRewriteBalancedGroups(
@@ -8,6 +8,10 @@ function katanaNormalizeClassSvg(svg) {
     katanaNormalizeEmptyClassMethods,
   );
   return katanaNormalizeClassFixtureLayout(normalized);
+}
+
+function katanaIsClassDiagramSvg(svg) {
+  return /aria-roledescription="(?:class|classDiagram)"/.test(svg);
 }
 
 function katanaNormalizeEmptyClassMethods(node) {

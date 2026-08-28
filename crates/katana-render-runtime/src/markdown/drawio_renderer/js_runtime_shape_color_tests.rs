@@ -12,7 +12,7 @@ fn fake_bundle_does_not_double_map_light_dark_style_color() {
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains("stop-color=\"#56425f\"")),
+            .is_ok_and(|svg| svg.contains("stop-color=\"rgb(139, 106, 154)\"")),
         "{rendered:?}"
     );
     assert!(
@@ -21,6 +21,7 @@ fn fake_bundle_does_not_double_map_light_dark_style_color() {
             .is_ok_and(|svg| svg.contains("style=\"stop-color: rgb(139, 106, 154)\"")),
         "{rendered:?}"
     );
+    assert!(!rendered.as_ref().is_ok_and(|svg| svg.contains("#56425f")));
     assert!(!rendered.as_ref().is_ok_and(|svg| svg.contains("#674f72")));
 }
 

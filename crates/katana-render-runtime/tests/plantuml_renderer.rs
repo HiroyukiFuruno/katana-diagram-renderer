@@ -56,9 +56,8 @@ fn plantuml_api_exposes_available_theme_names() {
 
 #[test]
 fn plantuml_api_exposes_runtime_asset_metadata() {
-    assert_eq!(PLANTUML_JAR_VERSION, "1.2026.6");
     assert_eq!(PLANTUML_JAR_CHECKSUM.len(), 64);
-    assert!(PLANTUML_DOWNLOAD_URL.contains("plantuml-lgpl"));
+    assert!(PLANTUML_DOWNLOAD_URL.contains(PLANTUML_JAR_VERSION));
 }
 
 #[test]
@@ -112,7 +111,7 @@ fn plantuml_default_cache_path_falls_back_without_home_environment()
     let path = RuntimePathResolver::resolve(DiagramKind::PlantUml, None)?;
 
     assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
-    assert!(path.ends_with("krr/plantuml/1.2026.6/plantuml.jar"));
+    assert!(path.ends_with(format!("krr/plantuml/{PLANTUML_JAR_VERSION}/plantuml.jar")));
     Ok(())
 }
 

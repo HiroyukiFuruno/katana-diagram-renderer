@@ -12,7 +12,7 @@ fn fake_bundle_pads_aws_left_label_overflow() {
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains(r#"width="150px""#)),
+            .is_ok_and(|svg| svg.contains(r#"width="152px""#)),
         "{rendered:?}"
     );
     assert!(
@@ -47,6 +47,62 @@ fn fake_bundle_offsets_right_label_after_left_padding() {
         !rendered
             .as_ref()
             .is_ok_and(|svg| svg.contains("margin-left: 91px")),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn fake_bundle_pads_rendered_centered_text_overflow() {
+    let path = temp_runtime_path("kdr-drawio-centered-label-padding-unit");
+    let bundle = FAKE_BUNDLE_WITH_LEFT_LABEL_CROP.replace(
+        "  group.appendChild(rect);",
+        r#"  group.appendChild(rect);
+  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  text.setAttribute("x", "0");
+  text.setAttribute("y", "24");
+  text.setAttribute("font-size", "28px");
+  text.setAttribute("font-weight", "bold");
+  text.setAttribute("text-anchor", "middle");
+  text.textContent = "Overflow";
+  group.appendChild(text);"#,
+    );
+    assert!(std::fs::write(&path, bundle).is_ok());
+
+    let source = r#"<mxGraphModel page="1"><root><mxCell id="aws" value="Overflow" style="text;html=0;fontSize=28;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="69" height="69" as="geometry"/></mxCell></root></mxGraphModel>"#;
+    let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
+
+    assert!(
+        rendered.as_ref().is_ok_and(|svg| {
+            !svg.contains(r#"width="70px""#) && svg.contains(r#"transform="translate("#)
+        }),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn fake_bundle_pads_device_page_left_text_overflow_after_label_install() {
+    let path = temp_runtime_path("kdr-drawio-device-page-label-padding-unit");
+    let bundle = FAKE_BUNDLE_WITH_LEFT_LABEL_CROP.replace(
+        "  group.appendChild(rect);",
+        r#"  group.appendChild(rect);
+  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  text.setAttribute("x", "0");
+  text.setAttribute("y", "24");
+  text.setAttribute("font-size", "28px");
+  text.setAttribute("font-weight", "bold");
+  text.setAttribute("text-anchor", "middle");
+  text.textContent = "Beer";
+  group.appendChild(text);"#,
+    );
+    assert!(std::fs::write(&path, bundle).is_ok());
+
+    let source = r#"<mxfile type="device"><diagram><mxGraphModel page="1" background="none"><root><mxCell id="aws" value="Beer" style="text;html=0;fontSize=28;fontStyle=1;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="69" height="69" as="geometry"/></mxCell></root></mxGraphModel></diagram></mxfile>"#;
+    let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
+
+    assert!(
+        rendered.as_ref().is_ok_and(|svg| {
+            !svg.contains(r#"width="70px""#) && svg.contains(r#"transform="translate("#)
+        }),
         "{rendered:?}"
     );
 }

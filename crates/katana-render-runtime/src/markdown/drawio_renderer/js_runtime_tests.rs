@@ -1,3 +1,9 @@
+use super::stencil_test_support::{
+    fake_bundle_with_cisco_placeholders, fake_bundle_with_unresolved_stencil_color,
+};
+use super::test_support::{
+    OFFICIAL_REFERENCE_VIEWPORT_BUNDLE_HOOK, fake_bundle, temp_runtime_path,
+};
 use super::{
     DrawioJsRuntimeOps, DrawioRenderRequest, RuntimeBundleCache, ensure_svg, lock_cache,
     read_drawio_bundle, read_drawio_bundle_with_cache, rendered_svg,
@@ -41,22 +47,33 @@ fn fake_bundle_renders_svg() {
 }
 
 #[test]
-fn fake_bundle_preserves_html_text_foreign_object() {
-    let path = temp_runtime_path("kdr-drawio-html-label-unit");
-    assert!(std::fs::write(&path, fake_bundle_with_foreign_object()).is_ok());
+fn fake_bundle_uses_official_reference_viewport() {
+    let path = temp_runtime_path("kdr-drawio-reference-viewport-unit");
+    let bundle = fake_bundle()
+        .replace(
+            "GraphViewer.createViewerForElement = function createViewerForElement(_container, callback) {",
+            r#"GraphViewer.createViewerForElement = function createViewerForElement(_container, callback) {
+  const initialContainer = `${_container.clientWidth}x${_container.clientHeight}`;"#,
+        )
+        .replace(r#"  svg.setAttribute("width", "20");"#, r#"  svg.setAttribute("width", "1600");"#)
+        .replace(
+            r#"  svg.setAttribute("viewBox", "0 0 20 10");"#,
+            OFFICIAL_REFERENCE_VIEWPORT_BUNDLE_HOOK,
+        );
+    assert!(std::fs::write(&path, bundle).is_ok());
 
     let rendered =
         DrawioJsRuntimeOps::render("<mxGraphModel />", &path, DiagramColorPreset::light());
 
     assert!(
-        rendered
-            .as_ref()
-            .is_ok_and(|svg| svg.contains("<foreignObject"))
-    );
-    assert!(
-        rendered
-            .as_ref()
-            .is_ok_and(|svg| svg.contains(r#"<div xmlns="http://www.w3.org/1999/xhtml""#))
+        rendered.as_ref().is_ok_and(|svg| {
+            svg.contains(r#"data-viewport="1520x845""#)
+                && svg.contains(r#"data-initial-container="0x0""#)
+                && svg.contains(r#"data-constrained-container="1496x10""#)
+                && svg.contains(r#"data-min-width-container="1496x665""#)
+                && svg.contains(r#"data-explicit-container="1126x665""#)
+        }),
+        "{rendered:?}"
     );
 }
 
@@ -69,19 +86,29 @@ fn fake_bundle_resolves_cisco_stencil_placeholder_colors() {
     let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
 
     assert!(
-        rendered
-            .as_ref()
-            .is_ok_and(|svg| svg.contains(r##"fill="#54a9ce""##))
+        rendered.as_ref().is_ok_and(|svg| {
+            svg.contains(r##"fill="#54a9ce""##)
+                && svg.contains(r##"stroke="#ffffff""##)
+                && svg.contains(r##"stroke="#121212""##)
+                && !svg.contains("light-dark(fillcolor")
+        }),
+        "{rendered:?}"
     );
+}
+
+#[test]
+fn fake_bundle_uses_stencil_default_for_unresolved_placeholder() {
+    let path = temp_runtime_path("kdr-drawio-stencil-default-color-unit");
+    assert!(std::fs::write(&path, fake_bundle_with_unresolved_stencil_color()).is_ok());
+
+    let source = r##"<mxGraphModel><root><mxCell id="salesforce" style="shape=mxgraph.salesforce.web2;html=1;fillColor=#e5e5e5;" vertex="1" /></root></mxGraphModel>"##;
+    let rendered = DrawioJsRuntimeOps::render(source, &path, DiagramColorPreset::dark());
+
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains(r##"stroke="#ededed""##))
-    );
-    assert!(
-        rendered
-            .as_ref()
-            .is_ok_and(|svg| svg.contains(r##"stroke="#121212""##))
+            .is_ok_and(|svg| svg.contains(r##"fill="#032d60""##) && !svg.contains("fillcolor2")),
+        "{rendered:?}"
     );
 }
 
@@ -139,112 +166,3 @@ fn poison_cache(cache: &RuntimeBundleCache) {
     };
     std::panic::resume_unwind(Box::new("poison drawio cache"));
 }
-
-fn temp_runtime_path(prefix: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("{prefix}-{}.js", std::process::id()))
-}
-
-fn fake_bundle() -> &'static str {
-    r#"
-function Graph() {}
-const Editor = {
-  convertHtmlToText(value) {
-    return String(value);
-  },
-};
-function GraphViewer() {}
-GraphViewer.createViewerForElement = function createViewerForElement(_container, callback) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "10");
-  svg.setAttribute("viewBox", "0 0 20 10");
-  const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  text.textContent = "drawio";
-  svg.appendChild(text);
-  callback({
-    graph: {
-      getSvg() {
-        return svg;
-      },
-    },
-  });
-};
-"#
-}
-
-fn fake_bundle_with_foreign_object() -> &'static str {
-    FAKE_BUNDLE_WITH_FOREIGN_OBJECT
-}
-
-const FAKE_BUNDLE_WITH_FOREIGN_OBJECT: &str = r#"
-function Graph() {}
-const Editor = {
-  convertHtmlToText(value) {
-    return String(value);
-  },
-};
-function GraphViewer() {}
-GraphViewer.createViewerForElement = function createViewerForElement(_container, callback) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "10");
-  svg.setAttribute("viewBox", "0 0 20 10");
-  const foreignObject = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
-  foreignObject.setAttribute("width", "100%");
-  foreignObject.setAttribute("height", "100%");
-  const div = document.createElement("div");
-  div.textContent = "html label";
-  div.appendChild(document.createElement("br"));
-  div.appendChild(document.createElement("hr"));
-  foreignObject.appendChild(div);
-  svg.appendChild(foreignObject);
-  callback({
-    graph: {
-      getSvg() {
-        return svg;
-      },
-    },
-  });
-};
-"#;
-
-fn fake_bundle_with_cisco_placeholders() -> &'static str {
-    FAKE_BUNDLE_WITH_CISCO_PLACEHOLDERS
-}
-
-const FAKE_BUNDLE_WITH_CISCO_PLACEHOLDERS: &str = r#"
-function Graph() {}
-const Editor = {
-  convertHtmlToText(value) {
-    return String(value);
-  },
-};
-function GraphViewer() {}
-GraphViewer.createViewerForElement = function createViewerForElement(_container, callback) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("width", "20");
-  svg.setAttribute("height", "10");
-  svg.setAttribute("viewBox", "0 0 20 10");
-  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-  group.setAttribute("data-cell-id", "cisco");
-  const fillPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  fillPath.setAttribute("fill", "fillcolor");
-  group.appendChild(fillPath);
-  const secondaryFillStroke = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  secondaryFillStroke.setAttribute("fill", "none");
-  secondaryFillStroke.setAttribute("stroke", "fillcolor2");
-  group.appendChild(secondaryFillStroke);
-  const secondaryStroke = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  secondaryStroke.setAttribute("fill", "none");
-  secondaryStroke.setAttribute("stroke", "strokecolor2");
-  group.appendChild(secondaryStroke);
-  svg.appendChild(group);
-  callback({
-    graph: {
-      getSvg() {
-        return svg;
-      },
-    },
-  });
-};
-"#;
