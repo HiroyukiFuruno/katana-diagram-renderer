@@ -9,6 +9,29 @@ use crate::renderer::backends::html_browser::{
 
 const NO_HORIZONTAL_SCROLL: f32 = 0.0;
 const UNIT_SCROLL_DELTA: f32 = 1.0;
+const STICKY_FRAGMENT_DOCUMENT: &str = r#"<style>
+html, body { margin: 0; }
+.app { display: flex; align-items: flex-start; }
+.sidebar { width: 80px; flex-shrink: 0; height: 100vh; background: #0f172a; position: sticky; top: 0; }
+.main { flex: 1; }
+.spacer { height: 640px; }
+.target { height: 100px; background: #e8c7ff; }
+.tail { height: 400px; }
+</style>
+<div class=app>
+  <aside class=sidebar>TOC</aside>
+  <main class=main><div class=spacer></div><section id=s15 class=target>Target</section><div class=tail></div></main>
+</div>"#;
+const BLOCK_STICKY_FRAGMENT_DOCUMENT: &str = r#"<style>
+html, body { margin: 0; }
+.sidebar { width: 80px; height: 100vh; background: #0f172a; position: sticky; top: 0; }
+main { margin-left: 80px; }
+.spacer { height: 640px; }
+.target { height: 100px; background: #e8c7ff; }
+.tail { height: 400px; }
+</style>
+<aside class=sidebar>TOC</aside>
+<main><div class=spacer></div><section id=s15 class=target>Target</section><div class=tail></div></main>"#;
 
 #[test]
 fn button_click_runs_v8_handler_and_repaints() -> TestResult {
@@ -651,6 +674,61 @@ fn initial_document_fragment_scrolls_before_the_first_public_frame() -> TestResu
     assert_eq!(
         session.latest_frame().map(|frame| frame.origin.as_str()),
         Some("https://example.test/docs/index.html#%74arget")
+    );
+    Ok(())
+}
+
+#[test]
+fn initial_fragment_keeps_top_sticky_sidebar_in_the_viewport() -> TestResult {
+    assert_fragment_keeps_sticky_sidebar(STICKY_FRAGMENT_DOCUMENT)
+}
+
+#[test]
+fn block_layout_keeps_top_sticky_sidebar_in_the_viewport() -> TestResult {
+    assert_fragment_keeps_sticky_sidebar(BLOCK_STICKY_FRAGMENT_DOCUMENT)
+}
+
+fn assert_fragment_keeps_sticky_sidebar(html: &str) -> TestResult {
+    let source = HtmlBrowserSource::new(html, "https://example.test/docs/index.html#s15")
+        .map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(320, 240, 1.0).map_err(to_string)?;
+
+    let session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+
+    assert!(session.scroll_y > 0.0);
+    let frame = session.latest_frame().ok_or("missing sticky frame")?;
+    assert!(
+        frame_matching_rgb_pixels(frame, [15, 23, 42]) >= 80 * 200,
+        "sticky sidebar disappeared after fragment scroll: scroll_y={}",
+        session.scroll_y
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires KATANA_HTML_FIXTURE to point to the supplied desktop HTML"]
+fn external_fragment_keeps_sticky_sidebar_in_the_viewport() -> TestResult {
+    let path = std::env::var("KATANA_HTML_FIXTURE").map_err(to_string)?;
+    let html = std::fs::read_to_string(&path).map_err(to_string)?;
+    let mut origin = url::Url::from_file_path(&path)
+        .map_err(|()| format!("fixture path cannot be converted to a file URL: {path}"))?;
+    origin.set_fragment(Some("s15"));
+    let source = HtmlBrowserSource::new(&html, origin.as_str()).map_err(to_string)?;
+    let viewport = HtmlBrowserViewport::new(1_440, 900, 1.0).map_err(to_string)?;
+
+    let session =
+        super::super::HtmlInteractiveSession::start(source, viewport).map_err(to_string)?;
+
+    assert!(session.scroll_y > 0.0);
+    let frame = session
+        .latest_frame()
+        .ok_or("missing external sticky frame")?;
+    let sidebar_pixels = frame_matching_rgb_pixels(frame, [15, 23, 42]);
+    assert!(
+        sidebar_pixels >= 100_000,
+        "external sticky sidebar disappeared after fragment scroll: scroll_y={}, sidebar_pixels={sidebar_pixels}",
+        session.scroll_y
     );
     Ok(())
 }

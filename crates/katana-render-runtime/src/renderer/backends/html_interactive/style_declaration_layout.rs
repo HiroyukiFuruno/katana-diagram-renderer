@@ -78,6 +78,7 @@ impl CssStyle {
             "relative" => CssPosition::Relative,
             "absolute" => CssPosition::Absolute,
             "fixed" => CssPosition::Fixed,
+            "sticky" => CssPosition::Sticky,
             _ => self.position,
         };
     }

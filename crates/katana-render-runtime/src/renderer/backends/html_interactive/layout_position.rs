@@ -1,5 +1,8 @@
+use super::constants::CONTROL_HEIGHT;
 use super::layout::{ContainingBlock, HtmlLayoutRenderer};
+use super::layout_input::is_checkbox;
 use super::style::{CssPosition, CssStyle};
+use super::types::{ElementRenderContext, LayoutContext};
 
 fn horizontal_position(containing: ContainingBlock, style: &CssStyle, static_x: f32) -> (f32, f32) {
     let left = style.inset_left;
@@ -83,6 +86,41 @@ fn auto_margin_count(style: &CssStyle) -> usize {
 }
 
 impl HtmlLayoutRenderer {
+    pub(super) fn render_positioned_or_flow_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+        style: &mut CssStyle,
+    ) -> f32 {
+        match style.position {
+            CssPosition::Absolute | CssPosition::Fixed => {
+                self.render_absolute_or_fixed_element(element, layout, style)
+            }
+            CssPosition::Sticky => self.render_sticky_element(element, layout, style),
+            CssPosition::Static | CssPosition::Relative => {
+                self.render_styled_element(element, LayoutContext { style, ..layout })
+            }
+        }
+    }
+
+    fn render_absolute_or_fixed_element(
+        &mut self,
+        element: ElementRenderContext<'_>,
+        layout: LayoutContext<'_>,
+        style: &mut CssStyle,
+    ) -> f32 {
+        if element.tag == "input" && is_checkbox(element.attributes) && style.height.is_none() {
+            let outer_height = style.explicit_width(layout.width).unwrap_or(CONTROL_HEIGHT);
+            style.assign_outer_height(outer_height);
+        }
+        let (x, y, width) = self.positioned_geometry(style, (layout.x, layout.y));
+        self.render_styled_element(
+            element,
+            LayoutContext::new(x, y, width, style, layout.details),
+        );
+        layout.y
+    }
+
     pub(super) fn positioned_geometry(
         &self,
         style: &mut CssStyle,
