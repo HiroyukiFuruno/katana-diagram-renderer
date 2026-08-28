@@ -21,6 +21,7 @@ mod layout_media;
 mod layout_paint;
 mod layout_paint_order;
 mod layout_position;
+mod layout_sticky;
 mod layout_structures;
 mod layout_summary;
 mod layout_table;

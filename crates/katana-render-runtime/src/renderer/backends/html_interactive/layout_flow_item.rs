@@ -46,13 +46,20 @@ impl HtmlLayoutRenderer {
         if let Some(height) = assigned_height {
             style.assign_margin_box_height(height);
         }
-        self.render_styled_element(
+        let sticky_y = if style.position == super::style::CssPosition::Sticky {
+            self.sticky_y(&style, layout.y)
+        } else {
+            layout.y
+        };
+        let bottom = self.render_styled_element(
             element,
             LayoutContext {
                 style: &style,
+                y: sticky_y,
                 ..layout
             },
-        )
+        );
+        layout.y + (bottom - sticky_y)
     }
 
     pub(super) fn measure_flow_node_height(

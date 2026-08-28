@@ -119,6 +119,15 @@ mod tests {
     }
 
     #[test]
+    fn position_sticky_is_preserved_as_a_typed_layout_mode() {
+        let mut style = CssStyle::browser_default();
+
+        style.apply("position", "sticky");
+
+        assert_eq!(style.position, CssPosition::Sticky);
+    }
+
+    #[test]
     fn float_declarations_accept_left_right_and_none_without_inheritance() {
         let mut style = CssStyle::browser_default();
         style.apply("float", "left");

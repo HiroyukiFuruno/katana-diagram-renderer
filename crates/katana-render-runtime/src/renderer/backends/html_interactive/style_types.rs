@@ -90,6 +90,7 @@ pub(in crate::renderer::backends::html_interactive) enum CssPosition {
     Relative,
     Absolute,
     Fixed,
+    Sticky,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

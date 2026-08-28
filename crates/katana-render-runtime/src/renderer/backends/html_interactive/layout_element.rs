@@ -1,9 +1,7 @@
 use super::super::html_document::HtmlDocumentNode;
-use super::constants::CONTROL_HEIGHT;
 use super::document::attribute;
 use super::layout::HtmlLayoutRenderer;
 use super::layout_container::horizontal_box_geometry;
-use super::layout_input::is_checkbox;
 use super::style::{CssPosition, CssStyle};
 use super::types::{
     DetailsContext, ElementBox, ElementRenderContext, HitTarget, HitTargetKind, LayoutContext,
@@ -48,28 +46,6 @@ impl HtmlLayoutRenderer {
         let bottom = self.render_positioned_or_flow_element(element, layout, &mut style);
         self.finish_element_paint(paint_start, element.node_id, &style);
         bottom
-    }
-
-    fn render_positioned_or_flow_element(
-        &mut self,
-        element: ElementRenderContext<'_>,
-        layout: LayoutContext<'_>,
-        style: &mut CssStyle,
-    ) -> f32 {
-        if matches!(style.position, CssPosition::Absolute | CssPosition::Fixed) {
-            if element.tag == "input" && is_checkbox(element.attributes) && style.height.is_none() {
-                let outer_height = style.explicit_width(layout.width).unwrap_or(CONTROL_HEIGHT);
-                style.assign_outer_height(outer_height);
-            }
-            let (x, y, width) = self.positioned_geometry(style, (layout.x, layout.y));
-            self.render_styled_element(
-                element,
-                LayoutContext::new(x, y, width, style, layout.details),
-            );
-            layout.y
-        } else {
-            self.render_styled_element(element, LayoutContext { style, ..layout })
-        }
     }
 
     fn finish_element_paint(&mut self, paint_start: usize, node_id: u64, style: &CssStyle) {
