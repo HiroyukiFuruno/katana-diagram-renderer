@@ -164,6 +164,23 @@ fn html_release_flow_never_requires_an_external_browser() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn linux_release_workflows_install_the_runtime_test_prerequisites()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    for workflow_path in [
+        ".github/workflows/release-preflight.yml",
+        ".github/workflows/release.yml",
+    ] {
+        let workflow = std::fs::read_to_string(root.join(workflow_path))?;
+        assert!(
+            workflow.contains("sudo apt-get install -y fonts-noto-cjk graphviz"),
+            "{workflow_path} must install the Linux runtime test prerequisites"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn html_platform_prerequisite_and_fallback_policy_is_contractually_documented()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;

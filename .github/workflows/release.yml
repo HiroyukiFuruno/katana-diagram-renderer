@@ -70,6 +70,11 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
 
+      - name: Install Linux runtime test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk graphviz
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
