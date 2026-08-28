@@ -78,3 +78,35 @@ test("PlantUML package include は checksum manifest だけを更新する", () 
 
   expect(updated).toBe('include = ["vendor/plantuml/1.2026.4/plantuml.jar.sha256",]\n');
 });
+
+test("圧縮配布資産の package include は全ファイルを同じ version へ更新する", () => {
+  const mermaid = {
+    kind: "mermaid",
+    displayName: "Mermaid.js",
+    version: "11.17.2",
+    checksum: "checksum",
+    fileName: "mermaid.min.js",
+    rustVersionConst: "MERMAID_JS_VERSION",
+    rustChecksumConst: "MERMAID_JS_CHECKSUM",
+    rustDownloadConst: "MERMAID_DOWNLOAD_URL",
+    latestUrl: "latest",
+    releasePageUrl: (version: string) => version,
+    downloadUrl: (version: string) => version,
+  } as const;
+  const source = [
+    "include = [",
+    '    "vendor/mermaid/11.17.2/mermaid.min.js.br",',
+    '    "vendor/mermaid/11.17.2/mermaid.min.js.sha256",',
+    "]",
+  ].join("\n");
+
+  const updated = new RuntimeSourceUpdater().replacePackageIncludeVersion(
+    source,
+    mermaid,
+    "11.18.0",
+  );
+
+  expect(updated).toContain('"vendor/mermaid/11.18.0/mermaid.min.js.br",');
+  expect(updated).toContain('"vendor/mermaid/11.18.0/mermaid.min.js.sha256",');
+  expect(updated).not.toContain("11.17.2");
+});

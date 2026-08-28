@@ -32,6 +32,11 @@ export class DependencyUpdateAllCommand {
     for (const definition of this.definitions) {
       await this.updateRuntimeAsset(definition);
     }
+    await this.runner("bun", [
+      "run",
+      "scripts/runtime-assets/runtime-package-asset-compressor.ts",
+      "--write",
+    ]);
   }
 
   private async updateRuntimeAsset(definition: RuntimeAssetDefinition): Promise<void> {

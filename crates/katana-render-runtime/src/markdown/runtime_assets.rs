@@ -1,9 +1,15 @@
 use std::{
+    io::Read,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static RUNTIME_ASSET_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static MERMAID_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+static DRAWIO_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 
 pub const MERMAID_JS_VERSION: &str = "11.17.2";
 pub const MERMAID_JS_CHECKSUM: &str =
@@ -37,7 +43,17 @@ pub(crate) struct RuntimeAsset {
     kind: &'static str,
     version: &'static str,
     filename: &'static str,
-    bytes: &'static [u8],
+    source: RuntimeAssetSource,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeAssetSource {
+    #[cfg(test)]
+    Raw(&'static [u8]),
+    Brotli {
+        bytes: &'static [u8],
+        cache: &'static OnceLock<Result<Vec<u8>, String>>,
+    },
 }
 
 impl RuntimeAsset {
@@ -46,7 +62,10 @@ impl RuntimeAsset {
             kind: "mermaid",
             version: MERMAID_JS_VERSION,
             filename: "mermaid.min.js",
-            bytes: include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js"),
+            source: RuntimeAssetSource::Brotli {
+                bytes: include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js.br"),
+                cache: &MERMAID_RUNTIME_ASSET_BYTES,
+            },
         }
     }
 
@@ -55,7 +74,10 @@ impl RuntimeAsset {
             kind: "drawio",
             version: DRAWIO_JS_VERSION,
             filename: "drawio.min.js",
-            bytes: include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js"),
+            source: RuntimeAssetSource::Brotli {
+                bytes: include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js.br"),
+                cache: &DRAWIO_RUNTIME_ASSET_BYTES,
+            },
         }
     }
 
@@ -65,7 +87,9 @@ impl RuntimeAsset {
             kind: "zenuml-core",
             version: ZENUML_CORE_JS_VERSION,
             filename: "zenuml.js",
-            bytes: include_bytes!("../../vendor/zenuml-core/3.47.9/zenuml.js"),
+            source: RuntimeAssetSource::Raw(include_bytes!(
+                "../../vendor/zenuml-core/3.47.9/zenuml.js"
+            )),
         }
     }
 
@@ -90,9 +114,21 @@ impl RuntimeAsset {
         Ok(path)
     }
 
+    fn bytes(&self) -> Result<&'static [u8], String> {
+        match self.source {
+            #[cfg(test)]
+            RuntimeAssetSource::Raw(bytes) => Ok(bytes),
+            RuntimeAssetSource::Brotli { bytes, cache } => cache
+                .get_or_init(|| decompress_brotli(bytes))
+                .as_ref()
+                .map(Vec::as_slice)
+                .map_err(Clone::clone),
+        }
+    }
+
     fn write_atomically(&self, path: &Path, parent: &Path) -> Result<(), String> {
         let temp_path = self.temporary_write_path(parent);
-        std::fs::write(&temp_path, self.bytes).map_err(runtime_asset_error)?;
+        std::fs::write(&temp_path, self.bytes()?).map_err(runtime_asset_error)?;
         match std::fs::rename(&temp_path, path) {
             Ok(()) => Ok(()),
             #[cfg(windows)]
@@ -130,11 +166,20 @@ impl RuntimeAsset {
 
     fn exists_with_same_bytes(&self, path: &Path) -> Result<bool, String> {
         match std::fs::read(path) {
-            Ok(existing) => Ok(existing == self.bytes),
+            Ok(existing) => Ok(existing == self.bytes()?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(runtime_asset_error(error)),
         }
     }
+}
+
+fn decompress_brotli(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decompressor = brotli_decompressor::Decompressor::new(compressed, 4096);
+    let mut bytes = Vec::new();
+    decompressor
+        .read_to_end(&mut bytes)
+        .map_err(runtime_asset_error)?;
+    Ok(bytes)
 }
 
 fn runtime_asset_error(error: std::io::Error) -> String {

@@ -110,8 +110,31 @@ fn materialize_is_safe_for_parallel_callers() {
     }
     let stored = std::fs::read(path.clone());
     let asset = RuntimeAsset::mermaid();
-    assert!(matches!(stored, Ok(bytes) if bytes.as_slice() == asset.bytes));
+    let expected = asset.bytes();
+    assert!(matches!((stored, expected), (Ok(bytes), Ok(expected)) if bytes == expected));
     remove_parent(&path);
+}
+
+#[test]
+fn compressed_assets_restore_the_pinned_vendor_bytes() {
+    let mermaid = RuntimeAsset::mermaid().bytes();
+    let drawio = RuntimeAsset::drawio().bytes();
+
+    assert!(matches!(
+        mermaid,
+        Ok(bytes) if bytes == include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js").as_slice()
+    ));
+    assert!(matches!(
+        drawio,
+        Ok(bytes) if bytes == include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js").as_slice()
+    ));
+}
+
+#[test]
+fn invalid_compressed_asset_is_reported() {
+    let result = super::decompress_brotli(b"not a brotli stream");
+
+    assert!(result.is_err());
 }
 
 #[test]

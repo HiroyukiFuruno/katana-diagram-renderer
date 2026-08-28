@@ -9,6 +9,7 @@ import {
   type RuntimeAssetDefinition,
   RuntimeAssetPaths,
 } from "./runtime-asset-common";
+import { RuntimePackageAssetCompressor } from "./runtime-package-asset-compressor";
 
 class RuntimeAssetDownloader {
   async download(definition: RuntimeAssetDefinition, version: string): Promise<void> {
@@ -143,7 +144,7 @@ export class RuntimeSourceUpdater {
   ): string {
     const kind = this.escapePattern(definition.kind);
     const fileName = this.escapePattern(definition.fileName);
-    const pattern = new RegExp(`(vendor/${kind}/)[^/]+(/${fileName})`);
+    const pattern = new RegExp(`(vendor/${kind}/)[^/]+(/${fileName}(?:\\.br)?)`);
     if (!pattern.test(source)) {
       throw new Error(`Runtime asset include path not found: ${definition.kind}`);
     }
@@ -163,7 +164,7 @@ export class RuntimeSourceUpdater {
       }
       return source.replace(pattern, `$1${version}$2`);
     }
-    const pattern = new RegExp(`("vendor/${kind}/)[^/]+(/\\*\\*",)`);
+    const pattern = new RegExp(`("vendor/${kind}/)[^/]+(/[^"]+",)`, "g");
     if (!pattern.test(source)) {
       throw new Error(`Runtime asset package include not found: ${definition.kind}`);
     }
@@ -184,6 +185,9 @@ class UpdateCommand {
   async run() {
     await new RuntimeAssetDownloader().download(this.definition, this.version);
     const checksum = RuntimeAssetChecksum.writeChecksumFile(this.definition, this.version);
+    if (RuntimePackageAssetCompressor.supports(this.definition)) {
+      new RuntimePackageAssetCompressor().write(this.definition, this.version);
+    }
     if (this.definition.kind === "plantuml") {
       fs.rmSync(RuntimeAssetPaths.assetFile(this.definition, this.version), { force: true });
     }

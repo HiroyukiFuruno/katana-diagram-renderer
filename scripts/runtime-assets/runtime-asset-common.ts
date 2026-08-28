@@ -154,6 +154,10 @@ export const RuntimeAssetPaths = {
     return `${RuntimeAssetPaths.assetFile(definition, version)}.sha256`;
   },
 
+  compressedAssetFile(definition: RuntimeAssetDefinition, version = definition.version): string {
+    return `${RuntimeAssetPaths.assetFile(definition, version)}.br`;
+  },
+
   justVersionVariable(definition: RuntimeAssetDefinition): string {
     if (definition.kind === "plantuml") {
       return "PLANTUML_JAR_VERSION";

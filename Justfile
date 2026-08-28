@@ -139,10 +139,27 @@ plantuml-runtime-package-check:
 
 # Run TypeScript tests for runtime asset helper scripts
 runtime-asset-script-test:
-    bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts scripts/runtime-assets/depends-update-all_test.ts
+    bun test --path-ignore-patterns 'tmp/**' scripts/runtime-assets/runtime-asset-common_test.ts scripts/runtime-assets/update_test.ts scripts/runtime-assets/latest-check_test.ts scripts/runtime-assets/update_zenuml_test.ts scripts/runtime-assets/depends-update-all_test.ts scripts/runtime-assets/runtime-package-asset-compressor_test.ts
+
+[private]
+runtime-package-asset-check:
+    bun run scripts/runtime-assets/runtime-package-asset-compressor.ts --check
+    @package_files="$({{CARGO}} package -p katana-render-runtime --locked --allow-dirty --list)"; \
+    for kind_file in \
+      "drawio/{{DRAWIO_JS_VERSION}}/drawio.min.js" \
+      "mermaid/{{MERMAID_JS_VERSION}}/mermaid.min.js"; do \
+        if ! printf '%s\n' "$package_files" | grep -qx "vendor/$kind_file.br"; then \
+          echo "missing compressed runtime package asset: vendor/$kind_file.br" >&2; \
+          exit 1; \
+        fi; \
+        if printf '%s\n' "$package_files" | grep -qx "vendor/$kind_file"; then \
+          echo "raw runtime asset must not be included in the crates.io package: vendor/$kind_file" >&2; \
+          exit 1; \
+        fi; \
+      done
 
 # Run the local quality gate
-check: fmt-check lint runtime-bundle-check unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
+check: fmt-check lint runtime-bundle-check runtime-asset-script-test unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-package-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
     @echo "checks passed"
 
 # Sweep old build artifacts locally (older than 7 days)
