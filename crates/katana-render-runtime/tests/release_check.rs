@@ -24,6 +24,17 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
+fn release_verify_tests_the_packaged_library_sources() -> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let recipe = recipe_body(&justfile, "release-verify")?;
+
+    assert!(recipe.contains(
+        "test --manifest-path \"target/package/katana-render-runtime-{{VERSION_BARE}}/Cargo.toml\" --lib --locked"
+    ));
+    Ok(())
+}
+
+#[test]
 fn release_target_check_requires_v0_4_19_intent() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
     assert!(release_target_check(root, "0.4.19", "0.4.18", "HEAD")?);

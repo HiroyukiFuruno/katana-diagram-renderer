@@ -20,7 +20,7 @@ impl DrawioJsRuntimeOps {
         preset: &DiagramColorPreset,
     ) -> Result<String, String> {
         let bundle = read_drawio_bundle(drawio_js)?;
-        let request = DrawioRenderRequest::new(source, preset);
+        let request = DrawioRenderRequest::new(source, preset)?;
         let request_json = request.to_json_value().to_string();
         let scripts = DrawioRuntimeScripts::build(&bundle, &request_json);
         let svg = DiagramV8Runtime::render(&scripts)?;
@@ -36,13 +36,13 @@ struct DrawioRenderRequest<'a> {
 }
 
 impl<'a> DrawioRenderRequest<'a> {
-    fn new(source: &'a str, preset: &'a DiagramColorPreset) -> Self {
-        Self {
+    fn new(source: &'a str, preset: &'a DiagramColorPreset) -> Result<Self, String> {
+        Ok(Self {
             source,
             dark_mode: preset.dark_mode,
             background: preset.background.as_ref(),
-            resources: DrawioResourceCatalog::builtin(source),
-        }
+            resources: DrawioResourceCatalog::builtin(source)?,
+        })
     }
 
     fn to_json_value(&self) -> serde_json::Value {

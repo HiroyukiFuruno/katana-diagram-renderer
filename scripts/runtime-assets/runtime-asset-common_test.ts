@@ -9,6 +9,7 @@ import {
 test("runtime asset path は version を含む", () => {
   const mermaid = RuntimeAssetCatalog.byKind("mermaid");
   const zenuml = RuntimeAssetCatalog.byKind("mermaid-zenuml");
+  const zenumlCore = RuntimeAssetCatalog.byKind("zenuml-core");
   const drawio = RuntimeAssetCatalog.byKind("drawio");
   const mathjax = RuntimeAssetCatalog.byKind("mathjax");
   const plantuml = RuntimeAssetCatalog.byKind("plantuml");
@@ -18,6 +19,9 @@ test("runtime asset path は version を含む", () => {
   );
   expect(RuntimeAssetPaths.assetFile(zenuml)).toBe(
     `crates/katana-render-runtime/vendor/mermaid-zenuml/${zenuml.version}/mermaid-zenuml.min.js`,
+  );
+  expect(RuntimeAssetPaths.assetFile(zenumlCore)).toBe(
+    `crates/katana-render-runtime/vendor/zenuml-core/${zenumlCore.version}/zenuml.js`,
   );
   expect(RuntimeAssetPaths.assetFile(drawio)).toBe(
     `crates/katana-render-runtime/vendor/drawio/${drawio.version}/drawio.min.js`,
@@ -29,12 +33,14 @@ test("runtime asset path は version を含む", () => {
     `crates/katana-render-runtime/vendor/plantuml/${plantuml.version}/plantuml.jar`,
   );
   expect(RuntimeAssetPaths.justVersionVariable(zenuml)).toBe("MERMAID_ZENUML_JS_VERSION");
+  expect(RuntimeAssetPaths.justVersionVariable(zenumlCore)).toBe("ZENUML_CORE_JS_VERSION");
   expect(RuntimeAssetPaths.justVersionVariable(plantuml)).toBe("PLANTUML_JAR_VERSION");
 });
 
 test("runtime asset checksum は固定ファイルと一致する", () => {
   const mermaid = RuntimeAssetCatalog.byKind("mermaid");
   const zenuml = RuntimeAssetCatalog.byKind("mermaid-zenuml");
+  const zenumlCore = RuntimeAssetCatalog.byKind("zenuml-core");
   const drawio = RuntimeAssetCatalog.byKind("drawio");
   const mathjax = RuntimeAssetCatalog.byKind("mathjax");
   const plantuml = RuntimeAssetCatalog.byKind("plantuml");
@@ -44,6 +50,9 @@ test("runtime asset checksum は固定ファイルと一致する", () => {
   );
   expect(RuntimeAssetChecksum.digestFile(RuntimeAssetPaths.assetFile(zenuml))).toBe(
     zenuml.checksum,
+  );
+  expect(RuntimeAssetChecksum.digestFile(RuntimeAssetPaths.assetFile(zenumlCore))).toBe(
+    zenumlCore.checksum,
   );
   expect(RuntimeAssetChecksum.digestFile(RuntimeAssetPaths.assetFile(drawio))).toBe(
     drawio.checksum,

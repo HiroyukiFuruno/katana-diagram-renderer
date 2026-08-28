@@ -1,5 +1,5 @@
+use crate::markdown::runtime_asset_archive::RuntimeAssetSource;
 use std::{
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         OnceLock,
@@ -10,6 +10,14 @@ use std::{
 static RUNTIME_ASSET_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static MERMAID_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 static DRAWIO_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+#[cfg(test)]
+static ZENUML_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+
+#[cfg(test)]
+const ZENUML_RUNTIME_ASSET_ARCHIVE: &[u8] =
+    include_bytes!("generated/zenuml-runtime-assets.bin.br");
+#[cfg(test)]
+include!("generated/zenuml-runtime-assets-index.rs");
 
 pub const MERMAID_JS_VERSION: &str = "11.17.2";
 pub const MERMAID_JS_CHECKSUM: &str =
@@ -46,16 +54,6 @@ pub(crate) struct RuntimeAsset {
     source: RuntimeAssetSource,
 }
 
-#[derive(Clone, Copy)]
-enum RuntimeAssetSource {
-    #[cfg(test)]
-    Raw(&'static [u8]),
-    Brotli {
-        bytes: &'static [u8],
-        cache: &'static OnceLock<Result<Vec<u8>, String>>,
-    },
-}
-
 impl RuntimeAsset {
     pub(crate) fn mermaid() -> Self {
         Self {
@@ -82,14 +80,34 @@ impl RuntimeAsset {
     }
 
     #[cfg(test)]
+    pub(crate) fn mermaid_zenuml() -> Self {
+        Self {
+            kind: "mermaid-zenuml",
+            version: MERMAID_ZENUML_JS_VERSION,
+            filename: "mermaid-zenuml.min.js",
+            source: RuntimeAssetSource::BrotliRange {
+                bytes: ZENUML_RUNTIME_ASSET_ARCHIVE,
+                cache: &ZENUML_RUNTIME_ASSET_BYTES,
+                start: MERMAID_ZENUML_ASSET_OFFSET,
+                length: MERMAID_ZENUML_ASSET_LENGTH,
+                archive_length: ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+            },
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn zenuml_core() -> Self {
         Self {
             kind: "zenuml-core",
             version: ZENUML_CORE_JS_VERSION,
             filename: "zenuml.js",
-            source: RuntimeAssetSource::Raw(include_bytes!(
-                "../../vendor/zenuml-core/3.47.9/zenuml.js"
-            )),
+            source: RuntimeAssetSource::BrotliRange {
+                bytes: ZENUML_RUNTIME_ASSET_ARCHIVE,
+                cache: &ZENUML_RUNTIME_ASSET_BYTES,
+                start: ZENUML_CORE_ASSET_OFFSET,
+                length: ZENUML_CORE_ASSET_LENGTH,
+                archive_length: ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+            },
         }
     }
 
@@ -114,16 +132,8 @@ impl RuntimeAsset {
         Ok(path)
     }
 
-    fn bytes(&self) -> Result<&'static [u8], String> {
-        match self.source {
-            #[cfg(test)]
-            RuntimeAssetSource::Raw(bytes) => Ok(bytes),
-            RuntimeAssetSource::Brotli { bytes, cache } => cache
-                .get_or_init(|| decompress_brotli(bytes))
-                .as_ref()
-                .map(Vec::as_slice)
-                .map_err(Clone::clone),
-        }
+    pub(crate) fn bytes(&self) -> Result<&'static [u8], String> {
+        self.source.bytes()
     }
 
     fn write_atomically(&self, path: &Path, parent: &Path) -> Result<(), String> {
@@ -171,15 +181,6 @@ impl RuntimeAsset {
             Err(error) => Err(runtime_asset_error(error)),
         }
     }
-}
-
-fn decompress_brotli(compressed: &[u8]) -> Result<Vec<u8>, String> {
-    let mut decompressor = brotli_decompressor::Decompressor::new(compressed, 4096);
-    let mut bytes = Vec::new();
-    decompressor
-        .read_to_end(&mut bytes)
-        .map_err(runtime_asset_error)?;
-    Ok(bytes)
 }
 
 fn runtime_asset_error(error: std::io::Error) -> String {

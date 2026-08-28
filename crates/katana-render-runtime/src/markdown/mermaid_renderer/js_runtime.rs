@@ -24,7 +24,7 @@ impl MermaidJsRuntimeOps {
         let request = MermaidRenderRequest::new(source, preset);
         let bundle = read_mermaid_bundle(mermaid_js)?;
         let request_json = request.to_json_value().to_string();
-        let scripts = MermaidRuntimeScripts::build(&bundle, &request_json);
+        let scripts = MermaidRuntimeScripts::build(&bundle, &request_json, request.diagram_type);
         let svg = DiagramV8Runtime::render(&scripts)?;
         rendered_svg(svg)
     }

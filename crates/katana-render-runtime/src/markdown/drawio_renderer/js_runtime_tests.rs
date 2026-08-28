@@ -9,6 +9,7 @@ use super::{
     read_drawio_bundle, read_drawio_bundle_with_cache, rendered_svg,
 };
 use crate::markdown::color_preset::DiagramColorPreset;
+use crate::markdown::runtime_assets::RuntimeAsset;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -135,12 +136,34 @@ fn render_reports_missing_bundle_through_surface_path() {
 }
 
 #[test]
-fn request_fields_come_from_preset_not_global_state() {
+fn request_fields_come_from_preset_not_global_state() -> Result<(), String> {
     DiagramColorPreset::set_dark_mode(true);
-    let request = DrawioRenderRequest::new("<mxGraphModel />", DiagramColorPreset::light());
+    let request = DrawioRenderRequest::new("<mxGraphModel />", DiagramColorPreset::light())?;
 
     assert!(!request.dark_mode);
     assert_eq!(request.background, "transparent");
+    Ok(())
+}
+
+#[test]
+fn cached_remote_image_is_embedded_from_packaged_resources() -> Result<(), String> {
+    const URL: &str = "https://upload.wikimedia.org/wikipedia/de/8/89/FirefoxLogo.svg";
+    let path = temp_runtime_path("krr-drawio-cached-remote-image");
+    RuntimeAsset::drawio().materialize_at(path.clone())?;
+    let source = format!(
+        r#"<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" style="shape=image;image={URL}" vertex="1" parent="1"><mxGeometry width="230" height="220" as="geometry"/></mxCell></root></mxGraphModel>"#
+    );
+
+    let rendered = DrawioJsRuntimeOps::render(&source, &path, DiagramColorPreset::dark());
+    let _ = std::fs::remove_file(path);
+
+    assert!(
+        rendered
+            .as_ref()
+            .is_ok_and(|svg| { svg.contains("data:image/svg+xml;base64,") && !svg.contains(URL) }),
+        "{rendered:?}"
+    );
+    Ok(())
 }
 
 #[test]

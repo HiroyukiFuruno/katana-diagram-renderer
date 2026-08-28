@@ -2,7 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export type RuntimeAssetKind = "mermaid" | "mermaid-zenuml" | "drawio" | "mathjax" | "plantuml";
+export type RuntimeAssetKind =
+  | "mermaid"
+  | "mermaid-zenuml"
+  | "zenuml-core"
+  | "drawio"
+  | "mathjax"
+  | "plantuml";
 
 export interface RuntimeAssetDefinition {
   readonly kind: RuntimeAssetKind;
@@ -48,6 +54,21 @@ const DEFINITIONS: RuntimeAssetDefinition[] = [
       `https://cdn.jsdelivr.net/npm/@mermaid-js/mermaid-zenuml@${version}/dist/mermaid-zenuml.min.js`,
     downloadUrl: (version: string) =>
       `https://cdn.jsdelivr.net/npm/@mermaid-js/mermaid-zenuml@${version}/dist/mermaid-zenuml.min.js`,
+  },
+  {
+    kind: "zenuml-core",
+    displayName: "ZenUML Core",
+    version: "3.47.9",
+    checksum: "ece11a311907401113f965e110c25c04c6a9b3dcbbb234bf2cd593a3f3ebe3df",
+    fileName: "zenuml.js",
+    rustVersionConst: "ZENUML_CORE_JS_VERSION",
+    rustChecksumConst: "ZENUML_CORE_JS_CHECKSUM",
+    rustDownloadConst: "ZENUML_CORE_DOWNLOAD_URL",
+    latestUrl: "https://registry.npmjs.org/@zenuml/core/latest",
+    releasePageUrl: (version: string) =>
+      `https://cdn.jsdelivr.net/npm/@zenuml/core@${version}/dist/zenuml.js`,
+    downloadUrl: (version: string) =>
+      `https://cdn.jsdelivr.net/npm/@zenuml/core@${version}/dist/zenuml.js`,
   },
   {
     kind: "drawio",
@@ -182,17 +203,6 @@ export const RuntimeAssetPaths = {
 
   rendererCargoToml(): string {
     return path.join("crates", "katana-render-runtime", "Cargo.toml");
-  },
-
-  mermaidRuntimeScriptsRust(): string {
-    return path.join(
-      "crates",
-      "katana-render-runtime",
-      "src",
-      "markdown",
-      "mermaid_renderer",
-      "js_runtime_scripts.rs",
-    );
   },
 
   mermaidDiagramUpdateScript(): string {

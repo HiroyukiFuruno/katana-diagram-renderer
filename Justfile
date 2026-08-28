@@ -115,7 +115,19 @@ runtime-bundle-package-check:
           echo "missing runtime bundle package file: $file" >&2; \
           exit 1; \
         fi; \
-      done
+      done; \
+    if ! printf '%s\n' "$package_files" | grep -qx "src/markdown/drawio_renderer/generated/drawio-resources.bin.br"; then \
+      echo "missing compressed Draw.io resource archive" >&2; \
+      exit 1; \
+    fi; \
+    if ! printf '%s\n' "$package_files" | grep -qx "src/markdown/generated/zenuml-runtime-assets.bin.br"; then \
+      echo "missing compressed ZenUML runtime asset archive" >&2; \
+      exit 1; \
+    fi; \
+    if printf '%s\n' "$package_files" | grep -q "src/markdown/drawio_renderer/js_runtime/resources/img/"; then \
+      echo "raw Draw.io image resources must not be included in the crates.io package" >&2; \
+      exit 1; \
+    fi
 
 # Verify the in-process HTML runtime source is included in the library crate package
 html-runtime-package-check:
@@ -182,6 +194,7 @@ release-verify: release-target-check
     bash scripts/release/verify-version.sh "{{VERSION}}"
     bash scripts/release/verify-internal-dependencies.sh "{{VERSION}}"
     {{CARGO}} package -p katana-render-runtime --locked --allow-dirty
+    {{CARGO}} test --manifest-path "target/package/katana-render-runtime-{{VERSION_BARE}}/Cargo.toml" --lib --locked
     {{CARGO}} package -p katana-render-runtime-cli --locked --allow-dirty --list >/dev/null
     bash scripts/release/verify-crate-size.sh katana-render-runtime "{{VERSION}}"
     {{CARGO}} publish -p katana-render-runtime --dry-run --locked --allow-dirty
@@ -210,6 +223,7 @@ depends-update-all:
     bun add -d typescript@6.0.3
     bun run scripts/runtime-assets/depends-update-all.ts
     bun run scripts/drawio/resource-update.ts --resources "{{DRAWIO_RESOURCE_DIR}}" --manifest "{{DRAWIO_RESOURCE_MANIFEST}}"
+    bun run scripts/runtime-assets/runtime-package-asset-compressor.ts --write
     just runtime-bundle-build
     just mermaid-reference-all
     just mermaid-compare-full

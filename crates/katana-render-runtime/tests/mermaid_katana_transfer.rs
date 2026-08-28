@@ -111,6 +111,24 @@ fn japanese_labels_render_when_runtime_is_available() -> TestResult<()> {
 }
 
 #[test]
+fn zenuml_renders_through_the_public_mermaid_surface() -> TestResult<()> {
+    let _guard = env_guard()?;
+    if mermaid_renderer::MermaidBinaryOps::find_mermaid_js()?.is_none() {
+        return Ok(());
+    }
+
+    let source = format!(
+        "zenuml\ntitle Order Service {}\n@Actor Client\nClient.method()",
+        std::process::id()
+    );
+    let svg = render_svg(source)?;
+
+    assert!(svg.contains("<svg"));
+    assert!(svg.contains("Order Service"));
+    Ok(())
+}
+
+#[test]
 fn concurrent_mermaid_rendering_succeeds_when_runtime_is_available() -> TestResult<()> {
     let _guard = env_guard()?;
     if mermaid_renderer::MermaidBinaryOps::find_mermaid_js()?.is_none() {

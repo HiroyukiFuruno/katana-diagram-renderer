@@ -69,6 +69,7 @@ export class RuntimeSourceUpdater {
     );
     if (
       definition.kind !== "mermaid-zenuml" &&
+      definition.kind !== "zenuml-core" &&
       definition.kind !== "plantuml" &&
       definition.kind !== "mathjax"
     ) {
@@ -81,7 +82,6 @@ export class RuntimeSourceUpdater {
     if (definition.kind !== "mermaid-zenuml") {
       return;
     }
-    this.updateVendorReference(RuntimeAssetPaths.mermaidRuntimeScriptsRust(), definition, version);
     this.updateVendorReference(RuntimeAssetPaths.mermaidDiagramUpdateScript(), definition, version);
   }
 
@@ -201,7 +201,7 @@ const CliOptions = {
   command(argv: string[]): UpdateCommand {
     if (argv.length !== 2) {
       throw new Error(
-        "Usage: bun run scripts/runtime-assets/update.ts <mermaid|mermaid-zenuml|drawio|mathjax|plantuml> <version>",
+        "Usage: bun run scripts/runtime-assets/update.ts <mermaid|mermaid-zenuml|zenuml-core|drawio|mathjax|plantuml> <version>",
       );
     }
     return new UpdateCommand(

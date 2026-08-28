@@ -4,21 +4,31 @@ use crate::markdown::diagram_js_runtime::DiagramRuntimeScript;
 pub(super) struct MermaidRuntimeScripts;
 
 impl MermaidRuntimeScripts {
-    pub(super) fn build<'a>(bundle: &'a str, request_json: &str) -> Vec<DiagramRuntimeScript<'a>> {
-        Self::build_with_zenuml(bundle, MERMAID_ZENUML, request_json)
+    pub(super) fn build<'a>(
+        bundle: &'a str,
+        request_json: &str,
+        diagram_type: MermaidDiagramType,
+    ) -> Vec<DiagramRuntimeScript<'a>> {
+        Self::build_scripts(
+            bundle,
+            MERMAID_ZENUML_RUNTIME,
+            request_json,
+            diagram_type == MermaidDiagramType::Zenuml,
+        )
     }
 
-    fn build_with_zenuml<'a>(
+    fn build_scripts<'a>(
         bundle: &'a str,
         zenuml_bundle: &'a str,
         request_json: &str,
+        uses_zenuml_runtime: bool,
     ) -> Vec<DiagramRuntimeScript<'a>> {
         let mut scripts = vec![
             DiagramRuntimeScript::borrowed("mermaid-runtime.min.js", MERMAID_RUNTIME),
             DiagramRuntimeScript::borrowed("mermaid.min.js", bundle),
             DiagramRuntimeScript::borrowed("mermaid-zenuml.min.js", zenuml_bundle),
         ];
-        if request_uses_zenuml_runtime(request_json) {
+        if uses_zenuml_runtime {
             scripts.push(DiagramRuntimeScript::borrowed(
                 "zenuml-runtime.min.js",
                 ZENUML_RUNTIME,
@@ -30,12 +40,27 @@ impl MermaidRuntimeScripts {
         ));
         scripts
     }
+
+    #[cfg(test)]
+    fn build_with_zenuml<'a>(
+        bundle: &'a str,
+        zenuml_bundle: &'a str,
+        request_json: &str,
+    ) -> Vec<DiagramRuntimeScript<'a>> {
+        Self::build_scripts(
+            bundle,
+            zenuml_bundle,
+            request_json,
+            request_uses_zenuml_runtime(request_json),
+        )
+    }
 }
 
 fn render_script(request_json: &str) -> String {
     format!("katanaRunMermaidRuntime({request_json});")
 }
 
+#[cfg(test)]
 fn request_uses_zenuml_runtime(request_json: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(request_json) else {
         return false;
@@ -54,8 +79,8 @@ fn request_uses_zenuml_runtime(request_json: &str) -> bool {
 }
 
 const MERMAID_RUNTIME: &str = include_str!("../diagram_runtime/generated/mermaid-runtime.min.js");
-const MERMAID_ZENUML: &str =
-    include_str!("../../../vendor/mermaid-zenuml/0.2.3/mermaid-zenuml.min.js");
+const MERMAID_ZENUML_RUNTIME: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/mermaid-zenuml.min.js"));
 const ZENUML_RUNTIME: &str = include_str!("../diagram_runtime/generated/zenuml-runtime.min.js");
 
 #[cfg(test)]
@@ -67,15 +92,12 @@ mod entrypoint_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::MermaidRuntimeScripts;
-    use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
-
-    const MERMAID_TEST_BUNDLE: &str =
-        include_str!("../../../vendor/mermaid/11.17.2/mermaid.min.js");
+    use super::{MermaidDiagramType, MermaidRuntimeScripts};
+    use crate::markdown::{diagram_js_runtime::DiagramV8Runtime, runtime_assets::RuntimeAsset};
 
     #[test]
     fn build_includes_bundle_and_render_script() {
-        let scripts = MermaidRuntimeScripts::build("bundle", "{}");
+        let scripts = MermaidRuntimeScripts::build_with_zenuml("bundle", "plugin", "{}");
         assert!(scripts.iter().any(|it| it.name == "mermaid-runtime.min.js"));
         assert!(scripts.iter().any(|it| it.name == "mermaid.min.js"));
         assert!(scripts.iter().any(|it| it.name == "mermaid-zenuml.min.js"));
@@ -84,7 +106,7 @@ mod tests {
 
     #[test]
     fn invalid_request_json_does_not_load_zenuml_runtime() {
-        let scripts = MermaidRuntimeScripts::build("bundle", "not-json");
+        let scripts = MermaidRuntimeScripts::build_with_zenuml("bundle", "plugin", "not-json");
 
         assert!(!scripts.iter().any(|it| it.name == "zenuml-runtime.min.js"));
     }
@@ -142,8 +164,9 @@ mod tests {
     #[test]
     fn runtime_preserves_c4_description_with_explicit_line_break() {
         let scripts = MermaidRuntimeScripts::build(
-            MERMAID_TEST_BUNDLE,
+            mermaid_test_bundle(),
             r##"{"source":"C4Context\nPerson(customer, \"顧客\", \"1行目<br/> 2行目\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+            MermaidDiagramType::Other,
         );
 
         let rendered = DiagramV8Runtime::render(&scripts);
@@ -154,6 +177,42 @@ mod tests {
             }),
             "{rendered:?}"
         );
+    }
+
+    fn mermaid_test_bundle() -> &'static str {
+        must_utf8(std::str::from_utf8(must_asset_bytes(
+            RuntimeAsset::mermaid().bytes(),
+        )))
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected test error: boom")]
+    fn must_asset_bytes_reports_unexpected_test_errors() {
+        let _ = must_asset_bytes(Err("boom".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid utf-8")]
+    fn must_utf8_reports_unexpected_test_errors() {
+        let _ = must_utf8(std::str::from_utf8(&[u8::MAX]));
+    }
+
+    fn must_asset_bytes(result: Result<&'static [u8], String>) -> &'static [u8] {
+        match result {
+            Ok(value) => value,
+            Err(error) => fail(format!("unexpected test error: {error}")),
+        }
+    }
+
+    fn must_utf8(result: Result<&'static str, std::str::Utf8Error>) -> &'static str {
+        match result {
+            Ok(value) => value,
+            Err(error) => fail(format!("unexpected test error: {error}")),
+        }
+    }
+
+    fn fail(message: String) -> ! {
+        std::panic::resume_unwind(Box::new(message))
     }
 
     #[test]

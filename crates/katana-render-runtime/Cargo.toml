@@ -9,6 +9,7 @@ authors.workspace = true
 description.workspace = true
 include = [
     "Cargo.toml",
+    "build.rs",
     "assets/fonts/**",
     "src/**/*.rs",
     "src/renderer/backends/html_runtime/*.js",
@@ -18,11 +19,13 @@ include = [
     "vendor/drawio/31.3.2/drawio.min.js.sha256",
     "vendor/mermaid/11.17.2/mermaid.min.js.br",
     "vendor/mermaid/11.17.2/mermaid.min.js.sha256",
-    "vendor/mermaid-zenuml/0.2.3/**",
+    "vendor/mermaid-zenuml/0.2.3/mermaid-zenuml.min.js.sha256",
     "vendor/plantuml/1.2026.7/plantuml.jar.sha256",
-    "vendor/zenuml-core/3.47.9/**",
+    "vendor/zenuml-core/3.47.9/zenuml.js.sha256",
+    "src/markdown/generated/zenuml-runtime-assets.bin.br",
     "src/markdown/drawio_renderer/js_runtime/resources/shapes/**",
     "src/markdown/drawio_renderer/js_runtime/resources/stencils/**",
+    "src/markdown/drawio_renderer/generated/drawio-resources.bin.br",
 ]
 
 [lib]
@@ -53,6 +56,9 @@ taffy = { workspace = true }
 cssparser = { workspace = true }
 unicode-linebreak = { workspace = true }
 unicode-width = { workspace = true }
+
+[build-dependencies]
+brotli-decompressor = { workspace = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

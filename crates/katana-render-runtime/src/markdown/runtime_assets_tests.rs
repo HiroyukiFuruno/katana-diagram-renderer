@@ -1,9 +1,16 @@
 use super::{
     DRAWIO_JS_CHECKSUM, DRAWIO_JS_VERSION, MERMAID_JS_CHECKSUM, MERMAID_JS_VERSION,
     MERMAID_ZENUML_JS_CHECKSUM, RuntimeAsset, ZENUML_CORE_JS_CHECKSUM, ZENUML_CORE_JS_VERSION,
+    ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
 };
+use crate::markdown::runtime_asset_archive::RuntimeAssetArchive;
+use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 const PARALLEL_MATERIALIZE_THREADS: usize = 8;
+static INVALID_ARCHIVE_LENGTH_CACHE: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+static INVALID_ARCHIVE_BYTES_CACHE: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+static INVALID_ARCHIVE_RANGE_CACHE: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 
 #[test]
 fn materialized_paths_are_versioned() {
@@ -117,24 +124,74 @@ fn materialize_is_safe_for_parallel_callers() {
 
 #[test]
 fn compressed_assets_restore_the_pinned_vendor_bytes() {
-    let mermaid = RuntimeAsset::mermaid().bytes();
-    let drawio = RuntimeAsset::drawio().bytes();
+    assert_asset_checksum(RuntimeAsset::mermaid(), MERMAID_JS_CHECKSUM);
+    assert_asset_checksum(RuntimeAsset::mermaid_zenuml(), MERMAID_ZENUML_JS_CHECKSUM);
+    assert_asset_checksum(RuntimeAsset::drawio(), DRAWIO_JS_CHECKSUM);
+    assert_asset_checksum(RuntimeAsset::zenuml_core(), ZENUML_CORE_JS_CHECKSUM);
+}
 
-    assert!(matches!(
-        mermaid,
-        Ok(bytes) if bytes == include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js").as_slice()
-    ));
-    assert!(matches!(
-        drawio,
-        Ok(bytes) if bytes == include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js").as_slice()
-    ));
+fn assert_asset_checksum(asset: RuntimeAsset, expected: &str) {
+    let bytes = asset.bytes();
+    assert!(matches!(bytes, Ok(bytes) if sha256_hex(bytes) == expected));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[test]
 fn invalid_compressed_asset_is_reported() {
-    let result = super::decompress_brotli(b"not a brotli stream");
+    let result = RuntimeAssetArchive::brotli(b"not a brotli stream");
 
     assert!(result.is_err());
+}
+
+#[test]
+fn compressed_asset_range_reports_archive_length_mismatch() {
+    let result = RuntimeAssetArchive::range(
+        include_bytes!("generated/zenuml-runtime-assets.bin.br"),
+        &INVALID_ARCHIVE_LENGTH_CACHE,
+        0,
+        1,
+        usize::MAX,
+    );
+
+    assert!(matches!(result, Err(error) if error.contains("length mismatch")));
+}
+
+#[test]
+fn compressed_asset_range_reports_decompression_and_bounds_errors() {
+    let decompression = RuntimeAssetArchive::range(
+        b"not a brotli stream",
+        &INVALID_ARCHIVE_BYTES_CACHE,
+        0,
+        1,
+        1,
+    );
+    assert!(decompression.is_err());
+
+    let compressed = include_bytes!("generated/zenuml-runtime-assets.bin.br");
+    let overflow = RuntimeAssetArchive::range(
+        compressed,
+        &INVALID_ARCHIVE_RANGE_CACHE,
+        usize::MAX,
+        1,
+        ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+    );
+    assert!(matches!(overflow, Err(error) if error.contains("offset overflow")));
+
+    let out_of_bounds = RuntimeAssetArchive::range(
+        compressed,
+        &INVALID_ARCHIVE_RANGE_CACHE,
+        ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+        1,
+        ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+    );
+    assert!(matches!(out_of_bounds, Err(error) if error.contains("out of bounds")));
 }
 
 #[test]

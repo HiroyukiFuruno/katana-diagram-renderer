@@ -120,6 +120,7 @@ class SvgBrowserRasterizer {
       { svg },
     );
     await SvgCaptureSizer.resize(page);
+    await SvgExternalImages.waitUntilReady(page);
     await page.evaluate(() => (document as FontReadyDocument).fonts.ready);
     await page.locator("#capture").screenshot({
       path: path.join(this.options.outputDir, fileName.replace(/\.svg$/, ".png")),
@@ -184,6 +185,34 @@ const SvgCaptureSizer = {
       const capture = document.getElementById("capture") as HTMLElement;
       capture.style.width = `${width + 24}px`;
       capture.style.height = `${height + 24}px`;
+    });
+  },
+};
+
+const SvgExternalImages = {
+  waitUntilReady(page: PageHandle): Promise<void> {
+    return page.evaluate(async () => {
+      const xlinkNamespace = "http://www.w3.org/1999/xlink";
+      const urls = Array.from(document.querySelectorAll("#diagram image"))
+        .map(
+          (image) =>
+            image.getAttribute("href") ??
+            image.getAttributeNS(xlinkNamespace, "href") ??
+            image.getAttribute("xlink:href"),
+        )
+        .filter((url): url is string => url !== null && url.length > 0);
+      await Promise.all(
+        [...new Set(urls)].map(
+          (url) =>
+            new Promise<void>((resolve) => {
+              const image = new Image();
+              image.addEventListener("load", () => resolve(), { once: true });
+              image.addEventListener("error", () => resolve(), { once: true });
+              image.src = url;
+            }),
+        ),
+      );
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
   },
 };

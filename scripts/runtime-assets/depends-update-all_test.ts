@@ -36,6 +36,5 @@ test("更新が必要なランタイム資産だけを最新バージョンへ�
 
   expect(commands).toEqual([
     ["bun", "run", "scripts/runtime-assets/update.ts", "mermaid", "11.18.0"],
-    ["bun", "run", "scripts/runtime-assets/runtime-package-asset-compressor.ts", "--write"],
   ]);
 });
