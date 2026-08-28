@@ -104,7 +104,7 @@ KatanaStyle.prototype.removeProperty = function removeProperty(name) {
 Object.defineProperty(KatanaStyle.prototype, "cssText", {
   get() {
     return Object.entries(this.values)
-      .filter(([key]) => key.includes("-"))
+      .filter(([key]) => !/[A-Z]/.test(key))
       .map(([key, value]) => `${key}: ${value}`)
       .join("; ");
   },
@@ -113,6 +113,16 @@ Object.defineProperty(KatanaStyle.prototype, "cssText", {
     katanaApplyCssText(this, value);
   },
 });
+
+Object.defineProperty(KatanaStyle.prototype, "length", {
+  get() {
+    return Object.keys(this.values).filter((key) => !/[A-Z]/.test(key)).length;
+  },
+});
+
+KatanaStyle.prototype.item = function item(index) {
+  return Object.keys(this.values).filter((key) => !/[A-Z]/.test(key))[Number(index)] ?? "";
+};
 
 const katanaSetAttributeBase = KatanaNode.prototype.setAttribute;
 KatanaNode.prototype.setAttribute = function setAttribute(name, value) {

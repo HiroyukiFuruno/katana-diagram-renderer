@@ -22,7 +22,7 @@ function katanaShouldNormalizeWrappedDrawioLabel(group, entry) {
 }
 
 function katanaDrawioGroupHasForeignObject(group) {
-  return group.querySelectorAll("foreignObject").length > 0;
+  return katanaDrawioCellLocalElements(group, "foreignObject").length > 0;
 }
 
 function katanaWrappedDrawioLabelNeeded(entry, box) {
@@ -47,7 +47,7 @@ function katanaReplaceWrappedDrawioTextLabel(group, entry) {
 }
 
 function katanaDrawioTextNodes(group) {
-  return Array.from(group.querySelectorAll("text"));
+  return katanaDrawioCellLocalElements(group, "text");
 }
 
 function katanaCreateWrappedDrawioTextLabel(entry, box) {

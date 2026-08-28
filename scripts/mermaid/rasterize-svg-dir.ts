@@ -3,6 +3,7 @@ import path from "node:path";
 import { DiagramTheme, type DiagramThemeName } from "./diagram_theme";
 import { PlaywrightLoader } from "./official-renderer";
 import type { BrowserHandle, FontReadyDocument, PageHandle } from "./official-renderer-types";
+import { SvgSourceFonts } from "./rasterize_svg_fonts";
 import { SvgRasterizeInput } from "./rasterize_svg_input";
 
 interface CliParsedOptions {
@@ -110,6 +111,7 @@ class SvgBrowserRasterizer {
   }
 
   private async capture(page: PageHandle, fileName: string, svg: string) {
+    await this.installSourceFonts(page, svg);
     await page.evaluate(
       (input) => {
         const diagramElement = document.getElementById("diagram") as HTMLElement;
@@ -118,11 +120,30 @@ class SvgBrowserRasterizer {
       { svg },
     );
     await SvgCaptureSizer.resize(page);
+    await SvgExternalImages.waitUntilReady(page);
     await page.evaluate(() => (document as FontReadyDocument).fonts.ready);
     await page.locator("#capture").screenshot({
       path: path.join(this.options.outputDir, fileName.replace(/\.svg$/, ".png")),
       omitBackground: false,
     });
+  }
+
+  private installSourceFonts(page: PageHandle, svg: string): Promise<void> {
+    return page.evaluate(async (urls) => {
+      await Promise.all(
+        urls.map(
+          (url) =>
+            new Promise<void>((resolve) => {
+              const link = document.createElement("link");
+              link.rel = "stylesheet";
+              link.href = url;
+              link.addEventListener("load", () => resolve(), { once: true });
+              link.addEventListener("error", () => resolve(), { once: true });
+              document.head.appendChild(link);
+            }),
+        ),
+      );
+    }, SvgSourceFonts.urls(svg));
   }
 
   private currentBrowser(): BrowserHandle {
@@ -164,6 +185,34 @@ const SvgCaptureSizer = {
       const capture = document.getElementById("capture") as HTMLElement;
       capture.style.width = `${width + 24}px`;
       capture.style.height = `${height + 24}px`;
+    });
+  },
+};
+
+const SvgExternalImages = {
+  waitUntilReady(page: PageHandle): Promise<void> {
+    return page.evaluate(async () => {
+      const xlinkNamespace = "http://www.w3.org/1999/xlink";
+      const urls = Array.from(document.querySelectorAll("#diagram image"))
+        .map(
+          (image) =>
+            image.getAttribute("href") ??
+            image.getAttributeNS(xlinkNamespace, "href") ??
+            image.getAttribute("xlink:href"),
+        )
+        .filter((url): url is string => url !== null && url.length > 0);
+      await Promise.all(
+        [...new Set(urls)].map(
+          (url) =>
+            new Promise<void>((resolve) => {
+              const image = new Image();
+              image.addEventListener("load", () => resolve(), { once: true });
+              image.addEventListener("error", () => resolve(), { once: true });
+              image.src = url;
+            }),
+        ),
+      );
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
   },
 };

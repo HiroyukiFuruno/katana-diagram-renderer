@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Mutex;
 
-pub const PLANTUML_JAR_VERSION: &str = "1.2026.6";
+pub const PLANTUML_JAR_VERSION: &str = "1.2026.7";
 pub const PLANTUML_JAR_CHECKSUM: &str =
-    "7b61dccd38ddc1a1deff82ad2fba76e49c070ac09f8280a5e925085a4db41ab1";
-pub const PLANTUML_DOWNLOAD_URL: &str = "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.6/plantuml-lgpl-1.2026.6.jar";
+    "1eb8cd1d0253227f3652586bc3b53cb3d5cfe69b5dcca41ce9b92ab1ce4f58ff";
+pub const PLANTUML_DOWNLOAD_URL: &str = "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.7/plantuml-lgpl-1.2026.7.jar";
 
 const DOWNLOAD_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const HEX_HIGH_NIBBLE_SHIFT: u8 = 4;

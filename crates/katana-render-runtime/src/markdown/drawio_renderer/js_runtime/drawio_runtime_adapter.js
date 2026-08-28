@@ -48,8 +48,15 @@ const KATANA_DRAWIO_TEXT_CONVERSION_HANDLERS = [
 
 function katanaDrawioHtmlLabelText(value) {
   const html = String(value);
+  if (katanaDrawioIsStereotypeLabel(html)) {
+    return html.trim();
+  }
   const normalized = KATANA_DRAWIO_HTML_LABEL_NORMALIZERS[Number(katanaCanUseDomParser())](html);
   return katanaNormalizeHtmlLabelWhitespace(normalized);
+}
+
+function katanaDrawioIsStereotypeLabel(html) {
+  return /^<<[a-zA-Z][^<>]*>>$/.test(String(html).trim());
 }
 
 function katanaCanUseDomParser() {

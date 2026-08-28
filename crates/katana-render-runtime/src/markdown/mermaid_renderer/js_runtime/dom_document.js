@@ -8,7 +8,7 @@ const document = {
     return true;
   },
   createElement(tagName) {
-    const node = new KatanaNode(tagName);
+    const node = new KatanaNode(tagName, KATANA_HTML_NAMESPACE);
     node.ownerDocument = document;
     return node;
   },
@@ -23,7 +23,9 @@ const document = {
     return node;
   },
   createComment(value) {
-    return this.createTextNode(value);
+    const node = new KatanaCommentNode(value);
+    node.ownerDocument = document;
+    return node;
   },
   createDocumentFragment() {
     const node = new KatanaNode("#document-fragment");
@@ -161,7 +163,10 @@ globalThis.XMLSerializer = class {
   }
 };
 globalThis.DOMParser = class {
-  parseFromString(source) {
+  parseFromString(source, mimeType = "application/xml") {
+    if (String(mimeType).toLowerCase() === "text/html") {
+      return katanaParseHtmlDocument(source);
+    }
     const parsed = parseInnerHtml(String(source).trim(), true);
     const detached = createDetachedDocument();
     const root = parsed[0] ?? detached.createElement("xml");
@@ -171,6 +176,23 @@ globalThis.DOMParser = class {
     return detached;
   }
 };
+
+function katanaParseHtmlDocument(source) {
+  const detached = createDetachedDocument();
+  const parsed = parseInnerHtml(String(source), false);
+  const html = parsed.find((node) => node.localName === "html");
+  if (html) {
+    attachOwnerDocument(html, detached);
+    detached.documentElement = html;
+    detached.head = html.querySelector("head") ?? detached.createElement("head");
+    detached.body = html.querySelector("body") ?? detached.createElement("body");
+    return detached;
+  }
+  for (const child of parsed) {
+    detached.body.appendChild(child);
+  }
+  return detached;
+}
 
 function createDetachedDocument() {
   const detached = Object.create(document);

@@ -10,6 +10,8 @@ function katanaEscapeSvgText(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+const KATANA_HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+
 class KatanaNode {
   constructor(tagName, namespaceURI = null) {
     const rawName = katanaRawNodeName(tagName);
@@ -55,7 +57,20 @@ class KatanaNode {
   removeChild(child) {
     this.children = this.children.filter((candidate) => candidate !== child);
     this.childNodes = this.children;
+    child.parentNode = null;
     return child;
+  }
+  replaceChild(newChild, oldChild) {
+    const index = this.children.indexOf(oldChild);
+    if (index < 0) {
+      throw new Error("The node to be replaced is not a child of this node");
+    }
+    newChild.parentNode = this;
+    newChild.ownerDocument = this.ownerDocument;
+    this.children.splice(index, 1, newChild);
+    this.childNodes = this.children;
+    oldChild.parentNode = null;
+    return oldChild;
   }
   remove() {
     if (this.parentNode) {
@@ -155,6 +170,26 @@ class KatanaNode {
   }
 }
 
+Object.defineProperties(KatanaNode.prototype, {
+  childNodes: katanaDomBackedProperty("_childNodes", []),
+  parentNode: katanaDomBackedProperty("_parentNode", null),
+  attributes: katanaDomBackedProperty("_attributes", []),
+  nodeType: katanaDomBackedProperty("_nodeType", 1),
+  nodeName: katanaDomBackedProperty("_nodeName", ""),
+});
+
+function katanaDomBackedProperty(field, fallback) {
+  return {
+    configurable: true,
+    get() {
+      return this[field] ?? fallback;
+    },
+    set(value) {
+      this[field] = value;
+    },
+  };
+}
+
 function katanaFirstQuerySelectorResult(node, selector) {
   return node.querySelectorAll(selector)[0] ?? null;
 }
@@ -179,7 +214,7 @@ function katanaSerializedNodeName(rawName, preservesCase) {
 }
 
 function katanaTagNodeName(rawName, preservesCase) {
-  return preservesCase ? rawName : rawName.toUpperCase();
+  return preservesCase || rawName.startsWith("#") ? rawName : rawName.toUpperCase();
 }
 
 function katanaNodeType(tagName) {

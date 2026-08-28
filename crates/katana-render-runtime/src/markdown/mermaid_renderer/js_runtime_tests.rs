@@ -113,7 +113,7 @@ fn runtime_normalizes_block_nbsp_arrow_width() {
     assert!(
         rendered
             .as_ref()
-            .is_ok_and(|svg| svg.contains("viewBox=\"-5 -128.5 605.816")),
+            .is_ok_and(|svg| svg.contains("viewBox=\"-5 -136.4375 675.234375 284.9375\"")),
         "{rendered:?}"
     );
     assert!(
@@ -121,7 +121,9 @@ fn runtime_normalizes_block_nbsp_arrow_width() {
             .as_ref()
             .is_ok_and(|svg| svg.contains("id=\"katana-mermaid-svg")
                 && svg.contains("-blockArrowId6\"")
-                && svg.contains("points=\"28.73,0 0,-4 17.5,-4 17.5,-31")),
+                && svg.contains(
+                    "points=\"96.828125,0 0,-4 17.5,-4 17.5,-31 176.15625,-31 176.15625,-4 193.65625,-4\""
+                )),
         "{rendered:?}"
     );
 }

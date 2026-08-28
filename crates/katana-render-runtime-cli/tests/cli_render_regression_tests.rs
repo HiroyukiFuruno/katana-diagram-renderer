@@ -62,6 +62,26 @@ fn bundled_mermaid_runtime_writes_svg_through_public_cli() -> Result<(), Box<dyn
 }
 
 #[test]
+fn bundled_zenuml_runtime_writes_svg_through_public_cli() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = TempFixture::new()?;
+    let input = fixture.path("diagram.zenuml");
+    let source = format!(
+        "zenuml\ntitle CLI Order Service {}\n@Actor Client\nClient.method()",
+        std::process::id()
+    );
+    std::fs::write(&input, source)?;
+    let output = fixture.path("diagram.svg");
+    let result = run_mermaid_render(&input, Some(&output))?;
+
+    assert!(result.status.success(), "{:?}", result);
+    let svg = std::fs::read_to_string(output)?;
+    assert!(svg.contains("<svg"));
+    assert!(svg.contains("CLI Order Service"));
+    Ok(())
+}
+
+#[test]
 fn empty_mermaid_runtime_override_is_rejected_by_public_cli()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = TempFixture::new()?;

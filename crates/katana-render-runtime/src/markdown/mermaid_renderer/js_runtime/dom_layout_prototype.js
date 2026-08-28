@@ -1,4 +1,5 @@
 Object.defineProperty(KatanaNode.prototype, "textContent", {
+  configurable: true,
   get() {
     return katanaTextContent(this);
   },

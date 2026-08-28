@@ -1,14 +1,13 @@
-use super::{
-    DrawioResourceCatalog, drawio_prefix, encoding_for_path, extract_resource_groups,
-    mime_type_for_path, resource_groups,
-};
+use super::archive::{resource_contents, validate_resource_archive};
+use super::selector::{drawio_prefix, extract_resource_groups, resource_groups};
+use super::{DrawioResourceCatalog, encoding_for_path, mime_type_for_path};
 
 #[test]
-fn builtin_selects_basic_stencil_shape_scripts_and_referenced_images() {
+fn builtin_selects_basic_stencil_shape_scripts_and_referenced_images() -> Result<(), String> {
     let source = r#"
         <mxCell style="shape=mxgraph.ios7ui.button;image=img/lib/azure2/general/File.svg"/>
     "#;
-    let resources = DrawioResourceCatalog::builtin(source);
+    let resources = DrawioResourceCatalog::builtin(source)?;
 
     assert!(resources.iter().any(|it| it.path == "stencils/basic.xml"));
     assert!(
@@ -22,6 +21,16 @@ fn builtin_selects_basic_stencil_shape_scripts_and_referenced_images() {
             .iter()
             .any(|it| it.path == "img/lib/azure2/general/File.svg")
     );
+    Ok(())
+}
+
+#[test]
+fn resource_archive_validation_reports_length_and_bounds_errors() {
+    assert!(validate_resource_archive(vec![1], 2).is_err());
+    assert!(validate_resource_archive(vec![1], 1).is_ok());
+    assert!(resource_contents(&[1], "overflow", usize::MAX, 2).is_err());
+    assert!(resource_contents(&[1], "out-of-bounds", 0, 2).is_err());
+    assert!(matches!(resource_contents(&[1], "valid", 0, 1), Ok([1])));
 }
 
 #[test]

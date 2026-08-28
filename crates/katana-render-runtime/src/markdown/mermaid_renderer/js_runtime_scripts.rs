@@ -4,21 +4,31 @@ use crate::markdown::diagram_js_runtime::DiagramRuntimeScript;
 pub(super) struct MermaidRuntimeScripts;
 
 impl MermaidRuntimeScripts {
-    pub(super) fn build<'a>(bundle: &'a str, request_json: &str) -> Vec<DiagramRuntimeScript<'a>> {
-        Self::build_with_zenuml(bundle, MERMAID_ZENUML, request_json)
+    pub(super) fn build<'a>(
+        bundle: &'a str,
+        request_json: &str,
+        diagram_type: MermaidDiagramType,
+    ) -> Vec<DiagramRuntimeScript<'a>> {
+        Self::build_scripts(
+            bundle,
+            MERMAID_ZENUML_RUNTIME,
+            request_json,
+            diagram_type == MermaidDiagramType::Zenuml,
+        )
     }
 
-    fn build_with_zenuml<'a>(
+    fn build_scripts<'a>(
         bundle: &'a str,
         zenuml_bundle: &'a str,
         request_json: &str,
+        uses_zenuml_runtime: bool,
     ) -> Vec<DiagramRuntimeScript<'a>> {
         let mut scripts = vec![
             DiagramRuntimeScript::borrowed("mermaid-runtime.min.js", MERMAID_RUNTIME),
             DiagramRuntimeScript::borrowed("mermaid.min.js", bundle),
             DiagramRuntimeScript::borrowed("mermaid-zenuml.min.js", zenuml_bundle),
         ];
-        if request_uses_zenuml_runtime(request_json) {
+        if uses_zenuml_runtime {
             scripts.push(DiagramRuntimeScript::borrowed(
                 "zenuml-runtime.min.js",
                 ZENUML_RUNTIME,
@@ -30,12 +40,27 @@ impl MermaidRuntimeScripts {
         ));
         scripts
     }
+
+    #[cfg(test)]
+    fn build_with_zenuml<'a>(
+        bundle: &'a str,
+        zenuml_bundle: &'a str,
+        request_json: &str,
+    ) -> Vec<DiagramRuntimeScript<'a>> {
+        Self::build_scripts(
+            bundle,
+            zenuml_bundle,
+            request_json,
+            request_uses_zenuml_runtime(request_json),
+        )
+    }
 }
 
 fn render_script(request_json: &str) -> String {
     format!("katanaRunMermaidRuntime({request_json});")
 }
 
+#[cfg(test)]
 fn request_uses_zenuml_runtime(request_json: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(request_json) else {
         return false;
@@ -54,8 +79,8 @@ fn request_uses_zenuml_runtime(request_json: &str) -> bool {
 }
 
 const MERMAID_RUNTIME: &str = include_str!("../diagram_runtime/generated/mermaid-runtime.min.js");
-const MERMAID_ZENUML: &str =
-    include_str!("../../../vendor/mermaid-zenuml/0.2.3/mermaid-zenuml.min.js");
+const MERMAID_ZENUML_RUNTIME: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/mermaid-zenuml.min.js"));
 const ZENUML_RUNTIME: &str = include_str!("../diagram_runtime/generated/zenuml-runtime.min.js");
 
 #[cfg(test)]
@@ -67,12 +92,12 @@ mod entrypoint_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::MermaidRuntimeScripts;
-    use crate::markdown::diagram_js_runtime::DiagramV8Runtime;
+    use super::{MermaidDiagramType, MermaidRuntimeScripts};
+    use crate::markdown::{diagram_js_runtime::DiagramV8Runtime, runtime_assets::RuntimeAsset};
 
     #[test]
     fn build_includes_bundle_and_render_script() {
-        let scripts = MermaidRuntimeScripts::build("bundle", "{}");
+        let scripts = MermaidRuntimeScripts::build_with_zenuml("bundle", "plugin", "{}");
         assert!(scripts.iter().any(|it| it.name == "mermaid-runtime.min.js"));
         assert!(scripts.iter().any(|it| it.name == "mermaid.min.js"));
         assert!(scripts.iter().any(|it| it.name == "mermaid-zenuml.min.js"));
@@ -81,7 +106,7 @@ mod tests {
 
     #[test]
     fn invalid_request_json_does_not_load_zenuml_runtime() {
-        let scripts = MermaidRuntimeScripts::build("bundle", "not-json");
+        let scripts = MermaidRuntimeScripts::build_with_zenuml("bundle", "plugin", "not-json");
 
         assert!(!scripts.iter().any(|it| it.name == "zenuml-runtime.min.js"));
     }
@@ -129,7 +154,181 @@ mod tests {
         let rendered = DiagramV8Runtime::render(&scripts);
 
         assert!(
-            rendered.as_ref().is_ok_and(|it| it.contains("style-built")),
+            rendered
+                .as_ref()
+                .is_ok_and(|it| it.contains("font-family: sans-serif")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_preserves_c4_description_with_explicit_line_break() {
+        let scripts = MermaidRuntimeScripts::build(
+            mermaid_test_bundle(),
+            r##"{"source":"C4Context\nPerson(customer, \"顧客\", \"1行目<br/> 2行目\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+            MermaidDiagramType::Other,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(|svg| {
+                svg.contains(">1行目</tspan>") && svg.contains(">2行目</tspan>")
+            }),
+            "{rendered:?}"
+        );
+    }
+
+    fn mermaid_test_bundle() -> &'static str {
+        must_utf8(std::str::from_utf8(must_asset_bytes(
+            RuntimeAsset::mermaid().bytes(),
+        )))
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected test error: boom")]
+    fn must_asset_bytes_reports_unexpected_test_errors() {
+        let _ = must_asset_bytes(Err("boom".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid utf-8")]
+    fn must_utf8_reports_unexpected_test_errors() {
+        let _ = must_utf8(std::str::from_utf8(&[u8::MAX]));
+    }
+
+    fn must_asset_bytes(result: Result<&'static [u8], String>) -> &'static [u8] {
+        match result {
+            Ok(value) => value,
+            Err(error) => fail(format!("unexpected test error: {error}")),
+        }
+    }
+
+    fn must_utf8(result: Result<&'static str, std::str::Utf8Error>) -> &'static str {
+        match result {
+            Ok(value) => value,
+            Err(error) => fail(format!("unexpected test error: {error}")),
+        }
+    }
+
+    fn fail(message: String) -> ! {
+        std::panic::resume_unwind(Box::new(message))
+    }
+
+    #[test]
+    fn runtime_measures_horizontal_svg_arcs_like_a_browser() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_horizontal_svg_arcs(),
+            "",
+            r##"{"source":"C4Container\nContainerDb(db, \"DB\", \"SQL\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered
+                .as_ref()
+                .is_ok_and(|it| it.contains("0:0:216:121.673")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_measures_vertical_svg_arcs_like_a_browser() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_vertical_svg_arcs(),
+            "",
+            r##"{"source":"C4Context\nSystemQueue(queue, \"Queue\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(
+                |it| it.contains("-9.26887261930837:-73.650734:243.80661785792515:73.650734")
+            ),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_measures_repeated_relative_curves_from_each_segment_origin() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_repeated_relative_curves(),
+            "",
+            r##"{"source":"graph TD; A-->B","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(|it| it.contains("10:10:60:0")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_matches_browser_c4_canvas_text_width() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_c4_canvas_text(),
+            "",
+            r##"{"source":"C4Container\nContainerDb(db, \"DB\", \"SQL\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(|it| it.contains("54.279")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_matches_browser_c4_wide_text_kerning() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_c4_wide_svg_text(),
+            "",
+            r##"{"source":"C4Container\nContainerDb(db, \"DB\", \"SQL\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(|it| it.contains("154.78125")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_matches_browser_c4_relation_text_widths() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_c4_relation_svg_text(),
+            "",
+            r##"{"source":"C4Container\nContainerDb(db, \"DB\", \"SQL\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered
+                .as_ref()
+                .is_ok_and(|it| it.contains("27.340:46.001:133.384:48.000")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_respects_nearest_c4_font_weight() {
+        let scripts = MermaidRuntimeScripts::build_with_zenuml(
+            fake_mermaid_measuring_nearest_c4_font_weight(),
+            "",
+            r##"{"source":"C4Context\nSystemQueue(queue, \"Queue\")","svgId":"id","theme":"dark","background":"#000","fill":"#111","text":"#fff","stroke":"#fff","arrow":"#fff","diagramType":"c4"}"##,
+        );
+
+        let rendered = DiagramV8Runtime::render(&scripts);
+
+        assert!(
+            rendered.as_ref().is_ok_and(|it| it.contains(">normal<")),
             "{rendered:?}"
         );
     }
@@ -163,7 +362,8 @@ mod tests {
         assert!(
             rendered
                 .as_ref()
-                .is_ok_and(|it| it.contains(r#"viewBox="0 0 169.025 527.5""#)),
+                .is_ok_and(|it| it.contains(r#"viewBox="6.25 0 169.03125 527.5""#)
+                    && it.contains(r#"transform="translate(84.515625, 64.625)""#)),
             "{rendered:?}"
         );
     }
@@ -446,15 +646,137 @@ globalThis.mermaid = {
 "#
     }
 
+    fn fake_mermaid_measuring_horizontal_svg_arcs() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M0,15.8358 a108,15.8358 0,0,0 216,0 a108,15.8358 0,0,0 -216,0 l0,90.0019 a108,15.8358 0,0,0 216,0 l0,-90.0019");
+    const box = path.getBBox();
+    return { svg: `<svg id="${id}"><text>${box.x}:${box.y}:${box.width}:${box.height}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_vertical_svg_arcs() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M0,0 a9.26887261930837,36.825367 0,0,1 0,-73.650734 l225.26887261930838,0 a9.26887261930837,36.825367 0,0,1 0,73.650734 M225.26887261930838,-73.650734 a9.26887261930837,36.825367 0,0,0 0,73.650734 l-225.26887261930838,0");
+    const box = path.getBBox();
+    return { svg: `<svg id="${id}"><text>${box.x}:${box.y}:${box.width}:${box.height}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_repeated_relative_curves() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M 10 10 c 10 0 20 0 30 0 c 10 0 20 0 30 0");
+    const box = path.getBBox();
+    return { svg: `<svg id="${id}"><text>${box.x}:${box.y}:${box.width}:${box.height}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_c4_canvas_text() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const context = document.createElement("canvas").getContext("2d");
+    context.font = "10.5px Open Sans, sans-serif";
+    const width = context.measureText("[Container: ").width.toFixed(3);
+    return { svg: `<svg id="${id}"><text>${width}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_c4_wide_svg_text() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    tspan.style.setProperty("font-size", "10.5px");
+    tspan.style.setProperty("font-family", "Open Sans, sans-serif");
+    tspan.textContent = "リレーショナルデータベーススキ";
+    const width = tspan.getComputedTextLength();
+    return { svg: `<svg id="${id}"><text>${width}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_c4_relation_svg_text() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const values = ["Uses", "[HTTPS]", "Reads from and writes to", "利用する"];
+    const widths = values.map((value) => {
+      const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+      tspan.style.setProperty("font-size", "12px");
+      tspan.style.setProperty("font-family", "Open Sans, sans-serif");
+      tspan.textContent = value;
+      return tspan.getComputedTextLength().toFixed(3);
+    });
+    return { svg: `<svg id="${id}"><text>${widths.join(":")}</text></svg>` };
+  }
+};
+"#
+    }
+
+    fn fake_mermaid_measuring_nearest_c4_font_weight() -> &'static str {
+        r#"
+globalThis.mermaid = {
+  initialize() {},
+  render: async (id) => {
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    group.style.setProperty("font-weight", "bold");
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    const outer = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    const inner = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    outer.style.setProperty("font-size", "14px");
+    outer.style.setProperty("font-family", "Open Sans, sans-serif");
+    inner.setAttribute("font-weight", "normal");
+    inner.textContent = "Banking System F Queue";
+    outer.appendChild(inner);
+    text.appendChild(outer);
+    group.appendChild(text);
+    const weight = outer.getComputedTextLength() < 165 ? "normal" : "bold";
+    return { svg: `<svg id="${id}"><text>${weight}</text></svg>` };
+  }
+};
+"#
+    }
+
     fn fake_mermaid_with_style_sheet() -> &'static str {
         r#"
 globalThis.mermaid = {
   initialize() {},
   render: async (id) => {
     const sheet = new CSSStyleSheet();
-    sheet.insertRule(".style-built { fill: red; }", sheet.cssRules.length);
+    const index = sheet.insertRule(".style-built { fill: red; }", sheet.cssRules.length);
+    sheet.cssRules[index].style.setProperty("font-family", "sans-serif");
+    if (sheet.cssRules[index].style.length !== 2) throw new Error("missing CSS declarations");
     const theme = new CSSStyleSheet();
     theme.replaceSync(".theme-built { stroke: blue; }");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    tspan.setAttribute("class", "style-built");
+    svg.appendChild(tspan);
+    if (svg.querySelectorAll("tspan.style-built").length !== 1) throw new Error("compound selector failed");
     const css = [...sheet.cssRules, ...theme.cssRules].map((rule) => rule.cssText).join("\n");
     return { svg: `<svg id="${id}"><style>${css}</style><text class="style-built">ok</text></svg>` };
   }
@@ -539,7 +861,7 @@ globalThis.mermaid = {
 globalThis.mermaid = {
   initialize() {},
   render: async (id) => {
-    return { svg: `<svg id="${id}" width="100%" class="classDiagram" style="max-width: 239.55450000000002px;" viewBox="-8 -8 239.55450000000002 422.49999999999994" role="graphics-document document" aria-roledescription="class"><g class="root" transform="translate(1, 1)"><g transform="translate(2, 2)"><text>PreviewPane RenderedSection «enumeration»</text></g><path d="M0"></path><path d="M1"></path><path d="M2"></path><path d="M3"></path><path d="M4"></path><path d="M5"></path><path d="M6"></path><path d="M7"></path><path d="M8"></path><path d="M9"></path><path d="M10"></path><path d="M11"></path><path d="M12"></path><path d="M13"></path><path d="M14"></path></g></svg>` };
+    return { svg: `<svg id="${id}" width="100%" class="classDiagram" style="max-width: 231.55450000000002px;" viewBox="0 0 231.55450000000002 377" role="graphics-document document" aria-roledescription="classDiagram"><g class="root" transform="translate(1, 1)"><g transform="translate(2, 2)"><text>PreviewPane RenderedSection «enumeration»</text></g><path d="M0"></path><path d="M1"></path><path d="M2"></path><path d="M3"></path><path d="M4"></path><path d="M5"></path><path d="M6"></path><path d="M7"></path><path d="M8"></path><path d="M9"></path><path d="M10"></path><path d="M11"></path><path d="M12"></path><path d="M13"></path><path d="M14"></path></g></svg>` };
   }
 };
 "##

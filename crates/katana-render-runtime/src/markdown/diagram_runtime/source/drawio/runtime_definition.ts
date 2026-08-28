@@ -151,6 +151,14 @@ function drawioRuntimeFragments(): RuntimeFragment[] {
       `${DRAWIO_JS_RUNTIME}/drawio_svg_geometry.js`,
     ),
     RuntimeFragmentFactory.verbatim(
+      "drawio-svg-fonts.js",
+      `${DRAWIO_JS_RUNTIME}/drawio_svg_fonts.js`,
+    ),
+    RuntimeFragmentFactory.verbatim(
+      "drawio-svg-comment-artifacts.js",
+      `${DRAWIO_JS_RUNTIME}/drawio_svg_comment_artifacts.js`,
+    ),
+    RuntimeFragmentFactory.verbatim(
       "drawio-svg-postprocess.js",
       `${DRAWIO_JS_RUNTIME}/drawio_svg_postprocess.js`,
     ),

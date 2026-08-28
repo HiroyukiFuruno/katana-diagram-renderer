@@ -5,6 +5,7 @@ pub mod drawio_renderer;
 pub mod mathjax_renderer;
 pub mod mermaid_renderer;
 pub mod plantuml_renderer;
+pub(crate) mod runtime_asset_archive;
 pub mod runtime_assets;
 pub mod svg_rasterize;
 pub mod types;

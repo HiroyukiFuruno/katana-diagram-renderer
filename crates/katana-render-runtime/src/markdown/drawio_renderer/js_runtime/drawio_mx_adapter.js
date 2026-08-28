@@ -83,32 +83,16 @@ function katanaInstallDrawioSvgImages(context) {
 
 function katanaDrawioResolvedImageSrc(resources, src) {
   const resource = resources.get(katanaDrawioResourcePath(src));
-  return [katanaDrawioImageResourceSrc(resource), katanaDrawioExternalImageSrc(src), src].filter(
-    Boolean,
-  )[0];
+  return [katanaDrawioImageResourceSrc(resource), src].filter(Boolean)[0];
 }
 
 function katanaDrawioImageResourceSrc(resource) {
   return [resource].filter(Boolean).map(katanaDrawioDataUri).concat([""])[0];
 }
 
-function katanaDrawioExternalImageSrc(src) {
-  return [src]
-    .filter(katanaIsExternalDrawioImageSrc)
-    .map(() => KATANA_DRAWIO_TRANSPARENT_IMAGE_SRC)
-    .concat([""])[0];
-}
-
-function katanaIsExternalDrawioImageSrc(src) {
-  return ["http://", "https://"].some((it) => String(src).startsWith(it));
-}
-
 function katanaDrawioDataUri(resource) {
   return `data:${resource.mime_type};base64,${katanaDrawioResourceBase64(resource)}`;
 }
-
-const KATANA_DRAWIO_TRANSPARENT_IMAGE_SRC =
-  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 function katanaInstallDrawioOwnerSvgElement() {
   if (!katanaNeedsDrawioOwnerSvgElement()) {

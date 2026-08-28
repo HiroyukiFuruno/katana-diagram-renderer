@@ -16,7 +16,7 @@ function katanaCanvasTextWidth(text, font) {
   const fontScale = katanaCanvasFontScale(font);
   const chars = Array.from(katanaMeasuredTextValue(text));
   return chars
-    .map((char) => katanaCanvasCharacterWidth(char))
+    .map((char) => katanaCanvasCharacterWidth(char, font))
     .reduce((width, charWidth) => width + charWidth * fontScale, 0);
 }
 
@@ -29,12 +29,36 @@ function katanaCanvasFontSize(font) {
   return match ? Number(match[1]) : 16;
 }
 
-function katanaCanvasCharacterWidth(char) {
+function katanaCanvasCharacterWidth(char, font) {
   if (char.charCodeAt(0) === 160) {
-    return KATANA_CANVAS_ASCII_TEXT_WIDTHS[" "];
+    return katanaCanvasAsciiCharacterWidth(" ", font);
   }
-  return KATANA_CANVAS_ASCII_TEXT_WIDTHS[char] ?? katanaTextWidth(char);
+  if (char.charCodeAt(0) <= 255) {
+    return katanaCanvasAsciiCharacterWidth(char, font);
+  }
+  return katanaTextWidth(char);
 }
+
+function katanaCanvasAsciiCharacterWidth(char, font) {
+  const width =
+    KATANA_CANVAS_ASCII_TEXT_WIDTHS[char] ??
+    (katanaIsC4Diagram() ? KATANA_C4_CANVAS_EXTRA_ASCII_TEXT_WIDTHS[char] : undefined) ??
+    katanaTextWidth(char);
+  return katanaIsC4Diagram() ? width * katanaC4CanvasAsciiWidthScale(font) : width;
+}
+
+function katanaC4CanvasAsciiWidthScale(font) {
+  return /(?:^|\s)(?:bold|[6-9]00)(?:\s|$)/i.test(String(font))
+    ? KATANA_C4_CANVAS_BOLD_ASCII_WIDTH_SCALE
+    : KATANA_C4_CANVAS_NORMAL_ASCII_WIDTH_SCALE;
+}
+
+const KATANA_C4_CANVAS_NORMAL_ASCII_WIDTH_SCALE = 1.0000378195990014;
+const KATANA_C4_CANVAS_BOLD_ASCII_WIDTH_SCALE = 1.0853877396807405;
+const KATANA_C4_CANVAS_EXTRA_ASCII_TEXT_WIDTHS = {
+  "[": 4.445,
+  "]": 4.445,
+};
 
 const KATANA_CANVAS_ASCII_TEXT_WIDTHS = {
   " ": 4.445,

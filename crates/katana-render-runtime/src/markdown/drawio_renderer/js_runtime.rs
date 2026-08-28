@@ -20,7 +20,7 @@ impl DrawioJsRuntimeOps {
         preset: &DiagramColorPreset,
     ) -> Result<String, String> {
         let bundle = read_drawio_bundle(drawio_js)?;
-        let request = DrawioRenderRequest::new(source, preset);
+        let request = DrawioRenderRequest::new(source, preset)?;
         let request_json = request.to_json_value().to_string();
         let scripts = DrawioRuntimeScripts::build(&bundle, &request_json);
         let svg = DiagramV8Runtime::render(&scripts)?;
@@ -36,13 +36,13 @@ struct DrawioRenderRequest<'a> {
 }
 
 impl<'a> DrawioRenderRequest<'a> {
-    fn new(source: &'a str, preset: &'a DiagramColorPreset) -> Self {
-        Self {
+    fn new(source: &'a str, preset: &'a DiagramColorPreset) -> Result<Self, String> {
+        Ok(Self {
             source,
             dark_mode: preset.dark_mode,
             background: preset.background.as_ref(),
-            resources: DrawioResourceCatalog::builtin(source),
-        }
+            resources: DrawioResourceCatalog::builtin(source)?,
+        })
     }
 
     fn to_json_value(&self) -> serde_json::Value {
@@ -113,8 +113,20 @@ fn rendered_svg(svg: String) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[path = "js_runtime_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "js_runtime_stencil_test_support.rs"]
+mod stencil_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "js_runtime_html_dom_tests.rs"]
+mod html_dom_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_shadow_tests.rs"]
@@ -153,12 +165,24 @@ mod table_color_tests;
 mod page_bounds_tests;
 
 #[cfg(test)]
+#[path = "js_runtime_page_crop_test_support.rs"]
+mod page_crop_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_page_crop_tests.rs"]
 mod page_crop_tests;
 
 #[cfg(test)]
+#[path = "js_runtime_device_page_test_support.rs"]
+mod device_page_test_support;
+
+#[cfg(test)]
 #[path = "js_runtime_device_page_crop_tests.rs"]
 mod device_page_crop_tests;
+
+#[cfg(test)]
+#[path = "js_runtime_device_page_export_tests.rs"]
+mod device_page_export_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_page_layout_crop_tests.rs"]
@@ -183,6 +207,10 @@ mod html_label_content_tests;
 #[cfg(test)]
 #[path = "js_runtime_edge_label_tests.rs"]
 mod edge_label_tests;
+
+#[cfg(test)]
+#[path = "js_runtime_geometry_tests.rs"]
+mod geometry_tests;
 
 #[cfg(test)]
 #[path = "js_runtime_html_text_source_color_tests.rs"]

@@ -8,10 +8,15 @@ function parseInnerHtml(source, xmlMode = false) {
   };
   const stack = [root];
   const tokenRegex = /<\/?([a-zA-Z0-9:_-]+)([^>]*)>|([^<]+)/g;
-  Array.from(source.matchAll(tokenRegex)).forEach((match) => {
+  const markup = katanaHtmlWithoutComments(source);
+  Array.from(markup.matchAll(tokenRegex)).forEach((match) => {
     appendHtmlToken(stack, match, xmlMode);
   });
   return root.children;
+}
+
+function katanaHtmlWithoutComments(source) {
+  return String(source).replace(/<!-->/g, "").replace(/<!--[\s\S]*?-->/g, "");
 }
 
 function appendHtmlToken(stack, match, xmlMode) {
@@ -41,7 +46,7 @@ function appendHtmlStartTag(stack, match, xmlMode) {
 }
 
 function katanaHtmlNamespace(xmlMode) {
-  return xmlMode ? "katana-xml" : null;
+  return xmlMode ? "katana-xml" : KATANA_HTML_NAMESPACE;
 }
 
 function pushHtmlElementIfOpen(stack, node, fullTag, tagName) {
@@ -85,7 +90,7 @@ function decodeHtmlEntities(value) {
   if (globalThis.__katanaMermaidDiagramType === "block") {
     return katanaDecodeHtmlEntitiesForBlock(value);
   }
-  return String(value)
+  const decoded = String(value)
     .replace(/&amp;nbsp;/g, "\u00A0")
     .replace(/&nbsp;/g, "\u00A0")
     .replace(/&#xa;/gi, "\n")
@@ -96,7 +101,73 @@ function decodeHtmlEntities(value) {
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
+  return katanaDecodeRemainingHtmlEntities(decoded);
 }
+
+function katanaDecodeRemainingHtmlEntities(value) {
+  return String(value)
+    .replace(/&#x([0-9a-f]+);/gi, (_match, codePoint) => {
+      return katanaHtmlCodePoint(codePoint, 16, _match);
+    })
+    .replace(/&#([0-9]+);/g, (_match, codePoint) => {
+      return katanaHtmlCodePoint(codePoint, 10, _match);
+    })
+    .replace(/&([a-z][a-z0-9]+);/gi, (match, name) => {
+      return KATANA_HTML_NAMED_ENTITIES[name] ?? match;
+    });
+}
+
+function katanaHtmlCodePoint(value, radix, fallback) {
+  const codePoint = Number.parseInt(value, radix);
+  return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+    ? String.fromCodePoint(codePoint)
+    : fallback;
+}
+
+const KATANA_HTML_NAMED_ENTITIES = {
+  Igrave: "\u00CC",
+  Ugrave: "\u00D9",
+  Zeta: "\u0396",
+  agrave: "\u00E0",
+  alpha: "\u03B1",
+  auml: "\u00E4",
+  beta: "\u03B2",
+  ccedil: "\u00E7",
+  chi: "\u03C7",
+  copy: "\u00A9",
+  delta: "\u03B4",
+  egrave: "\u00E8",
+  epsilon: "\u03B5",
+  gamma: "\u03B3",
+  hellip: "\u2026",
+  iota: "\u03B9",
+  kappa: "\u03BA",
+  lambda: "\u03BB",
+  mdash: "\u2014",
+  mu: "\u03BC",
+  ndash: "\u2013",
+  nbsp: "\u00A0",
+  nu: "\u03BD",
+  ograve: "\u00F2",
+  omicron: "\u03BF",
+  ouml: "\u00F6",
+  phi: "\u03C6",
+  pi: "\u03C0",
+  psi: "\u03C8",
+  reg: "\u00AE",
+  rho: "\u03C1",
+  rlm: "\u200F",
+  sigma: "\u03C3",
+  sigmaf: "\u03C2",
+  szlig: "\u00DF",
+  tau: "\u03C4",
+  theta: "\u03B8",
+  trade: "\u2122",
+  upsilon: "\u03C5",
+  uuml: "\u00FC",
+  xi: "\u03BE",
+  zwnj: "\u200C",
+};
 
 function katanaDecodeHtmlEntitiesForBlock(value) {
   return String(value)
@@ -117,5 +188,16 @@ class KatanaTextNode extends KatanaNode {
   }
   get outerHTML() {
     return katanaEscapeSvgText(this.textContent);
+  }
+}
+
+class KatanaCommentNode extends KatanaNode {
+  constructor(value) {
+    super("#comment");
+    this.nodeType = 8;
+    this.textContent = String(value);
+  }
+  get outerHTML() {
+    return "";
   }
 }

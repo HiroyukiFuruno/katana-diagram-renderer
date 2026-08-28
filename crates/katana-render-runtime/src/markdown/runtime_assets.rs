@@ -1,15 +1,29 @@
+use crate::markdown::runtime_asset_archive::RuntimeAssetSource;
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static RUNTIME_ASSET_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static MERMAID_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+static DRAWIO_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+#[cfg(test)]
+static ZENUML_RUNTIME_ASSET_BYTES: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
 
-pub const MERMAID_JS_VERSION: &str = "11.15.0";
+#[cfg(test)]
+const ZENUML_RUNTIME_ASSET_ARCHIVE: &[u8] =
+    include_bytes!("generated/zenuml-runtime-assets.bin.br");
+#[cfg(test)]
+include!("generated/zenuml-runtime-assets-index.rs");
+
+pub const MERMAID_JS_VERSION: &str = "11.17.2";
 pub const MERMAID_JS_CHECKSUM: &str =
-    "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de";
+    "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8";
 pub const MERMAID_DOWNLOAD_URL: &str =
-    "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js";
+    "https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js";
 
 pub const MERMAID_ZENUML_JS_VERSION: &str = "0.2.3";
 pub const MERMAID_ZENUML_JS_CHECKSUM: &str =
@@ -23,10 +37,10 @@ pub const ZENUML_CORE_JS_CHECKSUM: &str =
 pub const ZENUML_CORE_DOWNLOAD_URL: &str =
     "https://cdn.jsdelivr.net/npm/@zenuml/core@3.47.9/dist/zenuml.js";
 
-pub const DRAWIO_JS_VERSION: &str = "30.0.4";
+pub const DRAWIO_JS_VERSION: &str = "31.3.2";
 pub const DRAWIO_JS_CHECKSUM: &str =
-    "93a96808a703bc389e5dc7f3769ad3f36ea11f4477a7bb4be82bcf6cfde6ee9d";
-pub const DRAWIO_DOWNLOAD_URL: &str = "https://github.com/jgraph/drawio/releases/tag/v30.0.4";
+    "0c44747cb40c92738082b8dc045787df9fa1f309985b0c0d916e65adef8923fd";
+pub const DRAWIO_DOWNLOAD_URL: &str = "https://github.com/jgraph/drawio/releases/tag/v31.3.2";
 
 pub const MATHJAX_JS_VERSION: &str = "4.1.3";
 pub const MATHJAX_JS_CHECKSUM: &str =
@@ -37,7 +51,7 @@ pub(crate) struct RuntimeAsset {
     kind: &'static str,
     version: &'static str,
     filename: &'static str,
-    bytes: &'static [u8],
+    source: RuntimeAssetSource,
 }
 
 impl RuntimeAsset {
@@ -46,7 +60,10 @@ impl RuntimeAsset {
             kind: "mermaid",
             version: MERMAID_JS_VERSION,
             filename: "mermaid.min.js",
-            bytes: include_bytes!("../../vendor/mermaid/11.15.0/mermaid.min.js"),
+            source: RuntimeAssetSource::Brotli {
+                bytes: include_bytes!("../../vendor/mermaid/11.17.2/mermaid.min.js.br"),
+                cache: &MERMAID_RUNTIME_ASSET_BYTES,
+            },
         }
     }
 
@@ -55,7 +72,26 @@ impl RuntimeAsset {
             kind: "drawio",
             version: DRAWIO_JS_VERSION,
             filename: "drawio.min.js",
-            bytes: include_bytes!("../../vendor/drawio/30.0.4/drawio.min.js"),
+            source: RuntimeAssetSource::Brotli {
+                bytes: include_bytes!("../../vendor/drawio/31.3.2/drawio.min.js.br"),
+                cache: &DRAWIO_RUNTIME_ASSET_BYTES,
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mermaid_zenuml() -> Self {
+        Self {
+            kind: "mermaid-zenuml",
+            version: MERMAID_ZENUML_JS_VERSION,
+            filename: "mermaid-zenuml.min.js",
+            source: RuntimeAssetSource::BrotliRange {
+                bytes: ZENUML_RUNTIME_ASSET_ARCHIVE,
+                cache: &ZENUML_RUNTIME_ASSET_BYTES,
+                start: MERMAID_ZENUML_ASSET_OFFSET,
+                length: MERMAID_ZENUML_ASSET_LENGTH,
+                archive_length: ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+            },
         }
     }
 
@@ -65,7 +101,13 @@ impl RuntimeAsset {
             kind: "zenuml-core",
             version: ZENUML_CORE_JS_VERSION,
             filename: "zenuml.js",
-            bytes: include_bytes!("../../vendor/zenuml-core/3.47.9/zenuml.js"),
+            source: RuntimeAssetSource::BrotliRange {
+                bytes: ZENUML_RUNTIME_ASSET_ARCHIVE,
+                cache: &ZENUML_RUNTIME_ASSET_BYTES,
+                start: ZENUML_CORE_ASSET_OFFSET,
+                length: ZENUML_CORE_ASSET_LENGTH,
+                archive_length: ZENUML_RUNTIME_ASSETS_UNCOMPRESSED_LENGTH,
+            },
         }
     }
 
@@ -90,9 +132,13 @@ impl RuntimeAsset {
         Ok(path)
     }
 
+    pub(crate) fn bytes(&self) -> Result<&'static [u8], String> {
+        self.source.bytes()
+    }
+
     fn write_atomically(&self, path: &Path, parent: &Path) -> Result<(), String> {
         let temp_path = self.temporary_write_path(parent);
-        std::fs::write(&temp_path, self.bytes).map_err(runtime_asset_error)?;
+        std::fs::write(&temp_path, self.bytes()?).map_err(runtime_asset_error)?;
         match std::fs::rename(&temp_path, path) {
             Ok(()) => Ok(()),
             #[cfg(windows)]
@@ -130,7 +176,7 @@ impl RuntimeAsset {
 
     fn exists_with_same_bytes(&self, path: &Path) -> Result<bool, String> {
         match std::fs::read(path) {
-            Ok(existing) => Ok(existing == self.bytes),
+            Ok(existing) => Ok(existing == self.bytes()?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(runtime_asset_error(error)),
         }

@@ -24,16 +24,33 @@ fn release_check_requires_all_quality_and_publish_readiness_gates()
 }
 
 #[test]
-fn release_target_check_allows_only_v0_4_17() -> Result<(), Box<dyn std::error::Error>> {
+fn release_verify_tests_the_packaged_library_sources() -> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let recipe = recipe_body(&justfile, "release-verify")?;
+
+    assert!(recipe.contains(
+        "test --manifest-path \"target/package/katana-render-runtime-{{VERSION_BARE}}/Cargo.toml\" --lib --locked"
+    ));
+    Ok(())
+}
+
+#[test]
+fn release_target_check_requires_v0_4_19_intent() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.18", "0.4.17")?);
-    assert!(release_target_check(root, "0.4.18", "0.4.18")?);
+    assert!(release_target_check(root, "0.4.19", "0.4.18", "HEAD")?);
+    assert!(release_target_check(root, "0.4.19", "0.4.19", "HEAD")?);
+    assert!(!release_target_check(
+        root,
+        "0.4.19",
+        "0.4.18",
+        "missing-release-head",
+    )?);
     for version in [
         "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8",
         "0.4.9", "0.4.10", "0.4.11", "0.4.12", "0.4.13", "0.4.14", "0.4.15", "0.4.16", "0.4.17",
-        "0.5.0", "1.0.0", "2.0.0",
+        "0.4.18", "0.5.0", "1.0.0", "2.0.0",
     ] {
-        assert!(!release_target_check(root, version, "0.4.17")?);
+        assert!(!release_target_check(root, version, "0.4.18", "HEAD",)?);
     }
     Ok(())
 }
@@ -292,6 +309,7 @@ fn release_target_check(
     root: &Path,
     target_version: &str,
     latest_version: &str,
+    head_ref: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let output = Command::new("python3")
         .args([
@@ -300,6 +318,8 @@ fn release_target_check(
             target_version,
             "--latest-version",
             latest_version,
+            "--head-ref",
+            head_ref,
         ])
         .current_dir(root)
         .output()?;

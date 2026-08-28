@@ -9,6 +9,7 @@ import {
   type RuntimeAssetDefinition,
   RuntimeAssetPaths,
 } from "./runtime-asset-common";
+import { RuntimePackageAssetCompressor } from "./runtime-package-asset-compressor";
 
 class RuntimeAssetDownloader {
   async download(definition: RuntimeAssetDefinition, version: string): Promise<void> {
@@ -68,6 +69,7 @@ export class RuntimeSourceUpdater {
     );
     if (
       definition.kind !== "mermaid-zenuml" &&
+      definition.kind !== "zenuml-core" &&
       definition.kind !== "plantuml" &&
       definition.kind !== "mathjax"
     ) {
@@ -80,7 +82,6 @@ export class RuntimeSourceUpdater {
     if (definition.kind !== "mermaid-zenuml") {
       return;
     }
-    this.updateVendorReference(RuntimeAssetPaths.mermaidRuntimeScriptsRust(), definition, version);
     this.updateVendorReference(RuntimeAssetPaths.mermaidDiagramUpdateScript(), definition, version);
   }
 
@@ -131,10 +132,7 @@ export class RuntimeSourceUpdater {
   }
 
   replaceConst(source: string, constName: string, value: string): string {
-    const replacement =
-      value.length > 56
-        ? `pub const ${constName}: &str =\n    "${value}";`
-        : `pub const ${constName}: &str = "${value}";`;
+    const replacement = `pub const ${constName}: &str = "${value}";`;
     const pattern = new RegExp(`pub const ${constName}: &str =\\s*"[^"]+";`);
     return source.replace(pattern, replacement);
   }
@@ -146,7 +144,7 @@ export class RuntimeSourceUpdater {
   ): string {
     const kind = this.escapePattern(definition.kind);
     const fileName = this.escapePattern(definition.fileName);
-    const pattern = new RegExp(`(vendor/${kind}/)[^/]+(/${fileName})`);
+    const pattern = new RegExp(`(vendor/${kind}/)[^/]+(/${fileName}(?:\\.br)?)`);
     if (!pattern.test(source)) {
       throw new Error(`Runtime asset include path not found: ${definition.kind}`);
     }
@@ -166,7 +164,7 @@ export class RuntimeSourceUpdater {
       }
       return source.replace(pattern, `$1${version}$2`);
     }
-    const pattern = new RegExp(`("vendor/${kind}/)[^/]+(/\\*\\*",)`);
+    const pattern = new RegExp(`("vendor/${kind}/)[^/]+(/[^"]+",)`, "g");
     if (!pattern.test(source)) {
       throw new Error(`Runtime asset package include not found: ${definition.kind}`);
     }
@@ -187,6 +185,9 @@ class UpdateCommand {
   async run() {
     await new RuntimeAssetDownloader().download(this.definition, this.version);
     const checksum = RuntimeAssetChecksum.writeChecksumFile(this.definition, this.version);
+    if (RuntimePackageAssetCompressor.supports(this.definition)) {
+      new RuntimePackageAssetCompressor().write(this.definition, this.version);
+    }
     if (this.definition.kind === "plantuml") {
       fs.rmSync(RuntimeAssetPaths.assetFile(this.definition, this.version), { force: true });
     }
@@ -200,7 +201,7 @@ const CliOptions = {
   command(argv: string[]): UpdateCommand {
     if (argv.length !== 2) {
       throw new Error(
-        "Usage: bun run scripts/runtime-assets/update.ts <mermaid|mermaid-zenuml|drawio|mathjax|plantuml> <version>",
+        "Usage: bun run scripts/runtime-assets/update.ts <mermaid|mermaid-zenuml|zenuml-core|drawio|mathjax|plantuml> <version>",
       );
     }
     return new UpdateCommand(

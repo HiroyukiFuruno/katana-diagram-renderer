@@ -48,7 +48,7 @@ function katanaStateViewBoxContext(svg) {
 function katanaHasStateViewBoxContext(context) {
   return [
     context.viewBox,
-    context.viewBox?.[1] < 0,
+    context.viewBox?.[1] !== 0,
     Math.abs(context.viewBox?.[1] ?? 0) <= 12,
   ].every(Boolean);
 }

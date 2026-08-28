@@ -25,6 +25,7 @@ GitHub のブランチ保護（branch protection）では、少なくとも次�
 内容は次の通り。
 
 - 版番号（version）が GitHub Release / remote tag 上の自然な次版であること。`v0.3.0` は rename release として KDR の版番号を引き継ぐ
+- ユーザーが対象versionへ含めるよう指定した全commitをrelease branchが祖先として含むこと
 - 対象タグ（tag）が remote 上の既存タグを上書きしないこと
 - 対象版番号（version）が crates.io に未公開であること
 - 整形確認（format）、静的検査（lint）、単体テスト（unit test）、抽象構文木検査（AST lint）

@@ -44,6 +44,16 @@ test("ZenUML latest は npm registry の version を読む", async () => {
   ]);
 });
 
+test("ZenUML Core latest は npm registry の version を読む", async () => {
+  const fetchStub = new FetchStub(JSON.stringify({ version: "3.47.9" }));
+  const client = new LatestVersionClient(fetchStub.handler());
+
+  const latest = await client.latest(RuntimeAssetCatalog.byKind("zenuml-core"));
+
+  expect(latest).toBe("3.47.9");
+  expect(fetchStub.requestedUrls).toEqual(["https://registry.npmjs.org/@zenuml/core/latest"]);
+});
+
 test("MathJax latest は npm registry の version を読む", async () => {
   const fetchStub = new FetchStub(JSON.stringify({ version: "4.1.2" }));
   const client = new LatestVersionClient(fetchStub.handler());

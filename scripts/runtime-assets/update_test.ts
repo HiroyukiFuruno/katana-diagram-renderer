@@ -44,6 +44,16 @@ test("Rust runtime asset version const を 1 行形式でも更新できる", ()
   expect(updated).toBe('pub const DRAWIO_JS_VERSION: &str = "30.0.1";\n');
 });
 
+test("長い Rust const も rustfmt と同じ 1 行形式で更新する", () => {
+  const source = 'pub const PLANTUML_DOWNLOAD_URL: &str = "old";\n';
+  const value =
+    "https://repo1.maven.org/maven2/net/sourceforge/plantuml/plantuml-lgpl/1.2026.7/plantuml-lgpl-1.2026.7.jar";
+
+  const updated = new RuntimeSourceUpdater().replaceConst(source, "PLANTUML_DOWNLOAD_URL", value);
+
+  expect(updated).toBe(`pub const PLANTUML_DOWNLOAD_URL: &str = "${value}";\n`);
+});
+
 test("PlantUML package include は checksum manifest だけを更新する", () => {
   const plantuml = {
     kind: "plantuml",
@@ -67,4 +77,36 @@ test("PlantUML package include は checksum manifest だけを更新する", () 
   );
 
   expect(updated).toBe('include = ["vendor/plantuml/1.2026.4/plantuml.jar.sha256",]\n');
+});
+
+test("圧縮配布資産の package include は全ファイルを同じ version へ更新する", () => {
+  const mermaid = {
+    kind: "mermaid",
+    displayName: "Mermaid.js",
+    version: "11.17.2",
+    checksum: "checksum",
+    fileName: "mermaid.min.js",
+    rustVersionConst: "MERMAID_JS_VERSION",
+    rustChecksumConst: "MERMAID_JS_CHECKSUM",
+    rustDownloadConst: "MERMAID_DOWNLOAD_URL",
+    latestUrl: "latest",
+    releasePageUrl: (version: string) => version,
+    downloadUrl: (version: string) => version,
+  } as const;
+  const source = [
+    "include = [",
+    '    "vendor/mermaid/11.17.2/mermaid.min.js.br",',
+    '    "vendor/mermaid/11.17.2/mermaid.min.js.sha256",',
+    "]",
+  ].join("\n");
+
+  const updated = new RuntimeSourceUpdater().replacePackageIncludeVersion(
+    source,
+    mermaid,
+    "11.18.0",
+  );
+
+  expect(updated).toContain('"vendor/mermaid/11.18.0/mermaid.min.js.br",');
+  expect(updated).toContain('"vendor/mermaid/11.18.0/mermaid.min.js.sha256",');
+  expect(updated).not.toContain("11.17.2");
 });

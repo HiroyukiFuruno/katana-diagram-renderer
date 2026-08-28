@@ -89,7 +89,8 @@ function katanaVisibleChildBoxes(node) {
       const box = child.getBBox();
       const offset = katanaNodeTranslate(child);
       return katanaBox(box.x + offset[0], box.y + offset[1], box.width, box.height);
-    });
+    })
+    .filter(katanaHasArea);
 }
 
 function katanaMeasuredBox(node) {

@@ -1,4 +1,4 @@
-import { RuntimeAssetCatalog, type RuntimeAssetDefinition } from "./runtime-asset-common";
+import type { RuntimeAssetDefinition } from "./runtime-asset-common";
 
 interface NpmLatestResponse {
   readonly version: string;
@@ -58,56 +58,4 @@ export class LatestVersionClient {
     }
     return response;
   }
-}
-
-class LatestCheckCommand {
-  constructor(
-    private definitions: RuntimeAssetDefinition[],
-    private client: LatestVersionClient,
-  ) {}
-
-  async run() {
-    for (const definition of this.definitions) {
-      await this.print(definition);
-    }
-  }
-
-  private async print(definition: RuntimeAssetDefinition) {
-    const latest = await this.client.latest(definition);
-    console.log(definition.displayName);
-    console.log(`current=${definition.version}`);
-    console.log(`latest=${latest}`);
-    console.log(`update_hint=${this.updateHint(definition, latest)}`);
-  }
-
-  private updateHint(definition: RuntimeAssetDefinition, latest: string): string {
-    if (latest === definition.version) {
-      return "none";
-    }
-    return `just ${this.updateRecipe(definition)} ${latest}`;
-  }
-
-  private updateRecipe(definition: RuntimeAssetDefinition): string {
-    if (definition.kind === "mermaid-zenuml") {
-      return "zenuml-update";
-    }
-    return `${definition.kind}-update`;
-  }
-}
-
-const CliOptions = {
-  definitions(argv: string[]): RuntimeAssetDefinition[] {
-    const kind = argv.at(0);
-    if (kind === undefined || kind === "all") {
-      return RuntimeAssetCatalog.all();
-    }
-    return [RuntimeAssetCatalog.byKind(kind)];
-  },
-};
-
-if (import.meta.main) {
-  await new LatestCheckCommand(
-    CliOptions.definitions(process.argv.slice(2)),
-    new LatestVersionClient(),
-  ).run();
 }

@@ -12,8 +12,9 @@ import sys
 from dataclasses import dataclass
 from urllib import error, request
 
-REQUIRED_LATEST_RELEASE = "v0.4.17"
-REQUIRED_TARGET_RELEASE = "v0.4.18"
+REQUIRED_LATEST_RELEASE = "v0.4.18"
+REQUIRED_TARGET_RELEASE = "v0.4.19"
+REQUIRED_RELEASE_COMMITS = ("02a73d293c04f9635fd3a822ac865bf81d4c8745",)
 
 
 @dataclass(frozen=True, order=True)
@@ -42,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repo", default="HiroyukiFuruno/katana-render-runtime")
     parser.add_argument("--remote", default="origin")
+    parser.add_argument(
+        "--head-ref",
+        default="HEAD",
+        help="Git ref that must contain every release intent commit",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +97,20 @@ def latest_remote_tag(remote: str) -> StableVersion | None:
     return max(versions) if versions else None
 
 
+def missing_required_commits(head_ref: str) -> list[str]:
+    missing: list[str] = []
+    for commit in REQUIRED_RELEASE_COMMITS:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, head_ref],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            missing.append(commit)
+    return missing
+
+
 def main() -> int:
     args = parse_args()
     target = StableVersion.parse(args.target_version)
@@ -109,6 +129,14 @@ def main() -> int:
             f"{required_latest.tag()} or an idempotent retry of {required_target.tag()}, "
             f"resolved {latest_text} and "
             f"got {target.tag()}.",
+            file=sys.stderr,
+        )
+        return 1
+    missing_commits = missing_required_commits(args.head_ref)
+    if missing_commits:
+        print(
+            "Release target sanity check failed: release branch is missing required "
+            f"commit(s): {', '.join(missing_commits)}.",
             file=sys.stderr,
         )
         return 1

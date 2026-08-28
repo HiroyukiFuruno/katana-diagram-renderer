@@ -276,6 +276,31 @@ current Rust/V8 work only; previous Chromium results are not completion evidence
 - [/] 15.4 Pass the complete release gate, publish and verify KRR `0.4.17`, then
   update KDV and KatanA through crates.io only.
 
+### 16. v0.4.18 Unified Dependency Update And Runtime Asset Recovery
+
+- [x] 16.1 Accept both `all` and the legacy task-runner form `runtime=all` at
+  the runtime-asset argument boundary and cover the compatibility behavior with
+  script tests.
+- [x] 16.2 Provide `just depends-update-all` as the single user-facing update
+  entrypoint for compatible Rust, JavaScript, and bundled runtime assets, and
+  remove obsolete per-asset update recipes from the task-runner interface.
+- [x] 16.3 Preserve the existing quality thresholds while updating dependency
+  locks and generated runtime/reference assets. Keep TypeScript `6.0.3` when the
+  current major cannot satisfy the runtime-bundle contract, and document the
+  verified incompatibility instead of lowering a gate.
+- [x] 16.4 Restore every Mermaid and Draw.io reference comparison to the
+  existing minimum score of 99. Fix shared DOM, SVG, Draw.io style, stencil,
+  path-bound, and export-boundary semantics; do not finish at a failure report
+  or replace a semantic fix with a fixture-name-specific score adjustment.
+- [x] 16.5 Record reusable score-recovery diagnostics in
+  `docs/runtime-assets.md`: start from source/runtime/reference geometry,
+  isolate representative fixtures, rebuild the bundle and CLI, then rerun the
+  full 99 gate. Treat fractional export-origin correction as removable once
+  direct runtime geometry matches the reference.
+- [x] 16.6 Run `just depends-update-all` end to end with the recovered runtime,
+  then pass type, format/lint, script, bundle, full Mermaid, full Draw.io, and
+  repository checks without exclusions or threshold changes.
+
 ## Local Verification Evidence
 
 - KRR: KRR `0.4.8` is published and verified. The `0.4.9` candidate keeps the

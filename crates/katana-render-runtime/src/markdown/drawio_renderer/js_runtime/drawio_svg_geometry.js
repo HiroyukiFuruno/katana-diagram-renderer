@@ -16,7 +16,36 @@ function katanaDrawioIsCellContentGroup(group) {
 }
 
 function katanaDrawioNeedsHalfPixelTranslate(group) {
-  return [!group.getAttribute("transform"), katanaDrawioGroupHasDirectShape(group)].every(Boolean);
+  return [
+    !group.getAttribute("transform"),
+    katanaDrawioGroupHasDirectShape(group),
+    !katanaDrawioGroupBelongsToSourceEdge(group),
+    katanaDrawioGroupUsesAwsCrispGeometry(group),
+    katanaDrawioGroupUsesOddStrokeWidth(group),
+  ].every(Boolean);
+}
+
+function katanaDrawioGroupUsesOddStrokeWidth(group) {
+  const id = group.parentNode?.getAttribute?.("data-cell-id");
+  const width = Number(KATANA_DRAWIO_SOURCE_CELL_STYLE_CACHE.get(id)?.get("strokeWidth") ?? 1);
+  return Number.isInteger(width) && Math.abs(width % 2) === 1;
+}
+
+function katanaDrawioGroupUsesAwsCrispGeometry(group) {
+  const id = group.parentNode?.getAttribute?.("data-cell-id");
+  const shape = KATANA_DRAWIO_SOURCE_CELL_STYLE_CACHE.get(id)?.get("shape") ?? "";
+  return shape === "" || shape === "mxgraph.aws4.resourceIcon";
+}
+
+function katanaDrawioGroupBelongsToSourceEdge(group) {
+  const id = group.parentNode?.getAttribute?.("data-cell-id");
+  return Array.from(katanaDrawioRequestSource().matchAll(/<mxCell\b([^>]*)/g))
+    .map((match) => katanaDrawioXmlAttributes(match[1]))
+    .some(
+      (attributes) =>
+        katanaDrawioCellAttribute(attributes, "id") === id &&
+        katanaDrawioCellAttribute(attributes, "edge") === "1",
+    );
 }
 
 function katanaDrawioGroupHasDirectShape(group) {

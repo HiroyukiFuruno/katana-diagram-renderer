@@ -53,9 +53,21 @@ function katanaPathBox(node) {
 
 function katanaSvgPathBox(node) {
   if (node.localName === "path") {
-    return katanaOptionalNumberListBox(node.getAttribute("d"));
+    const pathData = node.getAttribute("d");
+    return katanaSvgParsedPathBox(pathData) ?? katanaOptionalNumberListBox(pathData);
   }
   return null;
+}
+
+function katanaSvgParsedPathBox(pathData) {
+  if (!pathData) {
+    return null;
+  }
+  const bounds = katanaParsedSerializedPathDataBox(pathData);
+  if (!bounds) {
+    return null;
+  }
+  return katanaBox(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]);
 }
 
 function katanaSvgPointsBox(node) {
@@ -113,7 +125,7 @@ function katanaTextLineValues(node, text, lines) {
 function katanaTextLineBox(node, line, index) {
   const x = katanaLineValueOrDefault(line.x, katanaNumberAttrOrDefault(node, "x", 0));
   const y = katanaLineValueOrDefault(line.y, katanaTextLineFallbackY(node, index));
-  return katanaAnchoredTextNodeBox(node, line.text, x, y);
+  return katanaAnchoredTextNodeBox(line.node ?? node, line.text, x, y);
 }
 
 function katanaLineValueOrDefault(value, fallback) {

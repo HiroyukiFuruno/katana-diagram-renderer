@@ -109,9 +109,16 @@ function katanaReadPathCoordinateGroups(parser, relative, pointCount) {
 }
 
 function katanaReadPathPointGroup(parser, relative, pointCount) {
-  Array.from({ length: pointCount }).forEach(() => {
-    katanaSetPathPoint(parser, katanaReadPathPoint(parser, relative));
-  });
+  const origin = { x: parser.x, y: parser.y };
+  Array.from({ length: pointCount })
+    .map(() => katanaReadPathPointFromOrigin(parser, relative, origin))
+    .forEach((point) => katanaSetPathPoint(parser, point));
+}
+
+function katanaReadPathPointFromOrigin(parser, relative, origin) {
+  const x = katanaReadPathNumber(parser);
+  const y = katanaReadPathNumber(parser);
+  return relative ? [origin.x + x, origin.y + y] : [x, y];
 }
 
 const KATANA_PATH_COORDINATE_GROUP_READERS = [
@@ -142,8 +149,28 @@ function katanaReadPathVerticalLines(parser, relative) {
 
 function katanaReadPathArcs(parser, relative) {
   while (katanaCanReadPathNumbers(parser, 7)) {
-    parser.index += 5;
-    katanaSetPathPoint(parser, katanaReadPathPoint(parser, relative));
+    const start = [parser.x, parser.y];
+    const radius = [Math.abs(katanaReadPathNumber(parser)), Math.abs(katanaReadPathNumber(parser))];
+    const rotation = katanaReadPathNumber(parser);
+    katanaReadPathNumber(parser);
+    const sweep = katanaReadPathNumber(parser);
+    const end = katanaReadPathPoint(parser, relative);
+    katanaSetPathPoint(parser, end);
+    katanaAddAxisAlignedArcExtremum(parser, start, end, radius, rotation, sweep);
+  }
+}
+
+function katanaAddAxisAlignedArcExtremum(parser, start, end, radius, rotation, sweep) {
+  const deltaX = end[0] - start[0];
+  const deltaY = end[1] - start[1];
+  if (rotation === 0 && deltaY === 0 && Math.abs(deltaX) === radius[0] * 2) {
+    const direction = Math.sign(deltaX) * (sweep === 0 ? 1 : -1);
+    parser.points.push((start[0] + end[0]) / 2, start[1] + direction * radius[1]);
+    return;
+  }
+  if (rotation === 0 && deltaX === 0 && Math.abs(deltaY) === radius[1] * 2) {
+    const direction = Math.sign(deltaY) * (sweep === 0 ? -1 : 1);
+    parser.points.push(start[0] + direction * radius[0], (start[1] + end[1]) / 2);
   }
 }
 

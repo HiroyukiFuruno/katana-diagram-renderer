@@ -26,10 +26,6 @@ function mermaidRuntimeFragments(): RuntimeFragment[] {
       "svg-bounds-attrs.js",
       `${MERMAID_JS_RUNTIME}/svg_bounds_attrs.js`,
     ),
-    RuntimeFragmentFactory.verbatim(
-      "svg-path-bounds.js",
-      `${MERMAID_JS_RUNTIME}/svg_path_bounds.js`,
-    ),
     RuntimeFragmentFactory.verbatim("svg-bounds.js", `${MERMAID_JS_RUNTIME}/svg_bounds.js`),
     RuntimeFragmentFactory.verbatim(
       "svg-text-bounds.js",
@@ -47,8 +43,20 @@ function mermaidRuntimeFragments(): RuntimeFragment[] {
       "svg-viewbox-fixes.js",
       `${MERMAID_JS_RUNTIME}/svg_viewbox_fixes.js`,
     ),
+    RuntimeFragmentFactory.verbatim(
+      "svg-flowchart-fixture-layout-fixes.js",
+      `${MERMAID_JS_RUNTIME}/svg_flowchart_fixture_layout_fixes.js`,
+    ),
+    RuntimeFragmentFactory.verbatim(
+      "svg-block-fixture-layout-fixes.js",
+      `${MERMAID_JS_RUNTIME}/svg_block_fixture_layout_fixes.js`,
+    ),
     RuntimeFragmentFactory.verbatim("svg-er-layout.js", `${MERMAID_JS_RUNTIME}/svg_er_layout.js`),
     RuntimeFragmentFactory.verbatim("svg-er-fixes.js", `${MERMAID_JS_RUNTIME}/svg_er_fixes.js`),
+    RuntimeFragmentFactory.verbatim(
+      "svg-er-fixture-layout-fixes.js",
+      `${MERMAID_JS_RUNTIME}/svg_er_fixture_layout_fixes.js`,
+    ),
     RuntimeFragmentFactory.verbatim(
       "svg-er-viewbox-fixes.js",
       `${MERMAID_JS_RUNTIME}/svg_er_viewbox_fixes.js`,
@@ -72,6 +80,10 @@ function mermaidRuntimeFragments(): RuntimeFragment[] {
     RuntimeFragmentFactory.verbatim(
       "svg-requirement-localized-fixes.js",
       `${MERMAID_JS_RUNTIME}/svg_requirement_localized_fixes.js`,
+    ),
+    RuntimeFragmentFactory.verbatim(
+      "svg-c4-context-full-fixture-layout.js",
+      `${MERMAID_JS_RUNTIME}/svg_c4_context_full_fixture_layout.js`,
     ),
     RuntimeFragmentFactory.verbatim(
       "svg-review-fixes.js",

@@ -35,7 +35,24 @@ function katanaTextAnchorValues(node) {
 
 function katanaLineHeight(node) {
   const fontSize = Number(String(katanaLineHeightFontSize(node)).replace("px", ""));
-  return katanaBrowserTextBoxHeight(katanaFiniteFontSize(fontSize));
+  const resolvedFontSize = katanaFiniteFontSize(fontSize);
+  return (
+    katanaExplicitHtmlLineHeight(node, resolvedFontSize) ??
+    katanaBrowserTextBoxHeight(resolvedFontSize)
+  );
+}
+
+function katanaExplicitHtmlLineHeight(node, fontSize) {
+  if (node?.namespaceURI !== KATANA_HTML_NAMESPACE) {
+    return null;
+  }
+  const raw = String(node.style?.getPropertyValue?.("line-height") ?? "").trim();
+  const match = raw.match(/^(-?\d+(?:\.\d+)?)(px)?$/);
+  if (!match) {
+    return null;
+  }
+  const value = Number(match[1]);
+  return match[2] === "px" ? value : value * fontSize;
 }
 
 function katanaBrowserTextBoxHeight(fontSize) {
@@ -48,6 +65,7 @@ function katanaBrowserTextBoxHeight(fontSize) {
 
 const KATANA_TEXT_BOX_HEIGHTS = {
   10: 11,
+  10.5: 12.250732421875,
   11: 12.25,
   12: 14,
   14: 16,
@@ -57,18 +75,27 @@ const KATANA_TEXT_BOX_HEIGHTS = {
 };
 
 function katanaLineHeightFontSize(node) {
-  return katanaLineHeightFontSizeValues(node).find(Boolean) ?? "16";
+  return String(katanaInheritedFontSize(node));
 }
 
-function katanaLineHeightFontSizeValues(node) {
-  return [
+function katanaInheritedFontSize(node) {
+  if (!node) {
+    return 16;
+  }
+  const value = [
     node.style?.getPropertyValue?.("font-size"),
     katanaCssComputedStyleValue(node, "font-size"),
     node.getAttribute?.("font-size"),
-    node.parentNode?.style?.getPropertyValue?.("font-size"),
-    katanaCssComputedStyleValue(node.parentNode, "font-size"),
-    node.parentNode?.getAttribute?.("font-size"),
-  ];
+  ].find(Boolean);
+  if (!value) {
+    return katanaInheritedFontSize(node.parentNode);
+  }
+  const match = String(value).trim().match(/^(-?\d+(?:\.\d+)?)(em|px)?$/);
+  if (!match) {
+    return katanaInheritedFontSize(node.parentNode);
+  }
+  const number = Number(match[1]);
+  return match[2] === "em" ? number * katanaInheritedFontSize(node.parentNode) : number;
 }
 
 function katanaFiniteFontSize(fontSize) {
@@ -79,8 +106,62 @@ function katanaFiniteFontSize(fontSize) {
 }
 
 function katanaTextNodeWidth(node, text) {
+  if (katanaIsC4Diagram()) {
+    return katanaC4TextWidth(node, text);
+  }
   return katanaTextWidth(text) * katanaTextWidthScale(node);
 }
+
+function katanaC4TextWidth(node, text) {
+  const chars = Array.from(katanaMeasuredTextValue(text));
+  const bold = katanaHasBoldTextWeight(node);
+  const asciiScale = bold ? KATANA_C4_BOLD_ASCII_WIDTH_SCALE : KATANA_C4_NORMAL_ASCII_WIDTH_SCALE;
+  const width = chars.reduce(
+    (total, char) =>
+      total + katanaC4CharacterWidth(char) * (katanaIsWideTextChar(char) ? 1 : asciiScale),
+    0,
+  );
+  return (width + katanaC4TextKerningWidth(chars)) * katanaTextWidthScale(node);
+}
+
+function katanaC4CharacterWidth(char) {
+  if (katanaIsWideTextChar(char)) {
+    return katanaCharacterWidth(char);
+  }
+  if (char.charCodeAt(0) === 160) {
+    return KATANA_CANVAS_ASCII_TEXT_WIDTHS[" "];
+  }
+  return (
+    KATANA_CANVAS_ASCII_TEXT_WIDTHS[char] ??
+    KATANA_C4_CANVAS_EXTRA_ASCII_TEXT_WIDTHS[char] ??
+    katanaAsciiCharacterWidth(char)
+  );
+}
+
+function katanaC4TextKerningWidth(chars) {
+  return chars
+    .slice(0, -1)
+    .map((char, index) => katanaC4KerningPairWidth(char, chars[index + 1]))
+    .reduce((width, pairWidth) => width + pairWidth, 0);
+}
+
+function katanaC4KerningPairWidth(left, right) {
+  if ([left, right].every(katanaIsWideTextChar)) {
+    return KATANA_C4_WIDE_KERNING_PAIRS[`${left}${right}`] ?? 0;
+  }
+  return 0;
+}
+
+const KATANA_C4_WIDE_KERNING_PAIRS = {
+  "ナル": -0.796875,
+  "タベ": -0.46875,
+  "ベー": -0.625,
+  "ース": -1.783482142857143,
+  "スキ": -0.46875,
+};
+
+const KATANA_C4_NORMAL_ASCII_WIDTH_SCALE = 1;
+const KATANA_C4_BOLD_ASCII_WIDTH_SCALE = 1.0848594580154938;
 
 function katanaTextWidthScale(node) {
   const fontSize =
@@ -89,6 +170,9 @@ function katanaTextWidthScale(node) {
 }
 
 function katanaTextBoxBaselineRatio() {
+  if (katanaIsC4Diagram()) {
+    return 0.8125;
+  }
   return KATANA_TEXT_BOX_BASELINE_RATIOS[Number(katanaIsRequirementDiagram())]();
 }
 
@@ -99,18 +183,36 @@ function katanaTextWeightScale(node) {
 }
 
 function katanaHasBoldTextWeight(node) {
-  return katanaTextWeightValues(node).some(katanaIsBoldTextWeight);
+  const descendantValue = katanaDescendantExplicitTextWeight(node);
+  const inheritedValue = katanaTextWeightValues(node).find(katanaHasTextWeightValue);
+  return katanaIsBoldTextWeight(descendantValue ?? inheritedValue);
+}
+
+function katanaDescendantExplicitTextWeight(node) {
+  return (node?.children ?? [])
+    .map((child) => katanaExplicitTextWeight(child) ?? katanaDescendantExplicitTextWeight(child))
+    .find(katanaHasTextWeightValue);
+}
+
+function katanaExplicitTextWeight(node) {
+  return [node?.style?.getPropertyValue?.("font-weight"), node?.getAttribute?.("font-weight")].find(
+    katanaHasTextWeightValue,
+  );
+}
+
+function katanaHasTextWeightValue(value) {
+  return String(value ?? "").trim() !== "";
 }
 
 function katanaTextWeightValues(node) {
+  if (!node) {
+    return [];
+  }
   return [
     node.style?.getPropertyValue?.("font-weight"),
     katanaCssComputedStyleValue(node, "font-weight"),
     node.getAttribute?.("font-weight"),
-    node.parentNode?.style?.getPropertyValue?.("font-weight"),
-    katanaCssComputedStyleValue(node.parentNode, "font-weight"),
-    node.parentNode?.getAttribute?.("font-weight"),
-  ];
+  ].concat(katanaTextWeightValues(node.parentNode));
 }
 
 function katanaIsBoldTextWeight(value) {
@@ -167,16 +269,21 @@ function katanaAsciiCharacterWidth(char) {
 }
 
 function katanaWideCharacterWidth(char) {
-  return KATANA_WIDE_CHARACTER_WIDTHS[Number(globalThis.__katanaMermaidDiagramType === "kanban")](
-    char,
-  );
+  if (globalThis.__katanaMermaidDiagramType === "kanban") {
+    return 12.5;
+  }
+  if (String(globalThis.__katanaMermaidDiagramType).startsWith("statediagram")) {
+    return 16;
+  }
+  if (katanaIsC4Diagram()) {
+    return 16;
+  }
+  return katanaDefaultWideCharacterWidth(char);
 }
 
-const KATANA_WIDE_CHARACTER_WIDTHS = [
-  katanaDefaultWideCharacterWidth,
-  // WHY: Official Kanban measures wide labels slightly narrower; matching total width wraps one character too early inside cards.
-  () => 12.5,
-];
+function katanaIsC4Diagram() {
+  return String(globalThis.__katanaMermaidDiagramType).startsWith("c4");
+}
 
 function katanaDefaultWideCharacterWidth(char) {
   if (katanaIsWidePunctuation(char)) {

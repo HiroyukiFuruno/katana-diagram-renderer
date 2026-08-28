@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_committed_zenuml_fixtures_after_markdown_extraction() {
+    fn detects_localized_zenuml_markdown_after_extraction() {
         for fixture in [EN_ZENUML_FIXTURE, JA_ZENUML_FIXTURE] {
             let source = fixture_mermaid_source(fixture);
 
@@ -127,7 +127,7 @@ mod tests {
     }
 
     const EN_ZENUML_FIXTURE: &str =
-        include_str!("../../../../../tests/fixtures/mermaid/en/28-zen-uml.md");
+        "# ZenUML\n\n~~~mermaid\nzenuml\ntitle Order Service\nClient.request()\n~~~\n";
     const JA_ZENUML_FIXTURE: &str =
-        include_str!("../../../../../tests/fixtures/mermaid/ja/28-zen-uml.md");
+        "# ZenUML\n\n~~~mermaid\nzenuml\ntitle 注文サービス\nClient.request()\n~~~\n";
 }

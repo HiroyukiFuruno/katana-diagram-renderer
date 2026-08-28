@@ -1,11 +1,92 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import ts from "typescript";
 import type { RuntimeBundlePaths } from "./runtime-bundle-paths";
 import type { GeneratedBundle } from "./runtime-bundle-types";
 import { runtimeEntryName } from "./runtime-entry-names";
 
-const MODULE_KEYWORD_PATTERN = /(^|[^\w$])(import|export)([^\w$])/;
+function isEvalCall(node: ts.CallExpression): boolean {
+  if (ts.isIdentifier(node.expression)) {
+    return node.expression.text === "eval";
+  }
+  return ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "eval";
+}
+
+function hasExportModifier(node: ts.Node): boolean {
+  return (
+    ts.canHaveModifiers(node) &&
+    ts
+      .getModifiers(node)
+      ?.some(
+        (modifier) =>
+          modifier.kind === ts.SyntaxKind.ExportKeyword ||
+          modifier.kind === ts.SyntaxKind.DefaultKeyword,
+      ) === true
+  );
+}
+
+function inspectModuleSyntax(source: string): {
+  evaluatedSources: string[];
+  found: boolean;
+} {
+  const file = ts.createSourceFile(
+    "runtime-bundle.js",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const evaluatedSources: string[] = [];
+  let found = false;
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) ||
+      ts.isImportEqualsDeclaration(node) ||
+      ts.isExportDeclaration(node) ||
+      ts.isExportAssignment(node) ||
+      hasExportModifier(node) ||
+      (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) ||
+      (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword)
+    ) {
+      found = true;
+      return;
+    }
+
+    if (ts.isCallExpression(node) && isEvalCall(node)) {
+      const sourceArgument = node.arguments[0];
+      if (
+        sourceArgument !== undefined &&
+        (ts.isStringLiteral(sourceArgument) || ts.isNoSubstitutionTemplateLiteral(sourceArgument))
+      ) {
+        evaluatedSources.push(sourceArgument.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(file);
+  return { evaluatedSources, found };
+}
+
+export function containsRuntimeModuleSyntax(source: string): boolean {
+  const pending = [source];
+  const inspected = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined || inspected.has(current)) {
+      continue;
+    }
+    inspected.add(current);
+    const result = inspectModuleSyntax(current);
+    if (result.found) {
+      return true;
+    }
+    pending.push(...result.evaluatedSources);
+  }
+  return false;
+}
 
 export class RuntimeBundleChecks {
   constructor(private readonly paths: RuntimeBundlePaths) {}
@@ -61,7 +142,7 @@ export class RuntimeBundleChecks {
   }
 
   private checkNoModuleSyntax(bundle: GeneratedBundle, body: string): void {
-    if (MODULE_KEYWORD_PATTERN.test(body)) {
+    if (containsRuntimeModuleSyntax(body)) {
       throw new Error(`Runtime bundle must not contain import/export: ${bundle.definition.name}`);
     }
   }
