@@ -312,13 +312,15 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn('echo "trusted_base_sha=${trusted_base_sha}"', resolver)
         self.assertIn("ref: ${{ steps.pull-request.outputs.trusted_base_sha }}", checkout)
         self.assertNotIn("ref: ${{ steps.pull-request.outputs.base_sha }}", checkout)
+        self.assertIn("persist-credentials: false", checkout)
 
     def test_all_events_for_one_pr_share_a_concurrency_group(self) -> None:
         workflow, jobs = self.publisher.split("\njobs:\n", maxsplit=1)
         self.assertNotIn("\nconcurrency:", workflow)
-        group_start = jobs.index("      group: pr-governance-")
-        group_end = jobs.index("\n", group_start)
-        group = jobs[group_start:group_end]
+        publisher = jobs[jobs.index("  pr-governance:\n"):]
+        group_start = publisher.index("      group: pr-governance-")
+        group_end = publisher.index("\n", group_start)
+        group = publisher[group_start:group_end]
         self.assertIn("matrix.pr_number", group)
         self.assertNotIn("bound-", group)
         self.assertNotIn("issue-comment-", group)
@@ -541,7 +543,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             ["82", "83", "84", "85"],
         )
 
-    def test_resolver_fails_closed_when_more_than_256_ready_targets_match(self) -> None:
+    def test_resolver_routes_more_than_256_ready_targets_to_overflow_invalidation(self) -> None:
         result, outputs = self.run_resolver(
             "issues",
             [[
@@ -555,9 +557,12 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             ]],
             run_id="1234",
         )
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(len(result.stdout) + len(result.stderr), 16_384)
-        self.assertEqual(outputs, {})
+        self.assertEqual(json.loads(outputs["matrix"]), {"include": []})
+        self.assertEqual(outputs["has_targets"], "false")
+        self.assertEqual(outputs["overflow"], "true")
+        self.assertEqual(json.loads(outputs["overflow_targets"]), [str(number) for number in range(1, 258)])
 
     def test_resolver_fails_closed_for_too_many_duplicate_or_invalid_targets(self) -> None:
         duplicate = [[
@@ -589,8 +594,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("issue_generation_run_id", self.publisher)
         resolver = self.resolver_program()
         self.assertIn("MAX_MATRIX_TARGETS = 256", resolver)
-        self.assertIn("if len(targets) > MAX_MATRIX_TARGETS:", resolver)
-        self.assertIn("fail(", resolver)
+        self.assertIn("overflow = len(targets) > MAX_MATRIX_TARGETS", resolver)
+        self.assertIn("overflow_targets", resolver)
+        self.assertIn("invalidate-overflow:", self.publisher)
         self.assertIn("verify_push_issue.py", self.publisher)
         success_start = self.publisher.index("      - name: Publish final governance state")
         success = self.publisher[success_start:]
@@ -601,7 +607,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("current_head", success)
         self.assertIn("同一専用App・同一context", self.documentation)
         self.assertIn("GitHub API", self.documentation)
-        self.assertIn("256件超", self.documentation)
+        self.assertIn("257件以上", self.documentation)
 
     def test_issue_fence_accepts_only_valid_configured_creator_generations(self) -> None:
         def status(generation: object, creator: object = {"id": 456}) -> dict[str, object]:
@@ -675,7 +681,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("creator[\"id\"]", self.publisher)
         self.assertIn("marker_status_id > int(pending_status_id)", self.publisher)
         self.assertIn("同一専用App・同一context", self.documentation)
-        self.assertIn("256件超、ページ・型・重複不正はfail-closed", self.documentation)
+        self.assertIn("投稿失敗・重複・型不正・foreign/fork・API異常はfail-closed", self.documentation)
         final_start = self.publisher.index("      - name: Publish final governance state")
         before_final = self.publisher[:final_start]
         self.assertIn("scripts/hooks/verify_push_issue.py", before_final)

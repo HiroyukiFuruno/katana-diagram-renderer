@@ -39,6 +39,13 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
         assert match is not None
         return dedent(match.group(1))
 
+    def publisher_program(self, step_name: str) -> str:
+        start = self.workflow.index(f"- name: {step_name}")
+        match = re.search(r"python3 - <<'PY'\n(.*?)\n          PY", self.workflow[start:], re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return dedent(match.group(1))
+
     def final_revalidation_script(self) -> str:
         start = self.workflow.index("- name: Revalidate final governance contract before success")
         match = re.search(r"run: \|\n(.*?)(?=\n      - name:)", self.workflow[start:], re.DOTALL)
@@ -240,6 +247,43 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                     capture_output=True, text=True, env=environment, check=False,
                 )
                 self.assertEqual(result.returncode, expected_exit, f"{latest}, {name}: {result.stderr}")
+
+    def test_preflight_invalidates_every_normal_target_before_matrix_work(self) -> None:
+        program = self.publisher_program("Publish preflight pending state to current trusted pull request heads")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            fake = directory / "fake_gh.py"
+            log = directory / "log"
+            fake.write_text(
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['FAKE_GH_LOG'], 'a', encoding='utf-8') as out: out.write(json.dumps(args) + '\\n')\n"
+                "text = ' '.join(args)\n"
+                "if '/pulls/1' in text: print(json.dumps({'number': 1, 'state': 'open', 'draft': False, 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'a'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
+                "elif '/pulls/2' in text: print(json.dumps({'number': 2, 'state': 'open', 'draft': False, 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'b'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
+                "elif '--method' in args and 'b'*40 in text and os.environ.get('FAIL_SECOND') == '1': sys.exit(1)\n"
+                "elif '--method' in args: sys.exit(0)\n"
+                "else: sys.exit(97)\n",
+                encoding="utf-8",
+            )
+            gh = directory / "gh"
+            gh.write_text(f"#!/bin/sh\nexec {sys.executable} {fake} \"$@\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            base_environment = os.environ | {
+                "PATH": f"{directory}:{os.environ['PATH']}", "FAKE_GH_LOG": str(log),
+                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_RUN_ID": "999", "PREFLIGHT_TARGETS": '["1","2"]',
+            }
+            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=base_environment, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            successful_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(sum("/statuses/" in " ".join(call) for call in successful_calls), 2)
+            failed_environment = base_environment | {"FAIL_SECOND": "1"}
+            log.unlink()
+            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=failed_environment, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            failed_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(sum("/statuses/" in " ".join(call) for call in failed_calls), 4)
 
     def test_pr_workflow_blob_must_match_the_default_branch_without_checkout(self) -> None:
         resolver = self.resolver()

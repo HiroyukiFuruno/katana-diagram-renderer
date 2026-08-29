@@ -55,6 +55,9 @@ jobs:
     outputs:
       matrix: ${{ steps.targets.outputs.matrix }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
+      overflow: ${{ steps.targets.outputs.overflow }}
+      overflow_targets: ${{ steps.targets.outputs.overflow_targets }}
+      preflight_targets: ${{ steps.targets.outputs.preflight_targets }}
     steps:
       - name: Resolve PR targets from a trusted event
         id: targets
@@ -566,24 +569,279 @@ jobs:
           else:
               fail("Unsupported governance event.")
 
-          if len(targets) > MAX_MATRIX_TARGETS:
-              fail(
-                  "Issue revalidation found more than 256 Ready targets; "
-                  "the governance contract was bypassed. Return affected PRs "
-                  "to Draft or remove their closing reference before merge."
-              )
-          matrix = {"include": targets}
+          overflow = len(targets) > MAX_MATRIX_TARGETS
+          overflow_targets: list[str] = []
+          if overflow:
+              seen_overflow_numbers: set[str] = set()
+              for item in targets:
+                  number = item.get("pr_number") if isinstance(item, dict) else None
+                  if not isinstance(number, str) or re.fullmatch(r"[1-9][0-9]*", number) is None:
+                      fail("Overflow governance target is invalid.")
+                  if number in seen_overflow_numbers:
+                      fail("Overflow governance targets contain a duplicate pull request.")
+                  seen_overflow_numbers.add(number)
+                  overflow_targets.append(number)
+              matrix = {"include": []}
+          else:
+              matrix = {"include": targets}
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(
                   "matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n"
               )
-              output.write(f"has_targets={'true' if targets else 'false'}\n")
+              output.write(f"has_targets={'true' if targets and not overflow else 'false'}\n")
+              output.write(f"overflow={'true' if overflow else 'false'}\n")
+              output.write("overflow_targets=" + json.dumps(overflow_targets, separators=(",", ":")) + "\n")
+              output.write("preflight_targets=" + json.dumps(
+                  [] if overflow else [item["pr_number"] for item in targets], separators=(",", ":")
+              ) + "\n")
+          PY
+
+  preflight-governance:
+    name: Invalidate trusted status before governance revalidation
+    needs: resolve-targets
+    if: needs.resolve-targets.outputs.has_targets == 'true' && needs.resolve-targets.outputs.overflow != 'true'
+    environment: pr-governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - name: Create scoped governance App token
+        id: governance-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-statuses: write
+
+      - name: Publish preflight pending state to current trusted pull request heads
+        env:
+          GH_TOKEN: ${{ steps.governance-token.outputs.token }}
+          PREFLIGHT_TARGETS: ${{ needs.resolve-targets.outputs.preflight_targets }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          try:
+              requested = json.loads(os.environ["PREFLIGHT_TARGETS"])
+          except (KeyError, json.JSONDecodeError) as error:
+              raise SystemExit(f"Preflight governance targets are invalid: {error}") from error
+          if not isinstance(requested, list) or not (1 <= len(requested) <= 256):
+              raise SystemExit("Preflight governance target count is invalid.")
+          targets: set[int] = set()
+          for value in requested:
+              if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+                  raise SystemExit("Preflight governance target is invalid.")
+              number = int(value)
+              if number in targets:
+                  raise SystemExit("Preflight governance targets contain a duplicate pull request.")
+              targets.add(number)
+
+          def publish_pending(head_sha: str) -> bool:
+              command = [
+                  "gh", "api", "--method", "POST", f"repos/{repository}/statuses/{head_sha}",
+                  "-f", "state=pending", "-f", "context=KRR / PR governance (trusted)",
+                  "-f", "description=Trusted governance revalidation is running.",
+                  "-f", f"target_url={os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}?preflight_generation_run_id={os.environ['GITHUB_RUN_ID']}",
+              ]
+              for _ in range(3):
+                  result = subprocess.run(command, capture_output=True, text=True, check=False)
+                  if result.returncode == 0:
+                      return True
+              return False
+
+          failures = 0
+          for number in sorted(targets):
+              result = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{number}"], capture_output=True, text=True, check=False)
+              if result.returncode != 0:
+                  print(f"Unable to refresh preflight pull request {number}.", file=sys.stderr)
+                  failures += 1
+                  continue
+              try:
+                  pull = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  print(f"Preflight pull request {number} is not JSON.", file=sys.stderr)
+                  failures += 1
+                  continue
+              base = pull.get("base") if isinstance(pull, dict) else None
+              head = pull.get("head") if isinstance(pull, dict) else None
+              if (
+                  not isinstance(pull, dict) or pull.get("number") != number or pull.get("state") != "open"
+                  or pull.get("draft") is not False or not isinstance(base, dict) or not isinstance(head, dict)
+                  or not isinstance(base.get("repo"), dict) or not isinstance(head.get("repo"), dict)
+                  or base["repo"].get("full_name") != repository or head["repo"].get("full_name") != repository
+                  or not isinstance(head.get("sha"), str) or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None
+              ):
+                  print(f"Preflight pull request {number} is invalid.", file=sys.stderr)
+                  failures += 1
+                  continue
+              if not publish_pending(head["sha"]):
+                  print(f"Unable to publish preflight governance pending state for pull request {number}.", file=sys.stderr)
+                  failures += 1
+          if failures:
+              raise SystemExit("Preflight governance invalidation was incomplete.")
+          PY
+
+  invalidate-overflow:
+    name: Invalidate overflow governance targets
+    needs: resolve-targets
+    if: needs.resolve-targets.outputs.overflow == 'true'
+    environment: pr-governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: pr-governance-overflow-${{ github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - name: Create scoped governance App token
+        id: governance-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-statuses: write
+
+      - name: Publish overflow failures to current trusted pull request heads
+        env:
+          GH_TOKEN: ${{ steps.governance-token.outputs.token }}
+          OVERFLOW_TARGETS: ${{ needs.resolve-targets.outputs.overflow_targets }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          try:
+              requested = json.loads(os.environ["OVERFLOW_TARGETS"])
+          except (KeyError, json.JSONDecodeError) as error:
+              raise SystemExit(f"Overflow governance targets are invalid: {error}") from error
+          if not isinstance(requested, list) or len(requested) < 257:
+              raise SystemExit("Overflow governance target count is invalid.")
+          target_numbers: set[int] = set()
+          for value in requested:
+              if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+                  raise SystemExit("Overflow governance target is invalid.")
+              number = int(value)
+              if number in target_numbers:
+                  raise SystemExit("Overflow governance targets contain a duplicate pull request.")
+              target_numbers.add(number)
+
+          result = subprocess.run(
+              ["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"],
+              capture_output=True, text=True, check=False,
+          )
+          if result.returncode != 0:
+              raise SystemExit("Unable to enumerate overflow governance pull requests.")
+          try:
+              pages = json.loads(result.stdout)
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"Overflow pull request response is not JSON: {error}") from error
+          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+              raise SystemExit("Overflow pull request response is invalid.")
+          listed: dict[int, dict[str, object]] = {}
+          for page in pages:
+              for pull in page:
+                  if not isinstance(pull, dict) or type(pull.get("number")) is not int or pull["number"] < 1:
+                      raise SystemExit("Overflow pull request response is invalid.")
+                  number = pull["number"]
+                  if number in listed:
+                      raise SystemExit("Overflow pull request response contains a duplicate pull request.")
+                  listed[number] = pull
+          def post_failure(head_sha: str) -> bool:
+              command = [
+                  "gh", "api", "--method", "POST",
+                  f"repos/{repository}/statuses/{head_sha}",
+                  "-f", "state=failure",
+                  "-f", "context=KRR / PR governance (trusted)",
+                  "-f", "description=Governance target overflow requires bounded revalidation.",
+                  "-f", f"target_url={os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}?overflow_generation_run_id={os.environ['GITHUB_RUN_ID']}",
+              ]
+              for _ in range(3):
+                  result = subprocess.run(command, capture_output=True, text=True, check=False)
+                  if result.returncode == 0:
+                      return True
+              return False
+
+          failures = 0
+          skipped = 0
+          for number in sorted(target_numbers):
+              if number not in listed:
+                  # A closed or Draft-converted PR no longer exposes the old
+                  # head as a merge candidate. Continue invalidating every
+                  # still-open target rather than abandoning the fan-out.
+                  print(f"Overflow pull request {number} is no longer open; skipped.", file=sys.stderr)
+                  skipped += 1
+                  continue
+              result = subprocess.run(
+                  ["gh", "api", f"repos/{repository}/pulls/{number}"],
+                  capture_output=True, text=True, check=False,
+              )
+              if result.returncode != 0:
+                  print(f"Unable to refresh overflow pull request {number}.", file=sys.stderr)
+                  failures += 1
+                  continue
+              try:
+                  pull = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  print(f"Overflow pull request {number} is not JSON.", file=sys.stderr)
+                  failures += 1
+                  continue
+              base = pull.get("base") if isinstance(pull, dict) else None
+              head = pull.get("head") if isinstance(pull, dict) else None
+              if isinstance(pull, dict) and pull.get("number") == number and pull.get("state") == "closed":
+                  print(f"Overflow pull request {number} is closed; skipped.", file=sys.stderr)
+                  skipped += 1
+                  continue
+              if isinstance(pull, dict) and pull.get("number") == number and pull.get("state") == "open" and pull.get("draft") is True:
+                  print(f"Overflow pull request {number} is Draft; skipped.", file=sys.stderr)
+                  skipped += 1
+                  continue
+              if (
+                  not isinstance(pull, dict)
+                  or pull.get("number") != number
+                  or pull.get("state") != "open"
+                  or pull.get("draft") is not False
+                  or not isinstance(base, dict)
+                  or not isinstance(head, dict)
+                  or not isinstance(base.get("repo"), dict)
+                  or not isinstance(head.get("repo"), dict)
+                  or base["repo"].get("full_name") != repository
+                  or head["repo"].get("full_name") != repository
+                  or not isinstance(head.get("sha"), str)
+                  or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None
+              ):
+                  print(f"Overflow pull request {number} is invalid.", file=sys.stderr)
+                  failures += 1
+                  continue
+              if not post_failure(head["sha"]):
+                  print(f"Unable to publish overflow governance failure for pull request {number}.", file=sys.stderr)
+                  failures += 1
+          if failures:
+              raise SystemExit("Overflow governance invalidation was incomplete.")
           PY
 
   pr-governance:
     name: Publish trusted governance status
-    needs: resolve-targets
-    if: needs.resolve-targets.outputs.has_targets == 'true'
+    needs: [resolve-targets, preflight-governance]
+    if: needs.resolve-targets.outputs.has_targets == 'true' && needs.resolve-targets.outputs.overflow != 'true'
     environment: pr-governance
     runs-on: ubuntu-latest
     concurrency:
@@ -938,11 +1196,11 @@ jobs:
                   allowed = {
                       "source_run_id", "source_run_attempt", "source_run_number",
                       "source_workflow_id", "source_head_sha", "source_base_sha", "issue_generation_run_id",
-                      "issue_number", "issue_updated_at",
+                      "issue_number", "issue_updated_at", "preflight_generation_run_id", "overflow_generation_run_id",
                   }
                   if any(key not in allowed or len(values) != 1 or not values[0] for key, values in query.items()):
                       raise SystemExit("Pending governance generation is invalid.")
-                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number"):
+                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id"):
                       if key in query and re.fullmatch(r"[1-9][0-9]*", query[key][0]) is None:
                           raise SystemExit("Pending governance generation is invalid.")
                   if "source_head_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_head_sha"][0]) is None:
@@ -963,6 +1221,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.pull-request.outputs.trusted_base_sha }}
+          persist-credentials: false
 
       - name: Verify PR readiness
         id: verify
@@ -1156,11 +1415,11 @@ jobs:
                   allowed = {
                       "source_run_id", "source_run_attempt", "source_run_number",
                       "source_workflow_id", "source_head_sha", "source_base_sha", "issue_generation_run_id",
-                      "issue_number", "issue_updated_at",
+                      "issue_number", "issue_updated_at", "preflight_generation_run_id", "overflow_generation_run_id",
                   }
                   if any(key not in allowed or len(values) != 1 or not values[0] for key, values in query.items()):
                       raise SystemExit("Final governance generation is invalid.")
-                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number"):
+                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id"):
                       if key in query and re.fullmatch(r"[1-9][0-9]*", query[key][0]) is None:
                           raise SystemExit("Final governance generation is invalid.")
                   if "source_head_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_head_sha"][0]) is None:
