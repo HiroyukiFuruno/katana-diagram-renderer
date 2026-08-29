@@ -84,6 +84,26 @@ class CleanupReleaseStateTest(unittest.TestCase):
             self.cleanup(published=False)
         self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
 
+    def test_refuses_mismatched_version_and_release_branch_before_mutation(self) -> None:
+        self.create_release_branch(merge=True)
+        worktree = self.root / "release-worktree"
+        self.git("worktree", "add", str(worktree), "release/v9.9.9", cwd=self.repository)
+
+        with self.assertRaisesRegex(subject.CleanupError, "version.*一致しません"):
+            subject.cleanup_release_state(
+                repository=self.repository,
+                version="v9.9.9-other",
+                release_branch="release/v9.9.9",
+                remote="origin",
+                default_branch="master",
+                release_checker=lambda _version: True,
+            )
+
+        self.assertTrue(worktree.exists())
+        self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
+        local = self.git("branch", "--list", "release/v9.9.9", cwd=self.repository).stdout
+        self.assertNotEqual(local.strip(), "")
+
     def test_switches_to_default_and_deletes_merged_local_and_remote_branch(self) -> None:
         self.create_release_branch(merge=True)
         self.git("switch", "release/v9.9.9", cwd=self.repository)

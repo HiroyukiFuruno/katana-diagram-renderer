@@ -254,6 +254,14 @@ def _switch_and_update_default(
     actions.append(f"pulled {remote}/{default_branch} with --ff-only")
 
 
+def _validate_release_target(version: str, release_branch: str) -> None:
+    expected_branch = f"release/{version}"
+    if release_branch != expected_branch:
+        raise CleanupError(
+            f"release branch {release_branch}がversion {version}と一致しません"
+        )
+
+
 def cleanup_release_state(
     *,
     repository: Path,
@@ -266,6 +274,7 @@ def cleanup_release_state(
     repository = repository.resolve()
     if release_branch == default_branch:
         raise CleanupError("default branchをcleanup対象にはできません")
+    _validate_release_target(version, release_branch)
     checker = release_checker or _github_release_checker(repository, remote)
     if not checker(version):
         raise CleanupError(f"GitHub Release {version}の公開を確認できません")
