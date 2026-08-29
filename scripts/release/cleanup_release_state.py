@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 class CleanupError(RuntimeError):
@@ -126,8 +127,7 @@ def _worktrees(repository: Path) -> list[Worktree]:
     return worktrees
 
 
-def _repository_name(repository: Path, remote: str) -> str:
-    remote_url = _run_git(repository, "remote", "get-url", remote).stdout.strip()
+def _github_repository_name(remote_url: str) -> str | None:
     for pattern in (
         r"^git@github\.com:(?P<repository>[^/]+/[^/]+?)(?:\.git)?$",
         r"^https://github\.com/(?P<repository>[^/]+/[^/]+?)(?:\.git)?/?$",
@@ -136,6 +136,67 @@ def _repository_name(repository: Path, remote: str) -> str:
         match = re.match(pattern, remote_url)
         if match is not None:
             return match.group("repository")
+    return None
+
+
+def _remote_repository_identity(repository: Path, remote_url: str) -> str:
+    github_repository = _github_repository_name(remote_url)
+    if github_repository is not None:
+        return f"github:{github_repository.casefold()}"
+
+    parsed = urlparse(remote_url)
+    if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
+        return f"file:{Path(unquote(parsed.path)).resolve()}"
+    if not parsed.scheme:
+        path = Path(remote_url).expanduser()
+        if not path.is_absolute():
+            path = repository / path
+        return f"file:{path.resolve()}"
+    raise CleanupError(f"remote URLのrepositoryを監査できません: {remote_url}")
+
+
+def _remote_urls(repository: Path, remote: str, *, push: bool) -> tuple[str, ...]:
+    arguments = ["remote", "get-url"]
+    if push:
+        arguments.append("--push")
+    arguments.extend(("--all", remote))
+    urls = tuple(
+        url.strip()
+        for url in _run_git(repository, *arguments).stdout.splitlines()
+        if url.strip()
+    )
+    if not urls:
+        kind = "push" if push else "fetch"
+        raise CleanupError(f"remote {remote}の{kind} URLを取得できません")
+    return urls
+
+
+def _verify_push_destinations(repository: Path, remote: str) -> str:
+    fetch_destinations = {
+        _remote_repository_identity(repository, remote_url)
+        for remote_url in _remote_urls(repository, remote, push=False)
+    }
+    if len(fetch_destinations) != 1:
+        raise CleanupError(f"remote {remote}のfetch URLが複数repositoryを指しています")
+    fetch_destination = next(iter(fetch_destinations))
+    audited_push_urls = _remote_urls(repository, remote, push=True)
+    push_destinations = {
+        _remote_repository_identity(repository, remote_url) for remote_url in audited_push_urls
+    }
+    if push_destinations != {fetch_destination}:
+        raise CleanupError(
+            f"remote {remote}のpush URLが監査対象と異なるrepositoryを指しています"
+        )
+    # git push <remote> は設定された全push URLへ送るため、監査後の設定変更や
+    # 同一repositoryの重複URLによって削除先が変わらないよう、監査済みの先頭URLを固定する。
+    return audited_push_urls[0]
+
+
+def _repository_name(repository: Path, remote: str) -> str:
+    remote_url = _run_git(repository, "remote", "get-url", remote).stdout.strip()
+    github_repository = _github_repository_name(remote_url)
+    if github_repository is not None:
+        return github_repository
     raise CleanupError(f"GitHub repositoryをremote URLから判定できません: {remote_url}")
 
 
@@ -211,6 +272,7 @@ def cleanup_release_state(
     dirty = _run_git(repository, "status", "--porcelain=v1").stdout.strip()
     if dirty:
         raise CleanupError("current worktree is dirty; cleanupを実行しません")
+    audited_push_url = _verify_push_destinations(repository, remote)
 
     actions: list[str] = [f"public release {version} verified"]
     _run_git(repository, "fetch", remote, "--prune")
@@ -272,7 +334,7 @@ def cleanup_release_state(
         _run_git(
             repository,
             "push",
-            remote,
+            audited_push_url,
             f"--force-with-lease=refs/heads/{release_branch}:{audited_remote_sha}",
             f":refs/heads/{release_branch}",
         )

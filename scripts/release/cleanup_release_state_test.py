@@ -166,7 +166,7 @@ class CleanupReleaseStateTest(unittest.TestCase):
         original_run_git = subject._run_git
 
         def advance_before_delete(repository: Path, *arguments: str, **kwargs: object):
-            if arguments[:2] == ("push", "origin") and any(
+            if arguments[:1] == ("push",) and any(
                 argument.startswith("--force-with-lease=") for argument in arguments
             ):
                 self.git("push", "origin", "release/v9.9.9", cwd=racing_repository)
@@ -176,6 +176,130 @@ class CleanupReleaseStateTest(unittest.TestCase):
             with self.assertRaisesRegex(subject.CleanupError, "push .* failed"):
                 self.cleanup()
         self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_refuses_cleanup_when_push_url_targets_different_repository_at_same_sha(self) -> None:
+        self.create_release_branch(merge=True)
+        push_remote = self.root / "push-remote.git"
+        self.git("init", "--bare", "--initial-branch=master", str(push_remote), cwd=self.root)
+        self.git("remote", "add", "push-target", str(push_remote), cwd=self.repository)
+        self.git("push", "push-target", "master", cwd=self.repository)
+        self.git("push", "push-target", "release/v9.9.9", cwd=self.repository)
+        self.git(
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            str(push_remote),
+            cwd=self.repository,
+        )
+
+        with self.assertRaisesRegex(subject.CleanupError, "push URL.*異なるrepository"):
+            self.cleanup()
+
+        local = self.git("branch", "--list", "release/v9.9.9", cwd=self.repository).stdout
+        self.assertNotEqual(local.strip(), "")
+        self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_allows_equivalent_fetch_and_push_urls_for_same_repository(self) -> None:
+        self.create_release_branch(merge=True)
+        self.git(
+            "remote",
+            "set-url",
+            "--add",
+            "--push",
+            "origin",
+            self.remote.resolve().as_uri(),
+            cwd=self.repository,
+        )
+
+        actions = self.cleanup()
+
+        self.assertIn("remote branch release/v9.9.9 deleted", actions)
+        self.assertFalse(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_deletes_once_when_push_url_is_repeated(self) -> None:
+        self.create_release_branch(merge=True)
+        for _ in range(2):
+            self.git(
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                str(self.remote),
+                cwd=self.repository,
+            )
+
+        push_urls = self.git(
+            "remote",
+            "get-url",
+            "--push",
+            "--all",
+            "origin",
+            cwd=self.repository,
+        ).stdout.splitlines()
+        self.assertEqual(push_urls, [str(self.remote), str(self.remote)])
+
+        with mock.patch.object(subject, "_run_git", wraps=subject._run_git) as run_git:
+            self.cleanup()
+
+        delete_pushes = [
+            call
+            for call in run_git.call_args_list
+            if call.args[1:2] == ("push",)
+            and any(
+                str(argument).startswith("--force-with-lease=") for argument in call.args[2:]
+            )
+        ]
+        self.assertEqual(len(delete_pushes), 1)
+        self.assertFalse(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_uses_audited_push_url_when_remote_config_changes(self) -> None:
+        self.create_release_branch(merge=True)
+        changed_push_remote = self.root / "changed-push-remote.git"
+        self.git(
+            "init",
+            "--bare",
+            "--initial-branch=master",
+            str(changed_push_remote),
+            cwd=self.root,
+        )
+        original_run_git = subject._run_git
+        push_arguments: list[str] = []
+
+        def change_config_before_delete(repository: Path, *arguments: str, **kwargs: object):
+            if arguments[:1] == ("push",) and any(
+                argument.startswith("--force-with-lease=") for argument in arguments
+            ):
+                push_arguments.extend(arguments)
+                self.git(
+                    "remote",
+                    "set-url",
+                    "--push",
+                    "origin",
+                    str(changed_push_remote),
+                    cwd=self.repository,
+                )
+            return original_run_git(repository, *arguments, **kwargs)
+
+        with mock.patch.object(subject, "_run_git", side_effect=change_config_before_delete):
+            self.cleanup()
+
+        self.assertEqual(push_arguments[1], str(self.remote))
+        self.assertFalse(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_canonicalizes_github_fetch_and_push_url_variants(self) -> None:
+        ssh = subject._remote_repository_identity(
+            self.repository,
+            "git@github.com:HiroyukiFuruno/katana-render-runtime.git",
+        )
+        https = subject._remote_repository_identity(
+            self.repository,
+            "https://github.com/hiroyukifuruno/katana-render-runtime/",
+        )
+
+        self.assertEqual(ssh, https)
 
     def test_rejects_default_branch_as_cleanup_target(self) -> None:
         with self.assertRaisesRegex(subject.CleanupError, "default branch"):
