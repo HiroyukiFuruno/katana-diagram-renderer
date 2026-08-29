@@ -19,7 +19,13 @@ _MARKER_PATTERN = re.compile(
 )
 _SUCCESSFUL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _VALID_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
-_SELF_CHECK_NAMES = frozenset({"PR governance", "KRR / PR governance (trusted)"})
+_SELF_CHECK_NAMES = frozenset(
+    {
+        "PR governance",
+        "KRR / PR governance (trusted)",
+        "KRR / PR governance review latch",
+    }
+)
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 
@@ -55,9 +61,9 @@ def _review_is_for(
     not_before: object,
     before: object | None = None,
 ) -> bool:
-    not_before_time = _timestamp(not_before, "marker created_at")
+    not_before_time = _timestamp(not_before, "marker updated_at")
     if not_before_time is None:
-        raise TypeError("marker created_at must be an ISO-8601 timestamp")
+        raise TypeError("marker updated_at must be an ISO-8601 timestamp")
     before_time = _timestamp(before, "marker created_at")
     return any(
         _is_review_bot(_bot_login(review.get("author")), review_bot)
@@ -70,6 +76,25 @@ def _review_is_for(
         and (before_time is None or submitted_at < before_time)
         for review in reviews
     )
+
+
+def _marker_updated_at(comment: Mapping[str, object]) -> object:
+    """Return the marker's latest edit time for evidence freshness checks."""
+
+    if "updated_at" in comment:
+        return comment["updated_at"]
+    if "updatedAt" in comment:
+        return comment["updatedAt"]
+    # Keep accepting legacy fixtures/API projections that never exposed the
+    # edit field; an explicitly present null or invalid value still fails closed.
+    return comment.get("created_at")
+
+
+def _marker_updated_time(comment: Mapping[str, object]) -> datetime | None:
+    try:
+        return _timestamp(_marker_updated_at(comment), "marker updated_at")
+    except (TypeError, ValueError):
+        return None
 
 
 def _bot_plus_one(
@@ -273,7 +298,7 @@ def readiness_errors(
             typed_reviews,
             review_bot,
             marker_head,
-            comment["created_at"],
+            _marker_updated_at(comment),
             final_comment["created_at"],
         )
         or _bot_plus_one(
@@ -291,6 +316,21 @@ def readiness_errors(
     current_final_markers = [
         marker for marker in final_markers if marker[1] == head
     ]
+    if current_final_markers:
+        # A later final marker supersedes earlier evidence, including when an
+        # old initial marker was edited into a final marker.
+        marker_times = [
+            _marker_updated_time(marker[2]) for marker in current_final_markers
+        ]
+        if any(marker_time is None for marker_time in marker_times):
+            current_final_markers = []
+        else:
+            current_final_markers = [
+                max(
+                    zip(current_final_markers, marker_times),
+                    key=lambda item: item[1],
+                )[0]
+            ]
     if not final_markers:
         errors.append("final review marker がありません")
     elif not current_final_markers:
@@ -300,7 +340,7 @@ def readiness_errors(
             typed_reviews,
             review_bot,
             head,
-            comment["created_at"],
+            _marker_updated_at(comment),
         )
         or _bot_plus_one(
             comment,

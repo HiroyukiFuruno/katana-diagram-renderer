@@ -142,6 +142,42 @@ class VerifyPrReadyTest(unittest.TestCase):
         ]
         self.assertEqual(self.errors(pull_request=pull_request), [])
 
+    def test_ignores_review_latch_failure_when_regular_ci_succeeds(self) -> None:
+        pull_request, _, _, _ = successful_state()
+        pull_request["statusCheckRollup"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "KRR / PR governance review latch",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            },
+        ]
+        self.assertEqual(self.errors(pull_request=pull_request), [])
+
+    def test_rejects_regular_ci_failure_alongside_review_latch_failure(self) -> None:
+        pull_request, _, _, _ = successful_state()
+        pull_request["statusCheckRollup"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "KRR / PR governance review latch",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "FAILURE",
+            },
+        ]
+        self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
+
     def test_rejects_pending_regular_ci_alongside_trusted_check(self) -> None:
         pull_request, _, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
@@ -201,6 +237,41 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
         reactions[2][0]["created_at"] = "2026-08-29T03:04:30Z"
         self.assertEqual(self.errors(comments=comments, reactions=reactions), [])
+
+    def test_rejects_edited_initial_marker_reused_as_final_evidence(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[0]["submittedAt"] = "2026-08-29T03:00:30Z"
+        reviews.append(
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-29T03:03:00Z",
+            }
+        )
+        comments[0]["body"] = (
+            f"<!-- krr-review phase=final head={HEAD} -->\n@codex review"
+        )
+        comments[0]["updated_at"] = "2026-08-29T03:04:00Z"
+        comments.append(
+            {
+                "id": 3,
+                "body": (
+                    f"<!-- krr-review phase=initial head={INITIAL_HEAD} -->\n"
+                    "@codex review"
+                ),
+                "created_at": "2026-08-29T03:00:00Z",
+                "updated_at": "2026-08-29T03:00:00Z",
+                "user": {"login": "HiroyukiFuruno"},
+            }
+        )
+        reactions[1] = []
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
 
     def test_rejects_edited_marker_with_same_second_bot_reaction(self) -> None:
         _, _, comments, reactions = successful_state()
