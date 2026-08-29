@@ -124,6 +124,65 @@ class VerifyPushIssueTest(unittest.TestCase):
         with self.assertRaisesRegex(subject.ContractViolation, "途中で切れています"):
             subject.parse_commit_messages("feat: missing NUL")
 
+    def test_closing_issue_numbers_accepts_keywords_short_and_same_repo_urls(self) -> None:
+        body = "\n".join(
+            (
+                "Closes #64",
+                "fixed: https://github.com/HiroyukiFuruno/katana-render-runtime/issues/65",
+                "RESOLVED #66",
+                "Refs #67",
+                "Fixes https://github.com/other/repository/issues/68",
+            )
+        )
+        self.assertEqual(
+            subject.closing_issue_numbers(
+                body, "HiroyukiFuruno/katana-render-runtime"
+            ),
+            {64, 65, 66},
+        )
+
+    def test_closing_issue_numbers_requires_full_url_issue_number_boundary(self) -> None:
+        body = "\n".join(
+            (
+                "Closes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64",
+                "Fixes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/640",
+                "Resolves https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64x",
+            )
+        )
+        self.assertEqual(
+            subject.closing_issue_numbers(
+                body, "HiroyukiFuruno/katana-render-runtime"
+            ),
+            {64, 640},
+        )
+
+    def test_full_url_issue_references_require_a_strict_terminal(self) -> None:
+        repository = "HiroyukiFuruno/katana-render-runtime"
+        valid = (
+            "Refs [https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64].\n"
+            "Refs (https://github.com/HiroyukiFuruno/katana-render-runtime/issues/640)\n"
+            "Refs 'https://github.com/HiroyukiFuruno/katana-render-runtime/issues/641'\n"
+            'Refs "https://github.com/HiroyukiFuruno/katana-render-runtime/issues/642"'
+        )
+        self.assertEqual(subject.issue_numbers(valid, repository), {64, 640, 641, 642})
+        malformed = "Refs https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64x"
+        self.assertEqual(subject.issue_numbers(malformed, repository), set())
+        with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
+            self.validate(messages=[malformed])
+
+        closing = "\n".join(
+            (
+                "Closes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64)",
+                "Fixes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/640.",
+                "Closes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/641'",
+                'Fixes https://github.com/HiroyukiFuruno/katana-render-runtime/issues/642"',
+                "Resolves https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64/extra",
+            )
+        )
+        self.assertEqual(
+            subject.closing_issue_numbers(closing, repository), {64, 640, 641, 642}
+        )
+
     def test_remote_name_with_distinct_fetch_and_push_url_uses_push_url(self) -> None:
         fetch_url = "https://github.com/example/fetch-only.git"
         push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
@@ -229,6 +288,7 @@ class VerifyPushIssueTest(unittest.TestCase):
             state=state,
             body=body,
             url=f"https://github.com/HiroyukiFuruno/katana-render-runtime/issues/{number}",
+            updated_at="2026-08-29T03:03:00Z",
         )
 
     def validate(
@@ -390,6 +450,59 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
 
         self.assertEqual(references, {64})
+
+    def test_referenced_issue_snapshot_uses_complete_base_to_head_commit_references(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "commits": [
+                {"sha": "c" * 40, "commit": {"message": "feat: first\n\nRefs #64"}},
+                {
+                    "sha": head_sha,
+                    "commit": {
+                        "message": "fix: second\n\nRefs https://github.com/HiroyukiFuruno/katana-render-runtime/issues/65"
+                    },
+                },
+            ],
+        }
+        with patch.object(subject, "_gh_json", return_value=compare):
+            snapshot = subject.referenced_issue_snapshot(
+                repository="HiroyukiFuruno/katana-render-runtime",
+                base_sha=base_sha,
+                head_sha=head_sha,
+                issue_loader=lambda number: self.issue(number),
+            )
+        self.assertEqual([issue.number for issue in snapshot], [64, 65])
+
+    def test_referenced_issue_snapshot_fails_closed_on_missing_updated_at(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: freshness\n\nRefs #64"}}
+            ],
+        }
+        missing_time = subject.Issue(64, "OPEN", "body", "https://example/issues/64")
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "updated_at"):
+                subject.referenced_issue_snapshot(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    issue_loader=lambda _number: missing_time,
+                )
 
     def test_pr_range_fails_closed_when_compare_commits_are_truncated(self) -> None:
         base_sha = "a" * 40

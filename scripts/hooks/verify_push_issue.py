@@ -22,15 +22,26 @@ class Issue:
     state: str
     body: str
     url: str
+    updated_at: str = ""
 
 
 IssueLoader = Callable[[int], Optional[Issue]]
 
+_ISSUE_URL_TERMINATOR = r"(?=$|[\s)\]}>.,!?;:'\"])"
 _FULL_ISSUE_PATTERN = re.compile(
-    r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/issues/(?P<number>[1-9]\d*)",
+    r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/issues/(?P<number>[1-9]\d*)"
+    + _ISSUE_URL_TERMINATOR,
     re.IGNORECASE,
 )
 _SHORT_ISSUE_PATTERN = re.compile(r"(?<![\w/])#(?P<number>[1-9]\d*)\b")
+_CLOSING_ISSUE_REFERENCE_PATTERN = re.compile(
+    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+    r"(?:[ \t]*:[ \t]*|[ \t]+)"
+    r"(?P<reference>#[1-9]\d*\b|https://github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*"
+    + _ISSUE_URL_TERMINATOR
+    + r")",
+    re.IGNORECASE,
+)
 _ZERO_SHA = "0" * 40
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
@@ -162,6 +173,17 @@ def issue_numbers(message: str, repository: str) -> set[int]:
     numbers.update(
         int(match.group("number")) for match in _SHORT_ISSUE_PATTERN.finditer(message)
     )
+    return numbers
+
+
+def closing_issue_numbers(body: str, repository: str) -> set[int]:
+    """Return same-repository Issues referenced with a GitHub closing keyword."""
+
+    if not isinstance(body, str):
+        raise ContractViolation("PR本文の形式が不正です")
+    numbers: set[int] = set()
+    for match in _CLOSING_ISSUE_REFERENCE_PATTERN.finditer(body):
+        numbers.update(issue_numbers(match.group("reference"), repository))
     return numbers
 
 
@@ -383,6 +405,49 @@ def _pr_commit_messages(
     if commit_shas[-1] != head_sha:
         raise ContractViolation("GitHub compare responseの最終commitがhead SHAと一致しません")
     return messages
+
+
+def referenced_issue_snapshot(
+    *,
+    repository: str,
+    base_sha: str,
+    head_sha: str,
+    issue_loader: IssueLoader | None = None,
+) -> tuple[Issue, ...]:
+    """Read the complete base..head Issue reference set without PR checkout.
+
+    This deliberately uses the same compare response and reference parser as
+    the push contract.  Callers must not substitute GitHub's
+    ``closingIssuesReferences``: it omits references that live only in commit
+    messages.
+    """
+
+    repository = _require_repository_name(repository)
+    base_sha = _require_sha(base_sha, "PR base SHA")
+    head_sha = _require_sha(head_sha, "PR head SHA")
+    if issue_loader is None:
+        issue_loader = lambda number: _load_issue(repository, number)
+    references: set[int] = set()
+    for message in _pr_commit_messages(
+        repository=repository,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    ):
+        references.update(issue_numbers(message, repository))
+
+    snapshot: list[Issue] = []
+    for number in sorted(references):
+        issue = issue_loader(number)
+        if issue is None:
+            raise ContractViolation(f"Issue #{number}を対象repositoryで確認できません")
+        if issue.number != number:
+            raise ContractViolation(f"Issue #{number}のsnapshot番号が一致しません")
+        if not isinstance(issue.state, str) or not isinstance(issue.body, str):
+            raise ContractViolation(f"Issue #{number}のsnapshot形式が不正です")
+        if not isinstance(issue.updated_at, str) or not issue.updated_at:
+            raise ContractViolation(f"Issue #{number}のupdated_atが不正です")
+        snapshot.append(issue)
+    return tuple(snapshot)
 
 
 def _pr_changed_paths(*, repository: str, pr_number: int) -> list[str]:
@@ -665,7 +730,7 @@ def _load_issue(repository_name: str, number: int) -> Issue | None:
             "--repo",
             repository_name,
             "--json",
-            "number,state,body,url",
+            "number,state,body,url,updatedAt",
         ],
         capture_output=True,
         text=True,
@@ -674,11 +739,17 @@ def _load_issue(repository_name: str, number: int) -> Issue | None:
     if result.returncode != 0:
         return None
     payload = json.loads(result.stdout)
+    if not isinstance(payload, dict):
+        raise ContractViolation("GitHub Issue responseの形式が不正です")
+    updated_at = payload.get("updatedAt")
     return Issue(
         number=int(payload["number"]),
         state=str(payload["state"]),
         body=str(payload.get("body") or ""),
         url=str(payload["url"]),
+        # Keep the push contract's historical empty/null body normalization.
+        # Freshness consumers reject a missing updatedAt in their snapshot.
+        updated_at=updated_at if isinstance(updated_at, str) else "",
     )
 
 
