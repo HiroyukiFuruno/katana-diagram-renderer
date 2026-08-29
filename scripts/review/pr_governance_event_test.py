@@ -152,12 +152,15 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         group = self.publisher[group_start:group_end]
         self.assertIn("github.event.issue.number", group)
         self.assertIn("github.event.workflow_run.pull_requests[0].number", group)
-        self.assertIn("bound-{0}", group)
-        self.assertIn("issue-comment-{0}", group)
-        self.assertLess(
-            group.index("github.event.workflow_run.pull_requests[0].number"),
-            group.index("github.event.workflow_run.id"),
+        self.assertIn("github.run_id", group)
+        self.assertNotIn("bound-", group)
+        self.assertNotIn("issue-comment-", group)
+        self.assertRegex(
+            group,
+            r"pr-governance-.*github\.event\.workflow_run\.pull_requests\[0\]\.number.*"
+            r"github\.event\.issue\.number.*github\.run_id",
         )
+        self.assertIn("cancel-in-progress: true", self.publisher)
         sensor_group_start = self.sensor.index("  group: pr-governance-review-latch-")
         sensor_group_end = self.sensor.index("\n", sensor_group_start)
         sensor_group = self.sensor[sensor_group_start:sensor_group_end]
@@ -200,7 +203,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("Unable to read the trusted governance status.", self.sensor)
         self.assertIn("Timed out waiting for a matching trusted governance status.", self.sensor)
         self.assertIn("Multiple terminal governance statuses match this sensor run.", self.sensor)
-        self.assertIn("issue comment起点のunbound statusはsensor latchを解放しない", self.documentation)
+        self.assertIn("issue comment起点のsourceなしstatusはsensor latchを解放しない", self.documentation)
 
     def test_latch_program_accepts_only_the_matching_app_success(self) -> None:
         bound_success = {
