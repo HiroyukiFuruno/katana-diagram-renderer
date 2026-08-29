@@ -20,6 +20,7 @@ _MARKER_PATTERN = re.compile(
 _SUCCESSFUL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _SELF_CHECK_NAMES = frozenset({"PR governance", "KRR / PR governance (trusted)"})
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
+_TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 
 
 def _bot_login(value: object) -> str | None:
@@ -137,7 +138,17 @@ def _resolved_thread_has_author_reply(
     for comment in comments[1:]:
         if not isinstance(comment, Mapping):
             raise TypeError("review thread comment must be an object")
-        if _bot_login(comment.get("author")) == author_login:
+        comment_author = comment.get("author")
+        comment_login = _bot_login(comment_author)
+        if comment_login is None:
+            continue
+        if comment_login.casefold() == author_login.casefold():
+            return True
+        association = comment.get("authorAssociation")
+        if (
+            isinstance(association, str)
+            and association.upper() in _TRUSTED_REPLY_ASSOCIATIONS
+        ):
             return True
     return False
 
@@ -316,7 +327,10 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
           id
           isResolved
           comments(first: 100) {
-            nodes { author { login } }
+            nodes {
+              author { login }
+              authorAssociation
+            }
             pageInfo { hasNextPage endCursor }
           }
         }

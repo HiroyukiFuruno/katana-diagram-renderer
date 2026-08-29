@@ -75,6 +75,15 @@ def _fetch_remote_branch(repository: Path, remote: str, branch: str) -> None:
     )
 
 
+def _remote_branch_sha(repository: Path, remote: str, branch: str) -> str:
+    result = _run_git(
+        repository,
+        "rev-parse",
+        f"refs/remotes/{remote}/{branch}",
+    )
+    return result.stdout.strip()
+
+
 def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
     result = _run_git(
         repository,
@@ -211,11 +220,15 @@ def cleanup_release_state(
     _run_git(repository, "fetch", remote, "--prune")
 
     remote_exists = _remote_branch_exists(repository, remote, release_branch)
-    if remote_exists and not _ref_exists(
-        repository,
-        f"refs/remotes/{remote}/{release_branch}",
-    ):
+    audited_remote_sha: str | None = None
+    if remote_exists:
+        # Refresh even when a tracking ref already exists; ancestry must be
+        # checked against the remote tip observed by this cleanup run.
         _fetch_remote_branch(repository, remote, release_branch)
+    if remote_exists:
+        # Keep the exact commit that passed the ancestry audit. The lease below
+        # makes a concurrent remote update fail instead of deleting its tip.
+        audited_remote_sha = _remote_branch_sha(repository, remote, release_branch)
     local_exists = _ref_exists(repository, f"refs/heads/{release_branch}")
     target_worktrees = [tree for tree in _worktrees(repository) if tree.branch == release_branch]
     target_ref = (
@@ -254,7 +267,15 @@ def cleanup_release_state(
         _run_git(repository, "branch", "-d", release_branch)
         actions.append(f"local branch {release_branch} deleted")
     if remote_exists:
-        _run_git(repository, "push", remote, "--delete", release_branch)
+        if audited_remote_sha is None:
+            raise CleanupError("remote branchの監査SHAを取得できません")
+        _run_git(
+            repository,
+            "push",
+            remote,
+            f"--force-with-lease=refs/heads/{release_branch}:{audited_remote_sha}",
+            f":refs/heads/{release_branch}",
+        )
         actions.append(f"remote branch {release_branch} deleted")
     _run_git(repository, "worktree", "prune")
     actions.append("worktree metadata pruned")

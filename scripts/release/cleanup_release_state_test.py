@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -150,6 +151,31 @@ class CleanupReleaseStateTest(unittest.TestCase):
         )
         self.cleanup()
         self.assertFalse(self.remote_branch_exists("release/v9.9.9"))
+
+    def test_refuses_remote_delete_when_branch_advances_after_audit(self) -> None:
+        self.create_release_branch(merge=True)
+        racing_repository = self.root / "racing-repository"
+        self.git("clone", str(self.remote), str(racing_repository), cwd=self.root)
+        self.git("config", "user.name", "Racing Test", cwd=racing_repository)
+        self.git("config", "user.email", "racing@example.com", cwd=racing_repository)
+        self.git("switch", "release/v9.9.9", cwd=racing_repository)
+        (racing_repository / "raced.txt").write_text("raced\n", encoding="utf-8")
+        self.git("add", "raced.txt", cwd=racing_repository)
+        self.git("commit", "-m", "advance release branch", cwd=racing_repository)
+
+        original_run_git = subject._run_git
+
+        def advance_before_delete(repository: Path, *arguments: str, **kwargs: object):
+            if arguments[:2] == ("push", "origin") and any(
+                argument.startswith("--force-with-lease=") for argument in arguments
+            ):
+                self.git("push", "origin", "release/v9.9.9", cwd=racing_repository)
+            return original_run_git(repository, *arguments, **kwargs)
+
+        with mock.patch.object(subject, "_run_git", side_effect=advance_before_delete):
+            with self.assertRaisesRegex(subject.CleanupError, "push .* failed"):
+                self.cleanup()
+        self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
 
     def test_rejects_default_branch_as_cleanup_target(self) -> None:
         with self.assertRaisesRegex(subject.CleanupError, "default branch"):

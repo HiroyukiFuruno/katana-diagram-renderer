@@ -33,6 +33,9 @@ _FULL_ISSUE_PATTERN = re.compile(
 _SHORT_ISSUE_PATTERN = re.compile(r"(?<![\w/])#(?P<number>[1-9]\d*)\b")
 _ZERO_SHA = "0" * 40
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
+_REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
+_PR_FILES_PAGE_SIZE = 100
+_PR_FILES_MAX_PAGES = 30
 _MANIFEST_NAMES = {
     "Cargo.toml",
     "package.json",
@@ -205,7 +208,7 @@ def dependency_evidence_errors(
 def validate_contract(
     *,
     branch: str,
-    default_branch: str,
+    default_branch: Optional[str],
     repository: str,
     commit_messages: Sequence[str],
     changed_paths: Sequence[str],
@@ -246,6 +249,163 @@ def validate_contract(
     raise ContractViolation(
         "参照Issueの依存更新証跡が不足しています: " + ", ".join(missing)
     )
+
+
+def _require_sha(value: object, label: str) -> str:
+    if not isinstance(value, str) or _SHA_PATTERN.fullmatch(value) is None:
+        raise ContractViolation(f"{label}は40文字のSHAである必要があります")
+    return value.lower()
+
+
+def _require_repository_name(value: str) -> str:
+    if _REPOSITORY_PATTERN.fullmatch(value) is None:
+        raise ContractViolation(f"repositoryの形式が不正です: {value!r}")
+    return value
+
+
+def _gh_json(*arguments: str) -> object:
+    result = subprocess.run(
+        ["gh", "api", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ContractViolation(f"GitHub API request failed: {detail}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ContractViolation("GitHub API responseがJSONではありません") from error
+
+
+def _pr_commit_messages(
+    *,
+    repository: str,
+    base_sha: str,
+    head_sha: str,
+) -> list[str]:
+    comparison = _gh_json(
+        f"repos/{repository}/compare/{base_sha}...{head_sha}"
+    )
+    if not isinstance(comparison, dict):
+        raise ContractViolation("GitHub compare responseの形式が不正です")
+    base_commit = comparison.get("base_commit")
+    merge_base_commit = comparison.get("merge_base_commit")
+    if not isinstance(base_commit, dict) or not isinstance(merge_base_commit, dict):
+        raise ContractViolation("GitHub compare responseにbase/merge-base commitがありません")
+    if _require_sha(base_commit.get("sha"), "compare base SHA") != base_sha:
+        raise ContractViolation("GitHub compare responseのbase SHAが一致しません")
+    _require_sha(merge_base_commit.get("sha"), "compare merge-base SHA")
+    status = comparison.get("status")
+    ahead_by = comparison.get("ahead_by")
+    behind_by = comparison.get("behind_by")
+    total_commits = comparison.get("total_commits")
+    commits = comparison.get("commits")
+    if status not in {"ahead", "behind", "diverged", "identical"}:
+        raise ContractViolation("GitHub compare responseのstatusが不正です")
+    if not isinstance(ahead_by, int) or ahead_by < 0:
+        raise ContractViolation("GitHub compare responseのahead_byが不正です")
+    if not isinstance(behind_by, int) or behind_by < 0:
+        raise ContractViolation("GitHub compare responseのbehind_byが不正です")
+    if not isinstance(total_commits, int) or total_commits < 0:
+        raise ContractViolation("GitHub compare responseのtotal_commitsが不正です")
+    if not isinstance(commits, list):
+        raise ContractViolation("GitHub compare responseのcommitsが不正です")
+    # Compare API truncates large commit ranges.  Partial history must never
+    # make a trusted success possible.
+    if len(commits) != ahead_by or total_commits != ahead_by:
+        raise ContractViolation(
+            "GitHub compare responseがbase..headの全commitを返していません"
+        )
+    if ahead_by == 0:
+        raise ContractViolation("PR base..headに検証対象commitがありません")
+    messages: list[str] = []
+    commit_shas: list[str] = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            raise ContractViolation("GitHub compare responseのcommitが不正です")
+        commit_shas.append(_require_sha(commit.get("sha"), "compare commit SHA"))
+        payload = commit.get("commit")
+        if not isinstance(payload, dict) or not isinstance(payload.get("message"), str):
+            raise ContractViolation("GitHub compare responseのcommit messageが不正です")
+        messages.append(payload["message"])
+    # GitHub's compare response does not expose head_commit.  The final item
+    # is the head tip only after the full base..head range above was verified.
+    if commit_shas[-1] != head_sha:
+        raise ContractViolation("GitHub compare responseの最終commitがhead SHAと一致しません")
+    return messages
+
+
+def _pr_changed_paths(*, repository: str, pr_number: int) -> list[str]:
+    pages = _gh_json(
+        "--paginate",
+        "--slurp",
+        f"repos/{repository}/pulls/{pr_number}/files?per_page={_PR_FILES_PAGE_SIZE}",
+    )
+    if not isinstance(pages, list):
+        raise ContractViolation("GitHub PR files responseの形式が不正です")
+    # GitHub caps this endpoint at 3,000 files.  A full thirtieth page is
+    # indistinguishable from a truncated result, so dependency evidence must
+    # reject it rather than validate a partial path set.
+    if len(pages) > _PR_FILES_MAX_PAGES or (
+        len(pages) == _PR_FILES_MAX_PAGES
+        and isinstance(pages[-1], list)
+        and len(pages[-1]) == _PR_FILES_PAGE_SIZE
+    ):
+        raise ContractViolation(
+            "GitHub PR files responseが3,000件上限で打ち切られた可能性があります"
+        )
+    paths: list[str] = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise ContractViolation("GitHub PR files pageの形式が不正です")
+        for changed_file in page:
+            if not isinstance(changed_file, dict):
+                raise ContractViolation("GitHub PR files entryの形式が不正です")
+            filename = changed_file.get("filename")
+            if not isinstance(filename, str) or not filename:
+                raise ContractViolation("GitHub PR files entryのfilenameが不正です")
+            paths.append(filename)
+    return paths
+
+
+def validate_pr_range(
+    *,
+    repository: str,
+    pr_number: int,
+    base_sha: str,
+    head_sha: str,
+    branch: str,
+    issue_loader: IssueLoader,
+) -> set[int]:
+    """Validate a PR's base..head contract without checking out PR code."""
+    repository = _require_repository_name(repository)
+    base_sha = _require_sha(base_sha, "PR base SHA")
+    head_sha = _require_sha(head_sha, "PR head SHA")
+    if pr_number < 1:
+        raise ContractViolation("PR番号は正の整数である必要があります")
+    if not _is_remote_ref(f"refs/heads/{branch}"):
+        raise ContractViolation(f"PR head branchの形式が不正です: {branch!r}")
+
+    commit_messages = _pr_commit_messages(
+        repository=repository,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
+    changed_paths = _pr_changed_paths(repository=repository, pr_number=pr_number)
+    validate_contract(
+        branch=branch,
+        default_branch=None,
+        repository=repository,
+        commit_messages=commit_messages,
+        changed_paths=changed_paths,
+        issue_loader=issue_loader,
+    )
+    references: set[int] = set()
+    for message in commit_messages:
+        references.update(issue_numbers(message, repository))
+    return references
 
 
 def _run_git(repository: Path, *arguments: str) -> str:
@@ -421,7 +581,66 @@ def main() -> int:
             "--remote-url",
             help="the remote URL used by the current git push (pre-push hook $2)",
         )
+        parser.add_argument(
+            "--pr-number",
+            type=int,
+            help="validate this pull request's base..head range through GitHub metadata",
+        )
+        parser.add_argument(
+            "--pr-base-sha",
+            help="trusted pull request base SHA for --pr-number mode",
+        )
+        parser.add_argument(
+            "--pr-head-sha",
+            help="trusted pull request head SHA for --pr-number mode",
+        )
+        parser.add_argument(
+            "--pr-branch",
+            help="trusted pull request head branch for --pr-number mode",
+        )
+        parser.add_argument(
+            "--repository",
+            help="GitHub owner/repository for --pr-number mode",
+        )
         arguments = parser.parse_args()
+
+        pr_values = (
+            arguments.pr_number,
+            arguments.pr_base_sha,
+            arguments.pr_head_sha,
+            arguments.pr_branch,
+            arguments.repository,
+        )
+        if any(value is not None for value in pr_values):
+            if not all(value is not None for value in pr_values):
+                raise ContractViolation(
+                    "PR range modeには--pr-number、--pr-base-sha、--pr-head-sha、"
+                    "--pr-branch、--repositoryがすべて必要です"
+                )
+            if arguments.remote is not None or arguments.remote_url is not None:
+                raise ContractViolation("PR range modeで--remoteと--remote-urlは使用できません")
+            cache: dict[int, Issue | None] = {}
+
+            def load_issue(number: int) -> Issue | None:
+                if number not in cache:
+                    cache[number] = _load_issue(arguments.repository, number)
+                return cache[number]
+
+            references = validate_pr_range(
+                repository=arguments.repository,
+                pr_number=arguments.pr_number,
+                base_sha=arguments.pr_base_sha,
+                head_sha=arguments.pr_head_sha,
+                branch=arguments.pr_branch,
+                issue_loader=load_issue,
+            )
+            print(
+                "Issue contract passed: "
+                f"targets={arguments.pr_branch}, "
+                f"issues={','.join(f'#{number}' for number in sorted(references))}"
+            )
+            return 0
+
         repository = Path(_run_git(Path.cwd(), "rev-parse", "--show-toplevel"))
         push_input = sys.stdin.read()
         updates = parse_push_updates(push_input)

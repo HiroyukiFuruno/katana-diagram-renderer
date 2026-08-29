@@ -284,6 +284,202 @@ class VerifyPushIssueTest(unittest.TestCase):
             issue=self.issue(body=body),
         )
 
+    def test_pr_range_validates_github_metadata_without_git_or_pr_checkout(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "feat: contract\n\nRefs #64"}}
+            ],
+        }
+        files = [[{"filename": "scripts/hooks/pre-push.sh"}]]
+
+        def gh_json(*arguments: str) -> object:
+            if arguments == (
+                f"repos/HiroyukiFuruno/katana-render-runtime/compare/{base_sha}...{head_sha}",
+            ):
+                return compare
+            if arguments == (
+                "--paginate",
+                "--slurp",
+                "repos/HiroyukiFuruno/katana-render-runtime/pulls/72/files?per_page=100",
+            ):
+                return files
+            raise AssertionError(f"unexpected GitHub API request: {arguments}")
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject,
+            "_run_git",
+            side_effect=AssertionError("PR range mode must not invoke git or check out PR code"),
+        ):
+            references = subject.validate_pr_range(
+                repository="HiroyukiFuruno/katana-render-runtime",
+                pr_number=72,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                branch="fix/issue-contract",
+                issue_loader=lambda number: self.issue(number),
+            )
+
+        self.assertEqual(references, {64})
+
+    def test_pr_range_fails_closed_when_compare_commits_are_truncated(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "feat: only one\n\nRefs #64"}}
+            ],
+        }
+
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "全commit"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_fails_when_any_base_to_head_commit_lacks_an_issue(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
+            "total_commits": 2,
+            "commits": [
+                {
+                    "sha": "c" * 40,
+                    "commit": {"message": "feat: linked\n\nRefs #64"},
+                },
+                {"sha": head_sha, "commit": {"message": "fix: unlinked"}},
+            ],
+        }
+
+        def gh_json(*arguments: str) -> object:
+            if len(arguments) == 1:
+                return compare
+            return [[{"filename": "scripts/hooks/pre-push.sh"}]]
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_allows_a_base_advanced_after_branch_diverged(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        merge_base_sha = "c" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": merge_base_sha},
+            "status": "diverged",
+            "ahead_by": 1,
+            "behind_by": 2,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+        }
+
+        def gh_json(*arguments: str) -> object:
+            if len(arguments) == 1:
+                return compare
+            return [[{"filename": "scripts/hooks/pre-push.sh"}]]
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            self.assertEqual(
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                ),
+                {64},
+            )
+
+    def test_pr_range_fails_when_compare_final_commit_is_not_head(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": "c" * 40, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+        }
+
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "最終commit"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_changed_paths_fails_closed_at_github_files_limit(self) -> None:
+        pages = [
+            [
+                {"filename": f"fixtures/{page}-{entry}.txt"}
+                for entry in range(100)
+            ]
+            for page in range(30)
+        ]
+        with patch.object(subject, "_gh_json", return_value=pages):
+            with self.assertRaisesRegex(subject.ContractViolation, "3,000件上限"):
+                subject._pr_changed_paths(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                )
+
+    def test_trusted_workflow_invokes_pr_range_mode_after_base_checkout(self) -> None:
+        workflow = (
+            Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
+        ).read_text(encoding="utf-8")
+        checkout = "- name: Check out trusted base repository"
+        verifier = "python3 scripts/hooks/verify_push_issue.py"
+        self.assertIn("pull_request_target:", workflow)
+        self.assertIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
+        self.assertIn(checkout, workflow)
+        self.assertIn(verifier, workflow)
+        self.assertIn("--pr-base-sha \"${verified_base}\"", workflow)
+        self.assertIn("--pr-head-sha \"${verified_head}\"", workflow)
+        self.assertIn("--pr-branch \"${verified_branch}\"", workflow)
+        self.assertLess(workflow.index(checkout), workflow.index(verifier))
+
     def test_new_branch_without_upstream_uses_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)

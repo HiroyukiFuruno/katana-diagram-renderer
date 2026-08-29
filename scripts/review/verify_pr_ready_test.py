@@ -267,6 +267,58 @@ class VerifyPrReadyTest(unittest.TestCase):
             [],
         )
 
+    def test_accepts_resolved_thread_with_trusted_maintainer_reply_to_bot_pr(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        pull_request["author"] = {"login": "dependabot[bot]"}
+        threads = [
+            {
+                "id": "thread-1",
+                "isResolved": True,
+                "comments": [
+                    {"author": {"login": "reviewer"}},
+                    {
+                        "author": {"login": "maintainer"},
+                        "authorAssociation": "MEMBER",
+                    },
+                ],
+            }
+        ]
+
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request,
+                threads=threads,
+                comments=comments,
+                reactions=reactions,
+            ),
+            [],
+        )
+
+    def test_rejects_resolved_thread_with_untrusted_reply_to_bot_pr(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        pull_request["author"] = {"login": "dependabot[bot]"}
+        threads = [
+            {
+                "id": "thread-1",
+                "isResolved": True,
+                "comments": [
+                    {"author": {"login": "reviewer"}},
+                    {
+                        "author": {"login": "contributor"},
+                        "authorAssociation": "CONTRIBUTOR",
+                    },
+                ],
+            }
+        ]
+
+        errors = self.errors(
+            pull_request=pull_request,
+            threads=threads,
+            comments=comments,
+            reactions=reactions,
+        )
+        self.assertIn("reply", " ".join(errors).lower())
+
     def test_reads_issue_comments_past_the_first_api_page(self) -> None:
         pull_request = {
             "isDraft": True,
