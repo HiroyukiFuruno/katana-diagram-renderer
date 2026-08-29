@@ -246,6 +246,25 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("reactionの削除はGitHub Actionsのtrigger対象ではない", self.documentation)
         self.assertIn("Draftへ戻し、新しいfinal review証跡とReady化", self.documentation)
 
+    def test_impl_release_skill_is_synchronized_with_canonical_governance_flow(self) -> None:
+        canonical = (self.repository / ".codex/skills/impl-release/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        repository_skill = (self.repository / ".agents/skills/impl-release/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("phase=initial head=${head_sha}", canonical)
+        self.assertIn("phase=final head=${head_sha}", canonical)
+        self.assertIn("gh pr create --draft", repository_skill)
+        self.assertIn("phase=initial head=${head_sha}", repository_skill)
+        self.assertIn("phase=final head=${head_sha}", repository_skill)
+        self.assertIn("thread へ reply して resolve", repository_skill)
+        self.assertIn("just PR=<number> pr-ready-check", repository_skill)
+        self.assertIn('just PR=<number> pr-ready-check && gh pr ready "${pr_url}"', repository_skill)
+        self.assertIn("gh pr ready", repository_skill)
+        self.assertIn("Ready 化後に merge 承認", repository_skill)
+        self.assertNotIn('gh pr create --base master --head release/vX.Y.Z', repository_skill)
+
 
 if __name__ == "__main__":
     unittest.main()
