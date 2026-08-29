@@ -51,10 +51,10 @@ Pull Requestは、Issue契約とレビュー結果を同じ変更履歴として
 4. 分離可能な指摘修正は、ファイルまたは非重複責務単位でsubagentへ並列委譲する。main agentは指摘を直列実装せず、各担当の変更範囲を重複させない。
 5. 各指摘を修正したら、担当範囲の検証、全体検証、push、該当threadへのreply、threadのresolveを順に行う。P0/P1は必須対応とする。
 6. pushでHEADが変わるたび、旧HEADのレビューを有効な最終レビューとみなさない。最新HEADに対してfinal markerと `@codex review` を付けて再レビューを依頼し、新しい指摘がなくなるまで4〜5を繰り返す。
-7. 最新HEAD、レビュー完了、未resolve thread 0、CI、Issue/DoDを次のゲートで機械確認する。
+7. 最新HEAD、レビュー完了、未resolve thread 0、CI、Issue/DoDを次のゲートで機械確認する。ゲートはまず参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査する。
 
 ```bash
-just PR=72 pr-ready-check
+just pr-ready-check 72
 ```
 
 8. `pr-ready-check` 成功後にだけReady化する。Ready化後のmergeはユーザーの明示承認を得てから行う。
@@ -62,6 +62,36 @@ just PR=72 pr-ready-check
 ```bash
 gh pr ready 72
 ```
+
+### Governance bootstrapの限定例外
+
+通常PRは前節の `pr-ready-check` 成功前にReady化またはmergeしてはならない。`.github/workflows/**` を追加、変更、rename、削除するgovernance bootstrap PRは、trusted PR range検証が意図どおりworkflow変更をblanket denyするため、PR内の例外や検証緩和では解けない。この場合だけ、PR外の専用GitHub Appが固定した最新HEADを独立に検証し、一時context `KRR / PR governance bootstrap` を成功として投稿する。branch protectionは、そのcontextを当該専用App IDに固定したrequired checkとして設定する。
+
+bootstrap PRのReady化とmergeには、上記一時contextの成功に加えて、最新HEADのfinal review完了、未resolve thread 0、既存CI、DoDを全て要求する。PR内のallowlist、自己承認、`verify_push_issue.py` の緩和、PR由来workflowによるbootstrap statusの発行は禁止する。merge直後に一時contextをrequired checkから除去し、専用App IDに固定した `KRR / PR governance (trusted)` とGitHub Actions `app_id=15368` に固定した `KRR / PR governance review latch` をrequiredへ切り替える。使い捨てPRで両checkを実機smokeし、改変後のfinal review証跡が旧statusを失効させることまで確認して完了とする。
+
+操作は次のCLIに固定する。`activate` はmerge前、`finalize` はmerge直後、`verify` はsmoke PR確認後に実行する。`--apply` はrequired checkを書き換える2操作だけに付け、App token/private keyを引数へ直書きしてはならない。PR checkoutのコードはbootstrap evidenceとして実行しない。activate/finalizeは別々の`KRR_GOVERNANCE_APP_JWT`と`KRR_GOVERNANCE_APP_TOKEN`を環境変数から受け取り、CLI引数・出力へ出してはならない。
+
+```bash
+SCRIPT=/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py
+bootstrap_args=(
+  --repository HiroyukiFuruno/katana-render-runtime
+  --pr <bootstrap-pr-number>
+  --expected-base <40-character-base-sha>
+  --expected-head <40-character-head-sha>
+  --expected-app-id <governance-app-id>
+  --allowed-workflow .github/workflows/pr-governance.yml
+  --allowed-workflow .github/workflows/pr-governance-review-events.yml
+  --allowed-workflow .github/workflows/release.yml
+  --expected-diff-sha256 <64-character-diff-sha256>
+)
+export KRR_GOVERNANCE_APP_JWT="${KRR_GOVERNANCE_APP_JWT:?set the App JWT outside the command line}"
+export KRR_GOVERNANCE_APP_TOKEN="${KRR_GOVERNANCE_APP_TOKEN:?set the installation token outside the command line}"
+python3 "$SCRIPT" activate "${bootstrap_args[@]}" --apply
+python3 "$SCRIPT" finalize "${bootstrap_args[@]}" --apply
+python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
+```
+
+このCLIも通常gateの代替ではない。固定HEAD、Issue OPEN、依存更新証跡、PR range契約、Draft/review/CIを検証し、workflow allowlistの完全一致に失敗したら停止する。PR内のworkflow/branch/Issueを条件にした自己例外、`verify_push_issue.py`の緩和、Actions tokenによるbootstrap status発行は禁止する。
 
 レビュー依頼markerは、対象HEADを曖昧にしないため次の形式にする。
 
@@ -87,7 +117,7 @@ gh pr ready 72
 - repository Actionsのdefault `GITHUB_TOKEN` はread-onlyに保つ。sensorのread-only pollingをstatus writeへ拡張してはならない。
 - trusted PR range検証は`.github/workflows/**`配下の追加、変更、rename、削除をすべて拒否する。sensor workflowがPR merge refで実行されても、改変には新HEADが必要で、そのHEADには専用App statusの成功が存在しない。trusted publisherが完全なPR range検証後に発行するstatusだけがlatchを解放できる。
 
-このハーネスを導入するbootstrap PRでは、GitHubのbranch protection（`KRR / PR governance (trusted)` contextと専用App ID、`KRR / PR governance review latch`とGitHub Actions `app_id=15368`の組み合わせ）はbootstrap PRのmerge後に設定する。専用Appが最初の正規statusを発行したら、そのREST `creator.id`（installation bot account IDでありApp IDとは別）をrepository variable `KRR_GOVERNANCE_STATUS_CREATOR_ID`へ固定する。続けてstrict status checks、conversation resolution、必要なadmin enforcementも有効化する。専用App、secret、creator ID、または保護設定が未設定の期間は、これらをrequired checkとして強制しない。
+bootstrap PRでは、merge前に専用Appをinstallし、一時context `KRR / PR governance bootstrap` を当該App IDに固定したrequired checkとして設定する。PR外の専用Appが固定HEADに成功statusを発行したことを確認してからだけmergeする。merge直後は一時contextを除去し、`KRR / PR governance (trusted)` を専用App IDに、`KRR / PR governance review latch` をGitHub Actions `app_id=15368` に固定したrequired checkへ即時切替する。専用Appが最初の正規statusを発行したら、そのREST `creator.id`（installation bot account IDでありApp IDとは別）をrepository variable `KRR_GOVERNANCE_STATUS_CREATOR_ID`へ固定する。strict status checks、conversation resolution、必要なadmin enforcementを維持し、使い捨てPRのsmoke完了まで公開運用を完了扱いにしない。
 
 PRのopened/edited/synchronize/reopened/Ready/Draft転換、およびreview/review-comment変更は権限・secret・checkoutを持たないsensor workflowが受ける。server生成の`workflow_run(requested)`だけをtrusted publisherが検証して再評価する。publisherはsensorのrepository、workflow名、event、workflow path、PR番号をGitHub APIで再取得して一致しなければfail-closedにする。sensor runが古くても、そのPR番号から現在のbase/head/draftを再取得して現在HEADへstatusを投稿する。sensorはイベント時のPR headで自分のnonceをpollするため、同期後のcurrent headへ古いsource run IDが投稿されても旧sensorはsuccessにならず、新しいsynchronize sensorだけが新nonceで解放できる。source sensor run IDはpending/final statusのtarget URLへ記録され、sensorはそのnonceと固定creator IDを照合する。
 

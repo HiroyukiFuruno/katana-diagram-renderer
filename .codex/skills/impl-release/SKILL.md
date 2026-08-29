@@ -9,6 +9,8 @@ description: katana-diagram-renderer で指定バージョンの実装、品質�
 この repository は `release/vX.Y.Z` から `master` へ取り込み依頼（Pull Request）を作り、merge 後に自動リリースします。
 初回公開版は `v0.1.0` から開始します。
 
+governance bootstrap はPR外の絶対path `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py` の `activate` / `finalize` / `verify` を使用する。`--expected-base --expected-head --expected-app-id --expected-diff-sha256` と完全な `--allowed-workflow` を固定し、前2者だけ `--apply`、verifyだけ `--smoke-pr` を指定する。activate/finalizeの前に別々の `KRR_GOVERNANCE_APP_JWT` と `KRR_GOVERNANCE_APP_TOKEN` を環境変数へ設定し、CLI引数・出力へ出さない。PR checkoutのコードをevidenceとして実行せず、token/private keyを引数へ渡さない。通常の `pr-ready-check` は緩和しない。
+
 ## 実行ルール
 
 1. ユーザー指定の version を対象にする。例: `v0.1.0`
@@ -116,12 +118,18 @@ CI green だけでは Ready または merge の条件を満たしません。DoD
 上記の全 gate が通った後、次の専用チェックを実行します。
 
 ```bash
-just PR=<number> pr-ready-check && gh pr ready "${pr_url}"
+just pr-ready-check "<number>" && gh pr ready "${pr_url}"
 ```
 
-`pr-ready-check` が成功するまで `gh pr ready` は実行しません。Ready 化後に、ユーザーへ merge 承認を求めます。承認後だけ merge します。
+`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。成功するまで `gh pr ready` は実行しません。Ready 化後に、ユーザーへ merge 承認を求めます。承認後だけ merge します。
 
 `pr-ready-check` の前に、GitHub の review thread を全ページ取得して未 resolve が 0 件であることを確認します。未 resolve thread が 1 件でも残っている場合は Ready 化せず、対象 subagent に修正・reply・resolve を戻します。
+
+### governance workflow の初回 bootstrap
+
+PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、通常の `pr-ready-check` の代替を曖昧に設けてはいけません。PR 外の専用 GitHub App が、対象 PR の固定 HEAD SHA、Issue OPEN、依存更新証跡、PR range の Issue contract、最新 review、未 resolve thread 0、既存 CI / DoD を独立検証し、同じ固定 SHA に一時 status `KRR / PR governance bootstrap` を App ID 付きで投稿します。PR 内の workflow、branch 名、Issue、status を自己承認の根拠にしてはいけません。
+
+この一時 status を保護ブランチの required context に追加して Ready / merge を進める場合も、通常の review と CI gate を省略しません。merge 直後に bootstrap context を除去し、専用 App の `KRR / PR governance (trusted)` と GitHub Actions App ID `15368` の `KRR / PR governance review latch` を required に切り替え、使い捨て PR で smoke 検証します。bootstrap 以外の通常 PR は必ず `just pr-ready-check "<number>"` を通します。
 
 ## Phase 7: merge と自動リリース
 
@@ -147,7 +155,7 @@ gh run list --workflow Release --limit 5
 - [ ] 未 resolve thread が 0 件である
 - [ ] `Test and Build (...)` と `preflight` が通っている
 - [ ] OpenSpec の tasks / DoD と `release-target-check` が通っている
-- [ ] `just PR=<number> pr-ready-check` が通った後に `gh pr ready` を実行している
+- [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract を含む）が通った後に `gh pr ready` を実行している
 - [ ] Ready 化前に全 review thread を確認し、未 resolve thread が 0 件である
 - [ ] Ready 化後にユーザーの merge 承認を得ている
 - [ ] merge 後に OpenSpec change を archive している

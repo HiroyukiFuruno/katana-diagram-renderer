@@ -8,6 +8,8 @@ description: katana-diagram-renderer の Pull Request を、自己レビュー�
 PR 作成前に、差分、検証、base branch を確認します。PR は必ず Draft で作成し、cloud review と指摘対応を完了してから Ready にします。
 推測で `master` や `main` を選びません。
 
+governance bootstrap はPR外の絶対path `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py` の `activate` / `finalize` / `verify` を使用する。`--expected-base --expected-head --expected-app-id --expected-diff-sha256` と完全な `--allowed-workflow` を固定し、前2者だけ `--apply`、verifyだけ `--smoke-pr` を指定する。activate/finalizeの前に別々の `KRR_GOVERNANCE_APP_JWT` と `KRR_GOVERNANCE_APP_TOKEN` を環境変数へ設定し、CLI引数・出力へ出さない。PR checkoutのコードをevidenceとして実行せず、token/private keyを引数へ渡さない。通常の `pr-ready-check` は緩和しない。
+
 ## 1. 前提確認
 
 ```bash
@@ -80,9 +82,21 @@ gh pr comment "${pr_url}" --body "<!-- krr-review phase=final head=${head_sha} -
 ## 6. Ready 化と承認後 merge
 
 CI、self-review、lint、test、coverage、OpenSpec/DoD、最新 HEAD review、未resolve 0 を確認した後だけ、次を実行します。各 Issue の `non-Draft target` は 256 件以下である（256 non-Draft target invariant）ことも確認します。超過した場合は bypass せず、影響する PR を Draft に戻すか closing reference を外してから merge 前に解消します。
+- `pr-ready-check` は最初に、参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査します。
+
+### Governance workflow の初回導入・改修
+
+対象PRが governance workflow 自体の初回導入または改修である場合だけ、通常の `pr-ready-check` が workflow変更を拒否する境界を、次の一時 bootstrap 手順で解消します。これは通常PRへ適用してはならず、PR内の条件分岐・ブランチ名・Issue番号・PR author・workflow変更を根拠にした自己承認も禁止します。
+
+1. PR外で運用する専用 GitHub App が、対象PRの固定 HEAD SHA、参照 Issue が OPEN であること、依存更新証跡、PR range の Issue 契約、最新 review・未resolve thread 0、既存 CI・DoD を独立に検証する。
+2. App が対象の固定 SHA に一時 context `KRR / PR governance bootstrap` を success で投稿し、その App ID を required status check に固定する。status と App ID の対応を API で確認できない場合は進めない。
+3. 通常の review/CI/DoD と branch protection を満たしたことを確認してから Ready 化・merge する。固定 SHA が変わったら bootstrap status は無効として再検証する。
+4. merge 直後に一時 context と bootstrap 用設定を除去し、専用 App の `KRR / PR governance (trusted)` と GitHub Actions の `KRR / PR governance review latch` を App ID 固定の required check として有効化し、実PRで smoke 検証する。
+
+専用 App、固定 SHA、required check のいずれかを用意できない場合は merge せず、PR内の bypass で代替しません。
 
 ```bash
-just PR="<pr-number>" pr-ready-check && \
+just pr-ready-check "<pr-number>" && \
   gh pr ready "<pr-number>"
 ```
 

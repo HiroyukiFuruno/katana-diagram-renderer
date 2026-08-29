@@ -732,6 +732,29 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("reactionの削除はGitHub Actionsのtrigger対象ではない", self.documentation)
         self.assertIn("Draftへ戻し、新しいfinal review証跡とReady化", self.documentation)
 
+    def test_bootstrap_documentation_contract_keeps_normal_gate_fail_closed(self) -> None:
+        external_script = "/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py"
+        for token in (
+            external_script,
+            "activate",
+            "finalize",
+            "verify",
+            "--expected-base",
+            "--expected-head",
+            "--expected-app-id",
+            "--expected-diff-sha256",
+            "--allowed-workflow",
+            "--apply",
+            "--smoke-pr",
+            "KRR_GOVERNANCE_APP_JWT",
+            "KRR_GOVERNANCE_APP_TOKEN",
+            "CLI引数・出力へ出してはならない",
+        ):
+            self.assertIn(token, self.documentation)
+        self.assertIn("PR外の専用GitHub App", self.documentation)
+        self.assertIn("PR内のworkflow/branch/Issueを条件にした自己例外", self.documentation)
+        self.assertIn("通常gateの代替ではない", self.documentation)
+
     def test_impl_release_skill_is_synchronized_with_canonical_governance_flow(self) -> None:
         canonical = (self.repository / ".codex/skills/impl-release/SKILL.md").read_text(
             encoding="utf-8"
@@ -745,11 +768,26 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("phase=initial head=${head_sha}", repository_skill)
         self.assertIn("phase=final head=${head_sha}", repository_skill)
         self.assertIn("thread へ reply して resolve", repository_skill)
-        self.assertIn("just PR=<number> pr-ready-check", repository_skill)
-        self.assertIn('just PR=<number> pr-ready-check && gh pr ready "${pr_url}"', repository_skill)
+        self.assertIn('just pr-ready-check "<number>"', repository_skill)
+        self.assertIn('just pr-ready-check "<number>" &&', repository_skill)
         self.assertIn("gh pr ready", repository_skill)
         self.assertIn("Ready 化後に merge 承認", repository_skill)
         self.assertNotIn('gh pr create --base master --head release/vX.Y.Z', repository_skill)
+
+        for skill in (canonical, repository_skill):
+            self.assertIn("初回 bootstrap", skill)
+            self.assertIn("PR 外の専用 GitHub App", skill)
+            self.assertIn("KRR / PR governance bootstrap", skill)
+            self.assertIn("固定 HEAD SHA", skill)
+            self.assertIn("Issue OPEN", skill)
+            self.assertIn("依存更新証跡", skill)
+            self.assertIn("PR range の Issue contract", skill)
+            self.assertIn("未 resolve thread 0", skill)
+            self.assertIn("PR 内の workflow、branch 名、Issue、status を自己承認", skill)
+            self.assertIn("merge 直後に bootstrap context を除去", skill)
+            self.assertIn("KRR / PR governance (trusted)", skill)
+            self.assertIn("KRR / PR governance review latch", skill)
+            self.assertIn('just pr-ready-check "<number>"', skill)
 
 
 if __name__ == "__main__":

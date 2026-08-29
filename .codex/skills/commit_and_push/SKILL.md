@@ -101,7 +101,7 @@ initial review は `create_pull_request` スキルの担当とし、このスキ
 
 P1 などの review 指摘修正を実装する場合、分離可能ならファイルまたは責務単位で subagent に委譲し、main はオーケストレーターとして要件・DoD・差分・検証を統合確認する。同じファイルや責務を重ねて委譲しない。
 
-Ready 判断前の機械ゲートは `just PR=<number> pr-ready-check` とする。
+Ready 判断前の機械ゲートは `just pr-ready-check "<number>"` とする。この local gate は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証する。
 
 ## 報告
 

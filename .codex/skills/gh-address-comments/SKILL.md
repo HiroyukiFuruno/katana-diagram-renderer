@@ -101,4 +101,4 @@ krr-review phase=final head=<SHA>
 
 ## 6. 完了判定
 
-最後に `just PR={pr_number} pr-ready-check` を実行し、最新 HEAD の review 完了、未resolve thread 0、CI、DoD を機械確認する。CI green のみ、レビュー依頼済みのみ、または局所テスト通過のみでは完了としない。pr-ready-check 成功後も、Draft 維持のまま main が最終差分と結果を報告する。
+最後に `just pr-ready-check "{pr_number}"` を実行し、最新 HEAD の review 完了、未resolve thread 0、CI、DoD を機械確認する。この local gate は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）も先に検証する。CI green のみ、レビュー依頼済みのみ、または局所テスト通過のみでは完了としない。pr-ready-check 成功後も、Draft 維持のまま main が最終差分と結果を報告する。

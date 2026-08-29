@@ -77,7 +77,7 @@ PR 作成は `/create_pull_request` に委譲し、Ready PR を直接作成し�
 3. 修正が必要な指摘は、対象ファイルまたは責務ごとに重複なく subagent へ並列委譲する。
 4. 各指摘を修正・検証し、該当 thread へ対応内容を reply してから resolve する。
 5. 指摘の有無や修正 push の有無にかかわらず、最新 HEAD に対する最終 cloud review を、コメント本文に `krr-review phase=final head=<HEAD_SHA>` marker を付けて必ず依頼し、結果を取得する。最終 review で新規指摘が出た場合は、対象ごとに subagent で修正・検証し、push、該当 thread への reply / resolve を行った後、更新後の最新 HEAD に `krr-review phase=final head=<HEAD_SHA>` marker を付けて再度 review する。このサイクルを未 resolve thread 0 かつ新規指摘なしになるまで反復する。
-6. 最新 HEAD の review 完了、未 resolve thread 0、CI / DoD PASS を確認し、`just PR=<pr> pr-ready-check` を実行する。
+6. 最新 HEAD の review 完了、未 resolve thread 0、CI / DoD PASS を確認し、`just pr-ready-check "<pr>"` を実行する。local gate は参照Issueの OPEN、依存更新証跡、PR range の Issue contract 完全一致（不足・余分なし）を先に検証する。
 7. `pr-ready-check` 成功後だけ `gh pr ready` で Ready 化し、ユーザーへ merge 承認を求める。承認前に merge しない。
 
 CI green だけでは review 完了、Ready 化、または merge の条件を満たしません。self-review、lint、テスト、coverage、OpenSpec / DoD、最新 HEAD の cloud review、未 resolve thread 0 を個別に確認します。

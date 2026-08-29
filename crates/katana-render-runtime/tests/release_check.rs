@@ -453,7 +453,7 @@ fn assert_agents_pr_skill_contract(skill: &str) {
     assert!(skill.contains("phase=initial head=${head_sha}"));
     assert!(skill.contains("phase=final head=${head_sha}"));
     assert!(skill.contains("thread への reply→resolve") || skill.contains("thread への reply"));
-    assert!(skill.contains("just PR=\"<pr-number>\" pr-ready-check &&"));
+    assert!(skill.contains("just pr-ready-check \"<pr-number>\" &&"));
     assert!(skill.contains("gh pr ready"));
     assert!(!skill.contains("gh pr create --base \"<base-branch>\""));
 }
@@ -579,9 +579,213 @@ fn assert_pr_ready_recipe_contract(root: &Path) -> TestResult {
     let justfile = std::fs::read_to_string(root.join("Justfile"))?;
     let ready_check = recipe_body(&justfile, "pr-ready-check")?;
     let automation = recipe_body(&justfile, "automation-contract-test")?;
+    assert_pr_ready_recipe_structure(&justfile, ready_check, automation)?;
+    assert_pr_ready_recipe_invocations(root)?;
+    assert_pr_ready_recipe_documentation(root)?;
+    assert_governance_bootstrap_documentation(root)?;
+    assert_no_legacy_pr_ready_invocation(root)
+}
+
+fn assert_pr_ready_recipe_structure(
+    justfile: &str,
+    ready_check: &str,
+    automation: &str,
+) -> TestResult {
+    assert!(justfile.contains("pr-ready-check pr:"));
+    assert_pr_ready_recipe_metadata(ready_check);
+    assert_pr_ready_recipe_issue_dispatch(ready_check);
+    assert_pr_ready_recipe_readiness_dispatch(ready_check);
+    assert_pr_ready_recipe_order(ready_check);
+    assert!(automation.contains("unittest discover -s scripts/review"));
+    Ok(())
+}
+
+fn assert_pr_ready_recipe_metadata(ready_check: &str) {
+    for required in [
+        "set -euo pipefail",
+        "pr={{quote(pr)}}",
+        "gh pr view \"$pr\" --json baseRefOid,headRefOid,headRefName",
+        "gh repo view --json nameWithOwner",
+        "gh returned incomplete or unsafe PR metadata",
+        "IFS=\"$(printf '\\011')\" read -r base_sha head_sha branch repository extra",
+        "not any(ord(character) < 32 or ord(character) == 127",
+    ] {
+        assert!(
+            ready_check.contains(required),
+            "recipe must contain {required}"
+        );
+    }
+    assert!(!ready_check.contains("mapfile"));
+}
+
+fn assert_pr_ready_recipe_issue_dispatch(ready_check: &str) {
+    for required in [
+        "scripts/hooks/verify_push_issue.py",
+        "--pr-number \"$pr\"",
+        "--pr-base-sha \"$base_sha\"",
+        "--pr-head-sha \"$head_sha\"",
+        "--pr-branch \"$branch\"",
+        "--repository \"$repository\"",
+    ] {
+        assert!(
+            ready_check.contains(required),
+            "Issue contract must contain {required}"
+        );
+    }
+}
+
+fn assert_pr_ready_recipe_readiness_dispatch(ready_check: &str) {
     assert!(ready_check.contains("scripts/review/verify_pr_ready.py"));
     assert!(ready_check.contains("--require-draft"));
-    assert!(automation.contains("unittest discover -s scripts/review"));
+}
+
+fn assert_pr_ready_recipe_order(ready_check: &str) {
+    assert!(
+        ready_check.find("scripts/hooks/verify_push_issue.py")
+            < ready_check.find("scripts/review/verify_pr_ready.py"),
+        "the Issue contract must run before PR-readiness verification"
+    );
+}
+
+fn assert_pr_ready_recipe_invocations(root: &Path) -> TestResult {
+    assert_canonical_pr_ready_invocation(root)?;
+    assert_injection_is_rejected(root)?;
+    assert_legacy_pr_ready_invocation_is_rejected(root)?;
+    Ok(())
+}
+
+fn assert_canonical_pr_ready_invocation(root: &Path) -> TestResult {
+    let output = run_just(root, &["--dry-run", "pr-ready-check", "72"])?;
+    assert!(
+        output.status.success(),
+        "canonical positional invocation must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = command_output(output)?;
+    assert!(text.contains("scripts/hooks/verify_push_issue.py"));
+    assert!(text.contains("scripts/review/verify_pr_ready.py"));
+    Ok(())
+}
+
+fn assert_injection_is_rejected(root: &Path) -> TestResult {
+    let output = run_just(root, &["pr-ready-check", "1\"; exit 0; #"])?;
+    assert!(!output.status.success());
+    let text = command_output(output)?;
+    assert!(
+        text.contains("pr-ready-check requires a positive numeric pull request number"),
+        "the numeric guard must stop before any GitHub probe: {text}"
+    );
+    Ok(())
+}
+
+fn assert_legacy_pr_ready_invocation_is_rejected(root: &Path) -> TestResult {
+    let output = run_just(root, &["--dry-run", "PR=72", "pr-ready-check"])?;
+    assert!(
+        !output.status.success(),
+        "legacy variable assignment must be rejected in favor of `just pr-ready-check <number>`"
+    );
+    Ok(())
+}
+
+fn run_just(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    Command::new("just").args(args).current_dir(root).output()
+}
+
+fn command_output(output: std::process::Output) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(format!(
+        "{}{}",
+        String::from_utf8(output.stdout)?,
+        String::from_utf8(output.stderr)?
+    ))
+}
+
+fn assert_pr_ready_recipe_documentation(root: &Path) -> TestResult {
+    let agents = std::fs::read_to_string(root.join("AGENTS.md"))?;
+    assert!(agents.contains("just pr-ready-check <number>"));
+    for required in ["参照IssueがOPEN", "依存更新証跡", "PR rangeのIssue契約"] {
+        assert!(
+            agents.contains(required),
+            "AGENTS.md must document {required}"
+        );
+    }
+    Ok(())
+}
+
+fn assert_governance_bootstrap_documentation(root: &Path) -> TestResult {
+    let agents = std::fs::read_to_string(root.join("AGENTS.md"))?;
+    let workflow = std::fs::read_to_string(root.join("docs/issue-driven-workflow.md"))?;
+    assert_bootstrap_overview_terms(&agents, &workflow);
+    assert_bootstrap_protection_is_pre_merge(&workflow);
+    assert_bootstrap_cli_boundary(&workflow);
+    Ok(())
+}
+
+fn assert_bootstrap_overview_terms(agents: &str, workflow: &str) {
+    for document in [agents, workflow] {
+        for required in [
+            "KRR / PR governance bootstrap",
+            "PR外の専用GitHub App",
+            "固定HEAD",
+            "PR内の例外",
+            "自己承認",
+            "verify_push_issue.py",
+            "KRR / PR governance (trusted)",
+            "KRR / PR governance review latch",
+            "app_id=15368",
+            "使い捨てPR",
+        ] {
+            assert!(
+                document.contains(required),
+                "bootstrap contract must document {required}"
+            );
+        }
+    }
+}
+
+fn assert_bootstrap_protection_is_pre_merge(workflow: &str) {
+    assert!(
+        !workflow.contains("bootstrap PRのmerge後に設定する"),
+        "bootstrap protection must be active before merge"
+    );
+}
+
+fn assert_bootstrap_cli_boundary(workflow: &str) {
+    for required in [
+        "通常gateの代替ではない",
+        "PR内のworkflow/branch/Issueを条件にした自己例外",
+        "/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py",
+        "--expected-base",
+        "--expected-diff-sha256",
+        "--allowed-workflow",
+        "activate",
+        "finalize",
+        "verify",
+        "--apply",
+        "--smoke-pr",
+        "KRR_GOVERNANCE_APP_JWT",
+        "KRR_GOVERNANCE_APP_TOKEN",
+        "CLI引数・出力へ出してはならない",
+        "PR checkoutのコードはbootstrap evidenceとして実行しない",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "bootstrap boundary must document {required}"
+        );
+    }
+}
+
+fn assert_no_legacy_pr_ready_invocation(root: &Path) -> TestResult {
+    let legacy_syntax = "just ".to_owned() + "PR=";
+    let legacy_references = Command::new("git")
+        .args(["grep", "-n", "--fixed-strings", &legacy_syntax])
+        .current_dir(root)
+        .output()?;
+    assert_eq!(
+        legacy_references.status.code(),
+        Some(1),
+        "legacy invocation remains in tracked files: {}",
+        String::from_utf8_lossy(&legacy_references.stdout)
+    );
     Ok(())
 }
 

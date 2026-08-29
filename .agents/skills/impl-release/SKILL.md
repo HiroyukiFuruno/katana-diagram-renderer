@@ -9,6 +9,8 @@ description: katana-diagram-renderer で指定バージョンの実装、品質�
 この repository は `release/vX.Y.Z` から `master` へ取り込み依頼（Pull Request）を作り、merge 後に自動リリースします。
 初回公開版は `v0.1.0` から開始します。
 
+governance bootstrap はPR外の絶対path `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py` の `activate` / `finalize` / `verify` を使用する。`--expected-base --expected-head --expected-app-id --expected-diff-sha256` と完全な `--allowed-workflow` を固定し、前2者だけ `--apply`、verifyだけ `--smoke-pr` を指定する。activate/finalizeの前に別々の `KRR_GOVERNANCE_APP_JWT` と `KRR_GOVERNANCE_APP_TOKEN` を環境変数へ設定し、CLI引数・出力へ出さない。PR checkoutのコードをevidenceとして実行せず、token/private keyを引数へ渡さない。通常の `pr-ready-check` は緩和しない。
+
 ## 実行ルール
 
 1. ユーザー指定の version を対象にする。例: `v0.1.0`
@@ -104,10 +106,16 @@ CI green だけでは Ready 条件を満たしません。指摘が出た場合�
 全 gate とレビューを確認した後、Draft のまま専用ゲートを実行し、成功後だけ Ready 化します。
 
 ```bash
-just PR=<number> pr-ready-check && gh pr ready "${pr_url}"
+just pr-ready-check "<number>" && gh pr ready "${pr_url}"
 ```
 
-Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認前に merge してはいけません。
+`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認前に merge してはいけません。
+
+### governance workflow の初回 bootstrap
+
+PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、通常の `pr-ready-check` の代替を曖昧に設けてはいけません。PR 外の専用 GitHub App が、対象 PR の固定 HEAD SHA、Issue OPEN、依存更新証跡、PR range の Issue contract、最新 review、未 resolve thread 0、既存 CI / DoD を独立検証し、同じ固定 SHA に一時 status `KRR / PR governance bootstrap` を App ID 付きで投稿します。PR 内の workflow、branch 名、Issue、status を自己承認の根拠にしてはいけません。
+
+この一時 status を保護ブランチの required context に追加して Ready / merge を進める場合も、通常の review と CI gate を省略しません。merge 直後に bootstrap context を除去し、専用 App の `KRR / PR governance (trusted)` と GitHub Actions App ID `15368` の `KRR / PR governance review latch` を required に切り替え、使い捨て PR で smoke 検証します。bootstrap 以外の通常 PR は必ず `just pr-ready-check "<number>"` を通します。
 
 ## Phase 7: merge と自動リリース
 
@@ -124,6 +132,6 @@ gh run list --workflow Release --limit 5
 - [ ] 指摘の修正、検証、thread reply / resolve
 - [ ] 最新 HEAD の final marker review と未 resolve 0
 - [ ] CI / DoD / `release-target-check` / `pr-ready-check` PASS
-- [ ] `pr-ready-check` 後に Ready 化
+- [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract を含む）後に Ready 化
 - [ ] Ready 化後に merge 承認を得て merge
 - [ ] merge 後に OpenSpec archive と Release workflow を確認
