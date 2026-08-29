@@ -72,7 +72,7 @@ def _review_is_for(
         and review["commit"].get("oid") == head
         and (submitted_at := _timestamp(review.get("submittedAt"), "review submittedAt"))
         is not None
-        and submitted_at >= not_before_time
+        and submitted_at > not_before_time
         and (before_time is None or submitted_at < before_time)
         for review in reviews
     )

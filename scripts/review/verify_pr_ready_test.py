@@ -273,6 +273,48 @@ class VerifyPrReadyTest(unittest.TestCase):
             " ".join(self.errors(comments=comments, reactions=reactions)),
         )
 
+    def test_rejects_review_submitted_in_same_second_as_marker_edit(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        comments[1]["updated_at"] = "2026-08-29T03:04:00Z"
+        reactions[2] = []
+        reviews.append(
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-29T03:04:00Z",
+            }
+        )
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
+    def test_accepts_review_submitted_after_marker_edit_second(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        comments[1]["updated_at"] = "2026-08-29T03:04:00Z"
+        reactions[2] = []
+        reviews.append(
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-29T03:04:01Z",
+            }
+        )
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request,
+                comments=comments,
+                reactions=reactions,
+            ),
+            [],
+        )
+
     def test_rejects_edited_marker_with_same_second_bot_reaction(self) -> None:
         _, _, comments, reactions = successful_state()
         comments[1] = marker(
