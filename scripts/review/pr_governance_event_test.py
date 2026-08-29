@@ -46,7 +46,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         assert match is not None
         return dedent(match.group(1))
 
-    def fence_program(self, fence_id: str = "pending-issue-fence") -> str:
+    def fence_program(self, fence_id: str = "pending-governance-fence") -> str:
         step = self.publisher.index(f"id: {fence_id}")
         start = self.publisher.index("          python3 - <<'PY'\n", step) + len("          python3 - <<'PY'\n")
         end = self.publisher.index("\n          PY", start)
@@ -57,7 +57,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         statuses: object,
         creator_id: str = "456",
         own_generation: str = "100",
-        fence_id: str = "pending-issue-fence",
+        fence_id: str = "pending-governance-fence",
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_path = Path(temporary_directory)
@@ -114,6 +114,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             fake_gh.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
+                "  */issues/comments/*) printf '%s' \"${FAKE_GH_COMMENT}\" ;;\n"
                 "  */issues/*)\n"
                 "    if [ \"${FAKE_GH_ISSUE_EXIT}\" != 0 ]; then exit \"${FAKE_GH_ISSUE_EXIT}\"; fi\n"
                 "    printf '%s' \"${FAKE_GH_ISSUE}\"\n"
@@ -131,6 +132,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                     "EVENT_NAME": event_name,
                     "ISSUE_NUMBER": issue_number,
                     "ISSUE_PULL_REQUEST_URL": issue_pull_request_url,
+                    "COMMENT_ID": "1001",
+                    "COMMENT_CREATED_AT": "2026-08-29T00:00:00Z",
+                    "COMMENT_UPDATED_AT": "2026-08-29T00:00:00Z",
                     "EVENT_ACTION": action,
                     "ISSUE_UPDATED_AT": "2026-08-29T00:00:00Z",
                     "FAKE_GH_ISSUE": json.dumps(
@@ -142,6 +146,14 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                         }
                     ),
                     "FAKE_GH_ISSUE_EXIT": str(issue_api_exit),
+                    "FAKE_GH_COMMENT": json.dumps(
+                        {
+                            "id": 1001,
+                            "created_at": "2026-08-29T00:00:00Z",
+                            "updated_at": "2026-08-29T00:00:00Z",
+                            "issue_url": "https://api.github.com/repos/owner/repository/issues/64",
+                        }
+                    ),
                     "WORKFLOW_RUN_ID": "",
                     "GITHUB_RUN_ID": run_id,
                     "GITHUB_REPOSITORY": "owner/repository",
@@ -443,18 +455,21 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             json.loads(outputs["matrix"]),
             {
                 "include": [
-                    {"pr_number": "72", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened"},
-                    {"pr_number": "73", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened"},
+                    {"pr_number": "72", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened", "issue_source": "issues"},
+                    {"pr_number": "73", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened", "issue_source": "issues"},
                 ]
             },
         )
 
         result, outputs = self.run_resolver(
-            "issue_comment", [], issue_number="64", issue_pull_request_url=""
+            "issue_comment", issue_prs, issue_number="64", issue_pull_request_url="", action="created"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outputs["matrix"], '{"include":[]}')
-        self.assertEqual(outputs["has_targets"], "false")
+        self.assertEqual(outputs["has_targets"], "true")
+        self.assertEqual(
+            [target["pr_number"] for target in json.loads(outputs["matrix"])["include"]],
+            ["72", "73"],
+        )
 
     def test_resolver_rejects_issue_number_prefix_references(self) -> None:
         result, outputs = self.run_resolver(
@@ -584,7 +599,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("FINAL_REVALIDATION_EXIT", success)
         self.assertIn("current_base", success)
         self.assertIn("current_head", success)
-        self.assertIn("全件・原子的blockを主張せず", self.documentation)
+        self.assertIn("同一専用App・同一context", self.documentation)
         self.assertIn("GitHub API", self.documentation)
         self.assertIn("256件超", self.documentation)
 
@@ -597,7 +612,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                 "creator": creator,
             }
 
-        for fence_id in ("pending-issue-fence", "final-issue-fence"):
+        for fence_id in ("pending-governance-fence", "final-governance-fence"):
             with self.subTest(fence_id=fence_id):
                 result = self.run_fence([[status(101)]], fence_id=fence_id)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -612,7 +627,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                     fence_id=fence_id,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout.strip(), "False")
+                self.assertEqual(result.stdout.strip(), "True")
                 for name, payload in (
                     ("creator-mismatch", [[status(101, {"id": 999})]]),
                     ("creator-missing", [[status(101, {})]]),
@@ -659,8 +674,8 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("issue_generation_run_id", self.publisher)
         self.assertIn("creator[\"id\"]", self.publisher)
         self.assertIn("marker_status_id > int(pending_status_id)", self.publisher)
-        self.assertIn("全件・原子的blockを主張せず", self.documentation)
-        self.assertIn("契約または保護規則のbypassとしてfail", self.documentation)
+        self.assertIn("同一専用App・同一context", self.documentation)
+        self.assertIn("256件超、ページ・型・重複不正はfail-closed", self.documentation)
         final_start = self.publisher.index("      - name: Publish final governance state")
         before_final = self.publisher[:final_start]
         self.assertIn("scripts/hooks/verify_push_issue.py", before_final)
