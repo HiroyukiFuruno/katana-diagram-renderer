@@ -111,6 +111,19 @@ class VerifyPushIssueTest(unittest.TestCase):
                 with self.assertRaises(subject.ContractViolation):
                     subject.parse_name_status_paths(raw)
 
+    def test_commit_message_parser_preserves_empty_records_and_boundaries(self) -> None:
+        messages = subject.parse_commit_messages(
+            "feat: first\n\nRefs #64\n\0\0fix: third\n\nRefs #64\n\0"
+        )
+        self.assertEqual(
+            messages,
+            ["feat: first\n\nRefs #64\n", "", "fix: third\n\nRefs #64\n"],
+        )
+
+    def test_commit_message_parser_rejects_truncated_output(self) -> None:
+        with self.assertRaisesRegex(subject.ContractViolation, "途中で切れています"):
+            subject.parse_commit_messages("feat: missing NUL")
+
     def test_remote_name_with_distinct_fetch_and_push_url_uses_push_url(self) -> None:
         fetch_url = "https://github.com/example/fetch-only.git"
         push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
@@ -244,6 +257,17 @@ class VerifyPushIssueTest(unittest.TestCase):
     def test_non_default_commit_requires_an_issue_reference(self) -> None:
         with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
             self.validate(messages=["feat: missing issue"])
+
+    def test_empty_commit_message_is_not_dropped_from_issue_contract(self) -> None:
+        messages = subject.parse_commit_messages("\0")
+        with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
+            self.validate(messages=messages)
+
+    def test_multiple_commit_messages_keep_their_individual_contracts(self) -> None:
+        messages = subject.parse_commit_messages(
+            "feat: first\n\nRefs #64\n\0fix: second\n\nRefs #64\n\0"
+        )
+        self.validate(messages=messages)
 
     def test_foreign_repository_issue_does_not_satisfy_the_contract(self) -> None:
         with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):

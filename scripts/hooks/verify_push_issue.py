@@ -214,6 +214,15 @@ def parse_name_status_paths(raw: str) -> list[str]:
     return paths
 
 
+def parse_commit_messages(raw: str) -> list[str]:
+    """Keep one `git log -z` record per commit, including empty messages."""
+    if not raw:
+        return []
+    if not raw.endswith("\0"):
+        raise ContractViolation("git log -z outputが途中で切れています")
+    return raw.split("\0")[:-1]
+
+
 def dependency_evidence_errors(
     body: str,
     manifests: Sequence[str],
@@ -787,14 +796,11 @@ def main() -> int:
                 repository,
                 "log",
                 "--reverse",
-                "--format=%B%x00",
+                "-z",
+                "--format=%B",
                 f"{default_ref}..{target_revision}",
             )
-            commit_messages = [
-                message.strip()
-                for message in commit_output.split("\0")
-                if message.strip()
-            ]
+            commit_messages = parse_commit_messages(commit_output)
             changed_output = _run_git(
                 repository,
                 "diff",
