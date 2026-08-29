@@ -87,7 +87,7 @@ class VerifyPushIssueTest(unittest.TestCase):
         def run_git(_repository: Path, *arguments: str) -> str:
             if arguments == ("remote", "get-url", "origin"):
                 return fetch_url
-            if arguments == ("remote", "get-url", "--push", "origin"):
+            if arguments == ("remote", "get-url", "--push", "--all", "origin"):
                 return push_url
             raise AssertionError(f"unexpected git invocation: {arguments}")
 
@@ -108,7 +108,7 @@ class VerifyPushIssueTest(unittest.TestCase):
         def run_git(_repository: Path, *arguments: str) -> str:
             if arguments == ("remote",):
                 return "origin\n"
-            if arguments == ("remote", "get-url", "--push", "origin"):
+            if arguments == ("remote", "get-url", "--push", "--all", "origin"):
                 return push_url
             raise AssertionError(f"unexpected git invocation: {arguments}")
 
@@ -131,7 +131,7 @@ class VerifyPushIssueTest(unittest.TestCase):
         def run_git(_repository: Path, *arguments: str) -> str:
             if arguments == ("remote", "get-url", "origin"):
                 return fetch_url
-            if arguments == ("remote", "get-url", "--push", "origin"):
+            if arguments == ("remote", "get-url", "--push", "--all", "origin"):
                 return other_push_url
             raise AssertionError(f"unexpected git invocation: {arguments}")
 
@@ -479,6 +479,24 @@ class VerifyPushIssueTest(unittest.TestCase):
         self.assertIn("--pr-head-sha \"${verified_head}\"", workflow)
         self.assertIn("--pr-branch \"${verified_branch}\"", workflow)
         self.assertLess(workflow.index(checkout), workflow.index(verifier))
+
+    def test_final_trusted_status_compares_against_resolved_base_sha(self) -> None:
+        workflow = (
+            Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
+        ).read_text(encoding="utf-8")
+        final_status = workflow[workflow.index("- name: Publish final governance state") :]
+
+        self.assertIn(
+            "BASE_SHA: ${{ steps.pull-request.outputs.base_sha }}", final_status
+        )
+        self.assertIn(
+            '[[ "${CURRENT_BASE}" != "${BASE_SHA}" ]]', final_status
+        )
+        self.assertIn(
+            "else\n            state=success\n"
+            "            description='Trusted PR governance passed.'",
+            final_status,
+        )
 
     def test_new_branch_without_upstream_uses_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

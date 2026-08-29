@@ -15,11 +15,18 @@ INITIAL_HEAD = "b" * 40
 BOT = "chatgpt-codex-connector"
 
 
-def marker(comment_id: int, phase: str, head: str) -> dict[str, object]:
+def marker(
+    comment_id: int,
+    phase: str,
+    head: str,
+    updated_at: str | None = None,
+) -> dict[str, object]:
+    created_at = f"2026-08-29T03:0{comment_id}:00Z"
     return {
         "id": comment_id,
         "body": f"<!-- krr-review phase={phase} head={head} -->\n@codex review",
-        "created_at": f"2026-08-29T03:0{comment_id}:00Z",
+        "created_at": created_at,
+        "updated_at": updated_at or created_at,
         "user": {"login": "HiroyukiFuruno"},
     }
 
@@ -175,6 +182,24 @@ class VerifyPrReadyTest(unittest.TestCase):
             "final",
             " ".join(self.errors(reactions={1: [], 2: []})),
         )
+
+    def test_rejects_edited_marker_with_old_bot_reaction(self) -> None:
+        _, _, comments, reactions = successful_state()
+        comments[1] = marker(
+            2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
+        )
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
+    def test_accepts_edited_marker_with_new_bot_reaction(self) -> None:
+        _, _, comments, reactions = successful_state()
+        comments[1] = marker(
+            2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
+        )
+        reactions[2][0]["created_at"] = "2026-08-29T03:04:30Z"
+        self.assertEqual(self.errors(comments=comments, reactions=reactions), [])
 
     def test_rejects_review_completed_before_its_marker(self) -> None:
         pull_request, _, _, _ = successful_state()

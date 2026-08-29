@@ -148,6 +148,7 @@ jobs:
         if: always() && steps.pull-request.outcome == 'success' && steps.governance-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.governance-token.outputs.token }}
+          BASE_SHA: ${{ steps.pull-request.outputs.base_sha }}
           HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
           DRAFT: ${{ steps.pull-request.outputs.draft }}
           CHECKOUT_OUTCOME: ${{ steps.checkout-base.outcome }}

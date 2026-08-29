@@ -84,18 +84,25 @@ def _bot_plus_one(
     if not_before_time is None:
         raise TypeError("marker created_at must be an ISO-8601 timestamp")
     before_time = _timestamp(before, "marker created_at")
+    edited_at = comment.get("updated_at") or comment.get("updatedAt")
+    if edited_at is None:
+        # An old reaction may predate an edited marker while still being newer
+        # than its original creation time, so missing edit evidence is unsafe.
+        return False
+    edited_time = _timestamp(edited_at, "marker updated_at")
+    if edited_time is None:
+        return False
+    if edited_time < not_before_time:
+        return False
 
     def is_timely(reaction: Mapping[str, object]) -> bool:
         created_at = reaction.get("created_at")
         if created_at is None:
-            # GitHub supplies this field.  The compatibility path only keeps
-            # legacy fixtures usable for final-marker reactions; it can never
-            # serve as the initial-phase evidence.
-            return before_time is None
+            return False
         reaction_time = _timestamp(created_at, "reaction created_at")
         return (
             reaction_time is not None
-            and reaction_time >= not_before_time
+            and reaction_time >= edited_time
             and (before_time is None or reaction_time < before_time)
         )
 

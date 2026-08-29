@@ -458,7 +458,10 @@ def _configured_remote_for_url(repository: Path, remote_url: str) -> str:
     matches = [
         remote
         for remote in _run_git(repository, "remote").splitlines()
-        if _normalize_remote_url(_effective_remote_url(repository, remote)) == requested
+        if any(
+            _normalize_remote_url(configured_url) == requested
+            for configured_url in _effective_remote_urls(repository, remote)
+        )
     ]
     if len(matches) != 1:
         raise ContractViolation(
@@ -471,11 +474,50 @@ def _normalize_remote_url(remote_url: str) -> str:
     return remote_url.strip().removesuffix("/").removesuffix(".git")
 
 
-def _effective_remote_url(repository: Path, remote: str) -> str:
+def _effective_remote_urls(repository: Path, remote: str) -> tuple[str, ...]:
+    """Return every configured push URL, falling back to the fetch URL."""
     try:
-        return _run_git(repository, "remote", "get-url", "--push", remote)
+        configured = _run_git(repository, "remote", "get-url", "--push", "--all", remote)
     except ContractViolation:
-        return _run_git(repository, "remote", "get-url", remote)
+        try:
+            configured = _run_git(repository, "remote", "get-url", "--push", remote)
+        except ContractViolation:
+            configured = ""
+    urls = tuple(line.strip() for line in configured.splitlines() if line.strip())
+    if urls:
+        return urls
+    return (_run_git(repository, "remote", "get-url", remote),)
+
+
+def _matching_push_url(
+    repository: Path,
+    remote: str,
+    requested_url: str | None,
+) -> str:
+    configured_urls = _effective_remote_urls(repository, remote)
+    if requested_url is not None:
+        requested = _normalize_remote_url(requested_url)
+        matches = [
+            configured_url
+            for configured_url in configured_urls
+            if _normalize_remote_url(configured_url) == requested
+        ]
+        if not matches:
+            raise ContractViolation("--remoteと--remote-urlが同じpush先を示していません")
+        selected_url = matches[0]
+    else:
+        selected_url = configured_urls[0]
+
+    # A remote with push URLs for different repositories is ambiguous.  Keep
+    # the hook fail-closed even when the supplied URL happens to match one of
+    # those URLs.
+    selected_repository = _repository_name(selected_url).casefold()
+    if any(
+        _repository_name(configured_url).casefold() != selected_repository
+        for configured_url in configured_urls
+    ):
+        raise ContractViolation("remoteに異なるGitHub repositoryのpush URLが混在しています")
+    return selected_url
 
 
 def _remote_for_push(
@@ -496,25 +538,23 @@ def _remote_for_push(
                 raise ContractViolation("--remoteと--remote-urlが同じpush先を示していません")
             remote_url = remote_url or remote_name
         else:
-            configured_url = _effective_remote_url(repository, remote_name)
-            if remote_url is not None and (
-                _normalize_remote_url(configured_url) != _normalize_remote_url(remote_url)
-            ):
-                raise ContractViolation("--remoteと--remote-urlが同じpush先を示していません")
-            return remote_name, remote_url or configured_url
+            configured_url = _matching_push_url(repository, remote_name, remote_url)
+            return remote_name, configured_url
 
     if remote_url:
-        return _configured_remote_for_url(repository, remote_url), remote_url
+        remote = _configured_remote_for_url(repository, remote_url)
+        return remote, _matching_push_url(repository, remote, remote_url)
 
     if fallback_branch:
         remote = branch_remote(repository, fallback_branch)
-        return remote, _effective_remote_url(repository, remote)
+        return remote, _matching_push_url(repository, remote, None)
 
     remotes = _run_git(repository, "remote").splitlines()
     if "origin" in remotes:
-        return "origin", _effective_remote_url(repository, "origin")
+        return "origin", _matching_push_url(repository, "origin", None)
     if len(remotes) == 1:
-        return remotes[0], _effective_remote_url(repository, remotes[0])
+        remote = remotes[0]
+        return remote, _matching_push_url(repository, remote, None)
     raise ContractViolation("push remoteを設定済remoteから一意に判定できません")
 
 
