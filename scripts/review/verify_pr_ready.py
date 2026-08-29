@@ -32,7 +32,6 @@ _SELF_CHECK_NAMES = frozenset(
 )
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
-_MAX_CLOSING_ISSUE_TARGETS = 256
 
 
 def _bot_login(value: object) -> str | None:
@@ -213,29 +212,52 @@ def closing_reference_errors(
     body: object,
     referenced_issues: Sequence[issue_contract.Issue],
 ) -> list[str]:
-    """Require every Issue found in base..HEAD commits to close from the PR body."""
+    """Require one canonical open Issue in both commits and the PR body."""
 
     if not isinstance(body, str):
         raise TypeError("pull request body must be a string")
+    errors: list[str] = []
+    if len(referenced_issues) != 1:
+        errors.append(
+            "commit範囲の参照Issueはちょうど1件のOPEN Issueである必要があります: "
+            f"{len(referenced_issues)}件"
+        )
+    else:
+        issue = referenced_issues[0]
+        if type(issue.number) is not int or issue.number < 1:
+            errors.append("commit範囲のcanonical Issue番号が不正です")
+        elif issue.state != "OPEN":
+            errors.append(
+                "commit範囲の参照IssueはOPENである必要があります: "
+                f"#{issue.number}={issue.state}"
+            )
+        elif (
+            not isinstance(issue.url, str)
+            or issue.url.casefold()
+            != f"https://github.com/{repository}/issues/{issue.number}".casefold()
+        ):
+            errors.append(
+                f"Issue #{issue.number}は対象repositoryのcanonical Issue URLではありません"
+            )
     referenced_numbers = {issue.number for issue in referenced_issues}
     closing_numbers = issue_contract.closing_issue_numbers(body, repository)
     missing = sorted(referenced_numbers - closing_numbers)
     extra = sorted(closing_numbers - referenced_numbers)
-    if not missing and not extra:
-        return []
-    details: list[str] = []
-    if missing:
-        details.append(
-            "不足=" + ", ".join(f"#{number}" for number in missing)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append(
+                "不足=" + ", ".join(f"#{number}" for number in missing)
+            )
+        if extra:
+            details.append(
+                "余分=" + ", ".join(f"#{number}" for number in extra)
+            )
+        errors.append(
+            "PR本文のGitHub closing Issue集合がcommit範囲参照Issue集合と一致しません: "
+            + "; ".join(details)
         )
-    if extra:
-        details.append(
-            "余分=" + ", ".join(f"#{number}" for number in extra)
-        )
-    return [
-        "PR本文のGitHub closing Issue集合がcommit範囲参照Issue集合と一致しません: "
-        + "; ".join(details)
-    ]
+    return errors
 
 
 def _open_pull_requests(repository: str) -> list[dict[str, object]]:
@@ -314,38 +336,73 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
         seen_cursors.add(cursor)
 
 
-def closing_target_capacity_errors(
+def closing_open_pull_request_errors(
     *,
     repository: str,
     current_pull_request: int,
     referenced_issues: Sequence[issue_contract.Issue],
     open_pull_requests: Sequence[Mapping[str, object]],
 ) -> list[str]:
-    """Keep the normal closing-PR flow within GitHub's 256-target limit."""
+    """Require the canonical Issue to have this single open PR as its closer.
+
+    Draft PRs are included deliberately: waiting until a sibling is Ready
+    leaves a check-to-Ready race in which two Draft PRs can both pass.
+    """
 
     errors: list[str] = []
     for issue in referenced_issues:
-        non_draft_targets = 0
-        for pull_request in open_pull_requests:
-            number = pull_request.get("number")
-            is_draft = pull_request.get("isDraft")
-            body = pull_request.get("body")
-            if type(number) is not int or number < 1:
-                raise TypeError("open pull request number must be a positive integer")
-            if not isinstance(is_draft, bool):
-                raise TypeError("open pull request isDraft must be a boolean")
-            if not isinstance(body, str):
-                raise TypeError("open pull request body must be a string")
-            if number == current_pull_request or is_draft:
-                continue
-            if issue.number in issue_contract.closing_issue_numbers(body, repository):
-                non_draft_targets += 1
-        targets = non_draft_targets + 1
-        if targets > _MAX_CLOSING_ISSUE_TARGETS:
+        closers = _open_pull_request_closers(
+            repository=repository,
+            issue_number=issue.number,
+            open_pull_requests=open_pull_requests,
+        )
+        if closers != {current_pull_request}:
+            rendered = ", ".join(f"#{number}" for number in sorted(closers)) or "なし"
             errors.append(
-                f"Issue #{issue.number}のclosing PR target数が{_MAX_CLOSING_ISSUE_TARGETS}を超えます: {targets}"
+                f"Issue #{issue.number}をclosingするopen PRは自身だけである必要があります: {rendered}"
             )
     return errors
+
+
+def _canonical_issue_identity(
+    *,
+    repository: str,
+    referenced_issues: Sequence[issue_contract.Issue],
+) -> tuple[tuple[int, str, str, str, str], ...]:
+    """Return the immutable fields used by the final canonical-Issue fence."""
+
+    identity: list[tuple[int, str, str, str, str]] = []
+    for issue in referenced_issues:
+        number = issue.number
+        state = issue.state
+        body = issue.body
+        url = issue.url
+        updated_at = issue.updated_at
+        if type(number) is not int or number < 1:
+            raise TypeError("canonical Issue number must be a positive integer")
+        if not isinstance(state, str) or not state:
+            raise TypeError("canonical Issue state must be a non-empty string")
+        if not isinstance(body, str):
+            raise TypeError("canonical Issue body must be a string")
+        if not isinstance(url, str) or not url:
+            raise TypeError("canonical Issue url must be a non-empty string")
+        canonical_url = f"https://github.com/{repository}/issues/{number}"
+        if url.casefold() != canonical_url.casefold():
+            raise ValueError("canonical Issue url does not match the repository")
+        if not isinstance(updated_at, str) or not updated_at:
+            raise TypeError("canonical Issue updated_at must be a non-empty string")
+        identity.append((number, state, body, url, updated_at))
+    return tuple(identity)
+
+
+def _required_timestamp_text(value: object, field: str) -> str:
+    """Validate and preserve an immutable GitHub timestamp string."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be an ISO-8601 timestamp")
+    if _timestamp(value, field) is None:
+        raise TypeError(f"{field} must be an ISO-8601 timestamp")
+    return value
 
 
 def _final_review_evidence_is_fresh(
@@ -629,6 +686,97 @@ def _verify_pr_boundary_unchanged(
         raise ValueError("pull request base/head changed during readiness check")
 
 
+def _verify_final_readiness_snapshot_unchanged(
+    *,
+    repository: str,
+    pull_request: int,
+    initial_base: str,
+    initial_head: str,
+    initial_body: str,
+    initial_updated_at: str,
+    initial_issue_identity: tuple[tuple[int, str, str, str, str], ...],
+    initial_closers: frozenset[int],
+) -> None:
+    """Fence every mutable input that justified a successful readiness result."""
+
+    payload = _gh_json(
+        "pr",
+        "view",
+        str(pull_request),
+        "--repo",
+        repository,
+        "--json",
+        "baseRefOid,headRefOid,body,updatedAt",
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("pull request final snapshot response must be an object")
+    current_base = payload.get("baseRefOid")
+    current_head = payload.get("headRefOid")
+    current_body = payload.get("body")
+    current_updated_at = _required_timestamp_text(
+        payload.get("updatedAt"), "pull request updatedAt"
+    )
+    if not isinstance(current_base, str) or not isinstance(current_head, str):
+        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    if not isinstance(current_body, str):
+        raise TypeError("pull request body must be a string")
+    if (current_base, current_head) != (initial_base, initial_head):
+        raise ValueError("pull request base/head changed during readiness check")
+    if current_body != initial_body:
+        raise ValueError("pull request body changed during readiness check")
+    if current_updated_at != initial_updated_at:
+        raise ValueError("pull request updatedAt changed during readiness check")
+
+    current_issues = issue_contract.referenced_issue_snapshot(
+        repository=repository,
+        base_sha=initial_base,
+        head_sha=initial_head,
+    )
+    current_issue_identity = _canonical_issue_identity(
+        repository=repository,
+        referenced_issues=current_issues,
+    )
+    if current_issue_identity != initial_issue_identity:
+        raise ValueError("canonical Issue snapshot changed during readiness check")
+    if len(current_issues) != 1:
+        raise ValueError("canonical Issue snapshot is no longer exactly one Issue")
+
+    current_closers = frozenset(
+        number
+        for number in _open_pull_request_closers(
+            repository=repository,
+            issue_number=current_issues[0].number,
+            open_pull_requests=_open_pull_requests(repository),
+        )
+    )
+    if current_closers != initial_closers:
+        raise ValueError("open PR closer set changed during readiness check")
+
+
+def _open_pull_request_closers(
+    *,
+    repository: str,
+    issue_number: int,
+    open_pull_requests: Sequence[Mapping[str, object]],
+) -> set[int]:
+    """Return every open PR that closes one Issue, including Draft PRs."""
+
+    closers: set[int] = set()
+    for pull_request in open_pull_requests:
+        number = pull_request.get("number")
+        is_draft = pull_request.get("isDraft")
+        body = pull_request.get("body")
+        if type(number) is not int or number < 1:
+            raise TypeError("open pull request number must be a positive integer")
+        if not isinstance(is_draft, bool):
+            raise TypeError("open pull request isDraft must be a boolean")
+        if not isinstance(body, str):
+            raise TypeError("open pull request body must be a string")
+        if issue_number in issue_contract.closing_issue_numbers(body, repository):
+            closers.add(number)
+    return closers
+
+
 def _expected_boundary(
     expected_base: str | None, expected_head: str | None
 ) -> tuple[str, str] | None:
@@ -866,7 +1014,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--repo",
         repository,
         "--json",
-        "isDraft,baseRefOid,headRefOid,body,statusCheckRollup,reviews,author",
+        "isDraft,baseRefOid,headRefOid,body,updatedAt,statusCheckRollup,reviews,author",
     )
     if not isinstance(pull_request, dict):
         raise TypeError("pull request response must be an object")
@@ -885,25 +1033,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     base, head = _require_boundary(
         pull_request.get("baseRefOid"), pull_request.get("headRefOid"), expected_boundary
     )
+    initial_updated_at = _required_timestamp_text(
+        pull_request.get("updatedAt"), "pull request updatedAt"
+    )
     referenced_issues = issue_contract.referenced_issue_snapshot(
         repository=repository,
         base_sha=base,
         head_sha=head,
     )
+    initial_body = pull_request.get("body")
     errors = closing_reference_errors(
         repository=repository,
-        body=pull_request.get("body"),
+        body=initial_body,
         referenced_issues=referenced_issues,
     )
+    initial_issue_identity: tuple[tuple[int, str, str, str, str], ...] = ()
+    initial_closers: frozenset[int] = frozenset()
     if referenced_issues and not errors:
+        open_pull_requests = _open_pull_requests(repository)
         errors.extend(
-            closing_target_capacity_errors(
+            closing_open_pull_request_errors(
                 repository=repository,
                 current_pull_request=arguments.pr,
                 referenced_issues=referenced_issues,
-                open_pull_requests=_open_pull_requests(repository),
+                open_pull_requests=open_pull_requests,
             )
         )
+        if not errors:
+            initial_issue_identity = _canonical_issue_identity(
+                repository=repository,
+                referenced_issues=referenced_issues,
+            )
+            initial_closers = frozenset(
+                _open_pull_request_closers(
+                    repository=repository,
+                    issue_number=referenced_issues[0].number,
+                    open_pull_requests=open_pull_requests,
+                )
+            )
     errors.extend(
         readiness_errors(
             pull_request,
@@ -919,7 +1086,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    _verify_pr_boundary_unchanged(repository, arguments.pr, base, head)
+    if not isinstance(initial_body, str):
+        raise TypeError("pull request body must be a string")
+    _verify_final_readiness_snapshot_unchanged(
+        repository=repository,
+        pull_request=arguments.pr,
+        initial_base=base,
+        initial_head=head,
+        initial_body=initial_body,
+        initial_updated_at=initial_updated_at,
+        initial_issue_identity=initial_issue_identity,
+        initial_closers=initial_closers,
+    )
     print(f"PR #{arguments.pr} is ready")
     return 0
 

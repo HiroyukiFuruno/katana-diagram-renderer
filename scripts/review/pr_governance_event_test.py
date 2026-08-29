@@ -12,6 +12,18 @@ from pathlib import Path
 from textwrap import dedent
 
 
+ISSUE_REEVALUATION_ACTIONS = (
+    "opened", "edited", "deleted", "transferred", "pinned", "unpinned",
+    "closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
+    "locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+    "field_added", "field_removed",
+)
+ISSUE_CURRENT_FRESHNESS_ACTIONS = tuple(
+    action for action in ISSUE_REEVALUATION_ACTIONS
+    if action not in {"deleted", "transferred"}
+)
+
+
 class PrGovernanceReviewEventTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = Path(__file__).parents[2]
@@ -110,10 +122,31 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             temporary_path = Path(temporary_directory)
             fake_gh = temporary_path / "gh"
             payload_path = temporary_path / "gh-output.json"
-            payload_path.write_text(json.dumps(gh_output), encoding="utf-8")
+
+            def add_listed_head(value: object) -> object:
+                if isinstance(value, list):
+                    return [add_listed_head(item) for item in value]
+                if not isinstance(value, dict):
+                    return value
+                enriched = {
+                    key: add_listed_head(item) for key, item in value.items()
+                }
+                if (
+                    type(enriched.get("number")) is int
+                    and enriched.get("state") == "open"
+                    and type(enriched.get("draft")) is bool
+                    and "head" not in enriched
+                ):
+                    enriched["head"] = {"sha": "a" * 40}
+                return enriched
+
+            payload_path.write_text(
+                json.dumps(add_listed_head(gh_output)), encoding="utf-8"
+            )
             fake_gh.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
+                "  */pulls/[0-9]*) printf '%s' \"${FAKE_GH_PULL}\" ;;\n"
                 "  */issues/comments/*) printf '%s' \"${FAKE_GH_COMMENT}\" ;;\n"
                 "  */issues/*)\n"
                 "    if [ \"${FAKE_GH_ISSUE_EXIT}\" != 0 ]; then exit \"${FAKE_GH_ISSUE_EXIT}\"; fi\n"
@@ -146,6 +179,13 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                         }
                     ),
                     "FAKE_GH_ISSUE_EXIT": str(issue_api_exit),
+                    "FAKE_GH_PULL": json.dumps(
+                        {
+                            "number": 72,
+                            "body": "Fixes #64",
+                            "head": {"sha": "a" * 40},
+                        }
+                    ),
                     "FAKE_GH_COMMENT": json.dumps(
                         {
                             "id": 1001,
@@ -318,13 +358,13 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         workflow, jobs = self.publisher.split("\njobs:\n", maxsplit=1)
         self.assertNotIn("\nconcurrency:", workflow)
         preflight_start = jobs.index("  preflight-governance:\n")
-        overflow_start = jobs.index("  invalidate-overflow:\n", preflight_start)
-        preflight = jobs[preflight_start:overflow_start]
+        conflict_start = jobs.index("  invalidate-conflicts:\n", preflight_start)
+        preflight = jobs[preflight_start:conflict_start]
         publisher = jobs[jobs.index("  pr-governance:\n"):]
         group_start = publisher.index("      group: pr-governance-")
         group_end = publisher.index("\n", group_start)
         group = publisher[group_start:group_end]
-        self.assertIn("matrix.pr_number", group)
+        self.assertIn("matrix.canonical_issue_number", group)
         self.assertNotIn("bound-", group)
         self.assertNotIn("issue-comment-", group)
         self.assertIn("cancel-in-progress: true", jobs)
@@ -338,6 +378,14 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("cancel-in-progress: true", preflight)
         self.assertIn("needs: [resolve-targets, preflight-governance]", publisher)
         self.assertIn("preflight_generation_run_id", preflight)
+        conflict_end = jobs.index("  pr-governance:\n", conflict_start)
+        conflict = jobs[conflict_start:conflict_end]
+        conflict_group_start = conflict.index("      group: pr-governance-")
+        conflict_group_end = conflict.index("\n", conflict_group_start)
+        self.assertEqual(conflict[conflict_group_start:conflict_group_end], group)
+        self.assertIn("matrix: ${{ fromJSON(needs.resolve-targets.outputs.conflict_matrix) }}", conflict)
+        self.assertIn("CONFLICT_TARGETS: ${{ matrix.targets }}", conflict)
+        self.assertIn("len(requested) < 2", conflict)
         final_fence = publisher.index("id: final-governance-fence")
         final_publish = publisher.index("- name: Publish final governance state")
         self.assertLess(final_fence, final_publish)
@@ -350,7 +398,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
 
     def test_issue_events_expand_all_open_prs_and_skip_non_pr_comments(self) -> None:
         self.assertIn("  issues:", self.publisher)
-        for event_type in ("opened", "edited", "deleted", "transferred", "closed", "reopened"):
+        for event_type in ISSUE_REEVALUATION_ACTIONS:
             self.assertIn(f"- {event_type}", self.publisher)
         self.assertIn("state=open", self.publisher)
         self.assertIn("--paginate", self.publisher)
@@ -469,26 +517,38 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             issue_prs,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outputs["has_targets"], "true")
+        self.assertEqual(outputs["has_targets"], "false")
+        self.assertEqual(outputs["has_conflicts"], "true")
         self.assertEqual(
-            json.loads(outputs["matrix"]),
-            {
-                "include": [
-                    {"pr_number": "72", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened", "issue_source": "issues"},
-                    {"pr_number": "73", "source_run_id": "", "issue_generation_run_id": "999", "issue_number": "64", "issue_updated_at": "2026-08-29T00:00:00Z", "issue_action": "opened", "issue_source": "issues"},
-                ]
-            },
+            [target["pr_number"] for target in json.loads(json.loads(outputs["conflict_matrix"])["include"][0]["targets"])],
+            ["72", "73", "77"],
         )
 
         result, outputs = self.run_resolver(
             "issue_comment", issue_prs, issue_number="64", issue_pull_request_url="", action="created"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outputs["has_targets"], "true")
-        self.assertEqual(
-            [target["pr_number"] for target in json.loads(outputs["matrix"])["include"]],
-            ["72", "73"],
-        )
+        self.assertEqual(outputs["has_targets"], "false")
+        self.assertEqual(outputs["has_conflicts"], "true")
+
+    def test_every_supported_issue_mutation_reaches_target_revalidation(self) -> None:
+        pages = [[{
+            "number": 72,
+            "state": "open",
+            "draft": False,
+            "body": "Fixes #64",
+        }]]
+        for action in ISSUE_REEVALUATION_ACTIONS:
+            with self.subTest(action=action):
+                result, outputs = self.run_resolver("issues", pages, action=action)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                targets = json.loads(outputs["matrix"])["include"]
+                self.assertEqual(len(targets), 1)
+                self.assertEqual(targets[0]["pr_number"], "72")
+                self.assertEqual(targets[0]["issue_action"], action)
+
+        result, _ = self.run_resolver("issues", pages, action="unsupported")
+        self.assertNotEqual(result.returncode, 0)
 
     def test_resolver_rejects_issue_number_prefix_references(self) -> None:
         result, outputs = self.run_resolver(
@@ -555,8 +615,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             ]],
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs["has_conflicts"], "true")
         self.assertEqual(
-            [target["pr_number"] for target in json.loads(outputs["matrix"])["include"]],
+            [target["pr_number"] for target in json.loads(json.loads(outputs["conflict_matrix"])["include"][0]["targets"])],
             ["82", "83", "84", "85"],
         )
 
@@ -578,8 +639,11 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertLess(len(result.stdout) + len(result.stderr), 16_384)
         self.assertEqual(json.loads(outputs["matrix"]), {"include": []})
         self.assertEqual(outputs["has_targets"], "false")
-        self.assertEqual(outputs["overflow"], "true")
-        self.assertEqual(json.loads(outputs["overflow_targets"]), [str(number) for number in range(1, 258)])
+        self.assertEqual(outputs["has_conflicts"], "true")
+        self.assertEqual(
+            [target["pr_number"] for target in json.loads(json.loads(outputs["conflict_matrix"])["include"][0]["targets"])],
+            [str(number) for number in range(1, 258)],
+        )
 
     def test_resolver_fails_closed_for_too_many_duplicate_or_invalid_targets(self) -> None:
         duplicate = [[
@@ -611,9 +675,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("issue_generation_run_id", self.publisher)
         resolver = self.resolver_program()
         self.assertIn("MAX_MATRIX_TARGETS = 256", resolver)
-        self.assertIn("overflow = len(targets) > MAX_MATRIX_TARGETS", resolver)
-        self.assertIn("overflow_targets", resolver)
-        self.assertIn("invalidate-overflow:", self.publisher)
+        self.assertIn("conflict_matrix", resolver)
+        self.assertIn("has_conflicts", resolver)
+        self.assertIn("invalidate-conflicts:", self.publisher)
         self.assertIn("verify_push_issue.py", self.publisher)
         success_start = self.publisher.index("      - name: Publish final governance state")
         success = self.publisher[success_start:]
@@ -624,7 +688,26 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("current_head", success)
         self.assertIn("同一専用App・同一context", self.documentation)
         self.assertIn("GitHub API", self.documentation)
-        self.assertIn("257件以上", self.documentation)
+        self.assertIn("最大256 canonical Issue", self.documentation)
+        self.assertIn("同一Issueの競合数はmatrix上限では切り捨てない", self.documentation)
+
+    def test_schedule_rotates_a_bounded_deterministic_set_of_canonical_issues(self) -> None:
+        pulls = [[
+            {
+                "number": number,
+                "state": "open",
+                "draft": False,
+                "body": f"Fixes #{number}",
+            }
+            for number in range(1, 301)
+        ]]
+        result, outputs = self.run_resolver("schedule", pulls, run_id="999")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        targets = json.loads(outputs["matrix"])["include"]
+        self.assertEqual(len(targets), 256)
+        self.assertEqual(targets[0]["canonical_issue_number"], "100")
+        self.assertEqual(targets[-1]["canonical_issue_number"], "55")
+        self.assertEqual(json.loads(outputs["conflict_matrix"]), {"include": []})
 
     def test_issue_fence_accepts_only_valid_configured_creator_generations(self) -> None:
         def status(generation: object, creator: object = {"id": 456}) -> dict[str, object]:
@@ -731,11 +814,11 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                     issue_api_exit=1,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                targets = json.loads(outputs["matrix"])["include"]
+                targets = json.loads(json.loads(outputs["conflict_matrix"])["include"][0]["targets"])
                 self.assertEqual([target["pr_number"] for target in targets], ["72", "81"])
                 self.assertTrue(all(target["issue_generation_run_id"] == "999" for target in targets))
 
-    def test_issue_edit_close_and_reopen_require_current_issue_updated_at(self) -> None:
+    def test_all_current_issue_mutations_require_current_issue_updated_at(self) -> None:
         page = [[
             {
                 "number": 72,
@@ -744,7 +827,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
                 "body": "Fixes #64",
             }
         ]]
-        for action in ("edited", "closed", "reopened"):
+        for action in ISSUE_CURRENT_FRESHNESS_ACTIONS:
             with self.subTest(action=action):
                 result, _ = self.run_resolver(
                     "issues",
@@ -770,7 +853,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("ISSUE_UPDATED_AT", self.publisher)
         self.assertIn("updated_at", self.publisher)
         self.assertIn("issue_generation_run_id", self.publisher)
-        for action in ("opened", "edited", "deleted", "transferred", "closed", "reopened"):
+        for action in ISSUE_REEVALUATION_ACTIONS:
             self.assertIn(action, self.publisher)
         self.assertIn("action is invalid", self.publisher.lower())
         self.assertIn("Issue updated_at", self.publisher)

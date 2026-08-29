@@ -21,8 +21,22 @@ on:
       - edited
       - deleted
       - transferred
+      - pinned
+      - unpinned
       - closed
       - reopened
+      - assigned
+      - unassigned
+      - labeled
+      - unlabeled
+      - locked
+      - unlocked
+      - milestoned
+      - demilestoned
+      - typed
+      - untyped
+      - field_added
+      - field_removed
   # GitHub Actions has no pull_request_review_thread event. Native required
   # conversation resolution rejects unresolved threads immediately; this
   # default-branch schedule is only a bounded reconciliation backstop.
@@ -55,8 +69,8 @@ jobs:
     outputs:
       matrix: ${{ steps.targets.outputs.matrix }}
       has_targets: ${{ steps.targets.outputs.has_targets }}
-      overflow: ${{ steps.targets.outputs.overflow }}
-      overflow_targets: ${{ steps.targets.outputs.overflow_targets }}
+      conflict_matrix: ${{ steps.targets.outputs.conflict_matrix }}
+      has_conflicts: ${{ steps.targets.outputs.has_conflicts }}
     steps:
       - name: Resolve PR targets from a trusted event
         id: targets
@@ -156,12 +170,15 @@ jobs:
               number: int,
               source_run_id: str = "",
               source_kind: str = "",
+              source_status: str = "",
               source_conclusion: str = "",
               source_run_attempt: str = "",
               source_run_number: str = "",
               source_workflow_id: str = "",
               source_head_sha: str = "",
               source_base_sha: str = "",
+              preflight_head_sha: str = "",
+              canonical_issue_number: str = "",
               issue_generation_run_id: str = "",
               issue_number: str = "",
               issue_updated_at: str = "",
@@ -175,12 +192,15 @@ jobs:
                 "pr_number": str(number),
                 "source_run_id": source_run_id,
                 "source_kind": source_kind,
+                "source_status": source_status,
                 "source_conclusion": source_conclusion,
                 "source_run_attempt": source_run_attempt,
                 "source_run_number": source_run_number,
                 "source_workflow_id": source_workflow_id,
                 "source_head_sha": source_head_sha,
                 "source_base_sha": source_base_sha,
+                "preflight_head_sha": preflight_head_sha,
+                "canonical_issue_number": canonical_issue_number,
                 "issue_generation_run_id": issue_generation_run_id,
                 "issue_number": issue_number,
                 "issue_updated_at": issue_updated_at,
@@ -196,6 +216,137 @@ jobs:
                   **{key: value for key, value in values.items() if value},
               }
 
+          def listed_trusted_head(pull_request: dict[str, object], label: str) -> str:
+              head = pull_request.get("head")
+              if (
+                  not isinstance(head, dict)
+                  or not isinstance(head.get("sha"), str)
+                  or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None
+              ):
+                  fail(f"{label} has an invalid fixed pull request head.")
+              return head["sha"]
+
+          def canonical_issue(body: object, label: str) -> str:
+              if not isinstance(body, str):
+                  fail(f"{label} body is invalid.")
+              keyword = r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+              separator = r"(?:[ \t]*:[ \t]*|[ \t]+)"
+              reference = (
+                  rf"(?:#(?P<short>[1-9][0-9]*)\b|https://github\.com/{re.escape(repository)}"
+                  r"/issues/(?P<url>[1-9][0-9]*)(?=$|[\s.,;:!?)}\]>'\"]))"
+              )
+              numbers = {
+                  match.group("short") or match.group("url")
+                  for match in re.finditer(rf"{keyword}{separator}{reference}", body, re.IGNORECASE)
+              }
+              if len(numbers) != 1:
+                  fail(f"{label} must have exactly one canonical closing Issue.")
+              return next(iter(numbers))
+
+          def current_target_details(number: int, label: str) -> tuple[str, str]:
+              result = subprocess.run(
+                  ["gh", "api", f"repos/{repository}/pulls/{number}"],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  fail(f"Unable to read {label}.")
+              try:
+                  pull_request = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  fail(f"{label} is not JSON.")
+              if not isinstance(pull_request, dict) or pull_request.get("number") != number:
+                  fail(f"{label} is invalid.")
+              return (
+                  listed_trusted_head(pull_request, label),
+                  canonical_issue(pull_request.get("body"), label),
+              )
+
+          def canonical_closer_targets(
+              canonical_issue_number: str, source_target: dict[str, str], label: str
+          ) -> list[dict[str, str]]:
+              """Re-resolve every open closer so every writer takes one Issue lock."""
+              source_number = source_target.get("pr_number")
+              if (
+                  not isinstance(source_number, str)
+                  or re.fullmatch(r"[1-9][0-9]*", source_number) is None
+                  or source_target.get("canonical_issue_number") != canonical_issue_number
+              ):
+                  fail("Canonical source target is invalid.")
+              result = subprocess.run(
+                  [
+                      "gh", "api", "--paginate", "--slurp",
+                      f"repos/{repository}/pulls?state=open&per_page=100",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  fail("Unable to enumerate open pull requests for canonical Issue revalidation.")
+              try:
+                  pages = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  fail("Canonical Issue pull request response is not JSON.")
+              if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+                  fail("Canonical Issue pull request response is invalid.")
+              targets: list[dict[str, str]] = []
+              numbers: set[int] = set()
+              source_seen = False
+              for page in pages:
+                  for pull_request in page:
+                      if not isinstance(pull_request, dict):
+                          fail("Canonical Issue pull request response is invalid.")
+                      number = pull_request.get("number")
+                      if (
+                          type(number) is not int
+                          or number < 1
+                          or pull_request.get("state") != "open"
+                          or type(pull_request.get("draft")) is not bool
+                      ):
+                          fail("Canonical Issue pull request response is invalid.")
+                      if number in numbers:
+                          fail("Canonical Issue pull request response contains a duplicate pull request.")
+                      numbers.add(number)
+                      body = pull_request.get("body")
+                      if not isinstance(body, str):
+                          fail("Canonical Issue pull request response has an invalid body.")
+                      closing_keyword = r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+                      closing_separator = r"(?:[ \t]*:[ \t]*|[ \t]+)"
+                      issue_reference = (
+                          rf"(?:#{canonical_issue_number}\b|https://github\.com/{re.escape(repository)}"
+                          rf"/issues/{canonical_issue_number}(?=$|[\s.,;:!?)}}\]>'\"]))"
+                      )
+                      if re.search(
+                          rf"{closing_keyword}{closing_separator}{issue_reference}",
+                          body,
+                          re.IGNORECASE,
+                      ) is None:
+                          continue
+                      current_canonical_issue = canonical_issue(
+                          body, "Canonical Issue pull request response"
+                      )
+                      if current_canonical_issue != canonical_issue_number:
+                          continue
+                      fixed_head = listed_trusted_head(
+                          pull_request, "Canonical Issue pull request response"
+                      )
+                      if str(number) == source_number:
+                          source_seen = True
+                          if fixed_head.lower() != source_target.get("preflight_head_sha", "").lower():
+                              fail("Canonical source pull request head changed before grouping.")
+                          targets.append(source_target)
+                      else:
+                          targets.append(target(
+                              number,
+                              preflight_head_sha=fixed_head,
+                              canonical_issue_number=canonical_issue_number,
+                          ))
+              if not source_seen:
+                  fail(f"{label} is no longer an open canonical-Issue closer.")
+              return targets
+
           def issue_freshness() -> tuple[str, str, str]:
               number = positive_number(
                   os.environ.get("ISSUE_NUMBER", ""), "Issue number"
@@ -207,7 +358,12 @@ jobs:
               ):
                   fail("Issue updated_at is invalid.")
               action = os.environ.get("EVENT_ACTION", "")
-              if action not in {"opened", "edited", "deleted", "transferred", "closed", "reopened"}:
+              if action not in {
+                  "opened", "edited", "deleted", "transferred", "pinned", "unpinned",
+                  "closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
+                  "locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+                  "field_added", "field_removed",
+              }:
                   fail("Issue action is invalid.")
               if action in {"deleted", "transferred"}:
                   return str(number), payload_updated_at, action
@@ -348,10 +504,19 @@ jobs:
                           continue
                       if not isinstance(body, str):
                           fail("Open pull request response has an invalid body.")
-                      if draft or closes_issue.search(body) is None:
+                      if closes_issue.search(body) is None:
                           continue
+                      canonical_issue_number = canonical_issue(
+                          body, "Open pull request response"
+                      )
+                      if canonical_issue_number != issue_number:
+                          fail("Open pull request canonical Issue does not match the event.")
                       targets.append(target(
                           number,
+                          preflight_head_sha=listed_trusted_head(
+                              pull_request, "Open pull request response"
+                          ),
+                          canonical_issue_number=canonical_issue_number,
                           issue_generation_run_id=positive_number(os.environ.get("GITHUB_RUN_ID", ""), "GitHub run ID").__str__(),
                           issue_number=issue_number,
                           issue_updated_at=issue_updated_at,
@@ -396,8 +561,16 @@ jobs:
                       if number in numbers:
                           fail("Scheduled open pull request response contains a duplicate pull request.")
                       numbers.add(number)
-                      if not draft:
-                          targets.append(target(number))
+                      canonical_issue_number = canonical_issue(
+                          pull_request.get("body"), "Scheduled open pull request response"
+                      )
+                      targets.append(target(
+                          number,
+                          preflight_head_sha=listed_trusted_head(
+                              pull_request, "Scheduled open pull request response"
+                          ),
+                          canonical_issue_number=canonical_issue_number,
+                      ))
               return targets
 
           if event_name == "workflow_run":
@@ -450,9 +623,18 @@ jobs:
                       # not a new governance generation.
                       targets = []
                   else:
-                      targets = [target(
-                          pull_number(trusted_run.get("pull_requests")), str(run_id), "review"
-                      )]
+                      number = pull_number(trusted_run.get("pull_requests"))
+                      preflight_head_sha, canonical_issue_number = current_target_details(
+                          number, "Review sensor pull request"
+                      )
+                      source_target = target(
+                          number, str(run_id), "review",
+                          preflight_head_sha=preflight_head_sha,
+                          canonical_issue_number=canonical_issue_number,
+                      )
+                      targets = canonical_closer_targets(
+                          canonical_issue_number, source_target, "Review sensor pull request"
+                      )
               else:
                   ci_workflows = {
                       "CI": ".github/workflows/test-and-build.yml",
@@ -494,6 +676,8 @@ jobs:
                           fail("workflow_run generation is invalid.")
                   if type(trusted_run.get("workflow_id")) is not int or trusted_run["workflow_id"] < 1:
                       fail("workflow_run ID is invalid.")
+                  if type(trusted_run.get("id")) is not int or trusted_run["id"] != run_id:
+                      fail("workflow_run source ID is invalid.")
                   result = subprocess.run(
                       [
                           "gh", "api", "--paginate", "--slurp",
@@ -512,19 +696,46 @@ jobs:
                       fail("CI workflow generation response is not JSON.")
                   if not isinstance(run_pages, list) or not all(isinstance(page, dict) and isinstance(page.get("workflow_runs"), list) for page in run_pages):
                       fail("CI workflow generation response is invalid.")
-                  generations: list[tuple[int, int]] = []
+                  generations: list[tuple[int, int, int]] = []
                   for page in run_pages:
                       for candidate in page["workflow_runs"]:
                           if not isinstance(candidate, dict):
                               fail("CI workflow generation response is invalid.")
                           if candidate.get("event") != "pull_request" or candidate.get("head_sha") != run_head_sha:
                               continue
+                          candidate_id = candidate.get("id")
                           run_number = candidate.get("run_number")
                           run_attempt = candidate.get("run_attempt")
-                          if type(run_number) is not int or run_number < 1 or type(run_attempt) is not int or run_attempt < 1:
+                          candidate_pulls = candidate.get("pull_requests")
+                          if (
+                              type(candidate_id) is not int or candidate_id < 1
+                              or candidate.get("workflow_id") != trusted_run["workflow_id"]
+                              or type(run_number) is not int or run_number < 1
+                              or type(run_attempt) is not int or run_attempt < 1
+                              or not isinstance(candidate_pulls, list) or len(candidate_pulls) != 1
+                          ):
                               fail("CI workflow generation response is invalid.")
-                          generations.append((run_number, run_attempt))
-                  if not generations or max(generations) != (trusted_run["run_number"], trusted_run["run_attempt"]):
+                          candidate_pull = candidate_pulls[0]
+                          candidate_base = candidate_pull.get("base") if isinstance(candidate_pull, dict) else None
+                          candidate_head = candidate_pull.get("head") if isinstance(candidate_pull, dict) else None
+                          if isinstance(candidate_pull, dict) and candidate_pull.get("number") != number:
+                              continue
+                          if (
+                              not isinstance(candidate_pull, dict)
+                              or not isinstance(candidate_base, dict)
+                              or not isinstance(candidate_head, dict)
+                              or candidate_base.get("sha") != source_base["sha"]
+                              or candidate_head.get("sha") != run_head_sha
+                              or not isinstance(candidate_base.get("repo"), dict)
+                              or not isinstance(candidate_head.get("repo"), dict)
+                              or candidate_base["repo"].get("full_name") != repository
+                              or candidate_head["repo"].get("full_name") != repository
+                          ):
+                              fail("CI workflow generation does not bind the source pull request.")
+                          generations.append((run_number, run_attempt, candidate_id))
+                  if not generations or max(generations) != (
+                      trusted_run["run_number"], trusted_run["run_attempt"], trusted_run["id"]
+                  ):
                       fail("workflow_run is not the latest CI generation.")
                   run_status = trusted_run.get("status")
                   if run_action in {"requested", "in_progress"}:
@@ -541,20 +752,34 @@ jobs:
                       }:
                           fail("workflow_run conclusion is invalid.")
                   default_branch_workflow_blob(expected_path, run_head_sha)
-                  targets = [target(
-                      number, str(run_id), "ci", conclusion,
+                  preflight_head_sha, canonical_issue_number = current_target_details(
+                      number, "CI source pull request"
+                  )
+                  source_target = target(
+                      number, str(run_id), "ci", run_status, conclusion,
                       str(trusted_run["run_attempt"]), str(trusted_run["run_number"]),
-                      str(trusted_run["workflow_id"]), run_head_sha, source_base["sha"],
-                  )]
+                      str(trusted_run["workflow_id"]), run_head_sha, source_base["sha"], preflight_head_sha,
+                      canonical_issue_number,
+                  )
+                  targets = canonical_closer_targets(
+                      canonical_issue_number, source_target, "CI source pull request"
+                  )
           elif event_name == "issue_comment":
               if os.environ.get("ISSUE_PULL_REQUEST_URL", ""):
-                  targets = [
-                      target(
-                          positive_number(
-                              os.environ.get("ISSUE_NUMBER", ""), "Issue number"
-                          )
-                      )
-                  ]
+                  number = positive_number(
+                      os.environ.get("ISSUE_NUMBER", ""), "Issue number"
+                  )
+                  preflight_head_sha, canonical_issue_number = current_target_details(
+                      number, "Issue comment pull request"
+                  )
+                  source_target = target(
+                      number,
+                      preflight_head_sha=preflight_head_sha,
+                      canonical_issue_number=canonical_issue_number,
+                  )
+                  targets = canonical_closer_targets(
+                      canonical_issue_number, source_target, "Issue comment pull request"
+                  )
               else:
                   freshness = comment_freshness()
                   targets = closing_targets(
@@ -568,42 +793,59 @@ jobs:
           else:
               fail("Unsupported governance event.")
 
-          overflow = len(targets) > MAX_MATRIX_TARGETS
-          overflow_targets: list[str] = []
-          if overflow:
-              seen_overflow_numbers: set[str] = set()
-              for item in targets:
-                  number = item.get("pr_number") if isinstance(item, dict) else None
-                  if not isinstance(number, str) or re.fullmatch(r"[1-9][0-9]*", number) is None:
-                      fail("Overflow governance target is invalid.")
-                  if number in seen_overflow_numbers:
-                      fail("Overflow governance targets contain a duplicate pull request.")
-                  seen_overflow_numbers.add(number)
-                  overflow_targets.append(number)
-              matrix = {"include": []}
-          else:
-              matrix = {"include": targets}
+          groups: dict[str, list[dict[str, str]]] = {}
+          for item in targets:
+              canonical_issue_number = (
+                  item.get("canonical_issue_number") if isinstance(item, dict) else None
+              )
+              if (
+                  not isinstance(canonical_issue_number, str)
+                  or re.fullmatch(r"[1-9][0-9]*", canonical_issue_number) is None
+              ):
+                  fail("Governance target canonical Issue is invalid.")
+              groups.setdefault(canonical_issue_number, []).append(item)
+          group_numbers = sorted(groups, key=int)
+          if event_name == "schedule" and len(group_numbers) > MAX_MATRIX_TARGETS:
+              run_id = positive_number(os.environ.get("GITHUB_RUN_ID", ""), "GitHub run ID")
+              start = run_id % len(group_numbers)
+              group_numbers = [
+                  group_numbers[(start + offset) % len(group_numbers)]
+                  for offset in range(MAX_MATRIX_TARGETS)
+              ]
+          normal_targets: list[dict[str, str]] = []
+          conflicts: list[dict[str, str]] = []
+          for canonical_issue_number in group_numbers:
+              group = groups[canonical_issue_number]
+              if len(group) == 1:
+                  normal_targets.append(group[0])
+              else:
+                  conflicts.append({
+                      "canonical_issue_number": canonical_issue_number,
+                      "targets": json.dumps(group, separators=(",", ":")),
+                  })
+          matrix = {"include": normal_targets}
+          conflict_matrix = {"include": conflicts}
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(
                   "matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n"
               )
-              output.write(f"has_targets={'true' if targets and not overflow else 'false'}\n")
-              output.write(f"overflow={'true' if overflow else 'false'}\n")
-              output.write("overflow_targets=" + json.dumps(overflow_targets, separators=(",", ":")) + "\n")
+              output.write(f"has_targets={'true' if normal_targets else 'false'}\n")
+              output.write("conflict_matrix=" + json.dumps(conflict_matrix, separators=(",", ":")) + "\n")
+              output.write(f"has_conflicts={'true' if conflicts else 'false'}\n")
           PY
 
   preflight-governance:
     name: Invalidate trusted status before governance revalidation
     needs: resolve-targets
-    if: needs.resolve-targets.outputs.has_targets == 'true' && needs.resolve-targets.outputs.overflow != 'true'
+    if: needs.resolve-targets.outputs.has_targets == 'true'
     environment: pr-governance
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      # This shares the publisher's per-PR lock.  A new generation first
+      # This shares the publisher's canonical-Issue lock.  A new generation first
       # cancels an older publisher, then posts its pending status before the
       # replacement publisher may run.
-      group: pr-governance-${{ matrix.pr_number }}
+      group: pr-governance-issue-${{ matrix.canonical_issue_number }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -627,6 +869,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.governance-token.outputs.token }}
           PR_NUMBER: ${{ matrix.pr_number }}
+          FIXED_HEAD_SHA: ${{ matrix.preflight_head_sha }}
+          CANONICAL_ISSUE_NUMBER: ${{ matrix.canonical_issue_number }}
         run: |
           python3 - <<'PY'
           import json
@@ -640,6 +884,12 @@ jobs:
           if re.fullmatch(r"[1-9][0-9]*", value) is None:
               raise SystemExit("Preflight governance target is invalid.")
           number = int(value)
+          fixed_head_sha = os.environ.get("FIXED_HEAD_SHA", "")
+          if re.fullmatch(r"[0-9a-fA-F]{40}", fixed_head_sha) is None:
+              raise SystemExit("Preflight governance fixed head is invalid.")
+          canonical_issue_number = os.environ.get("CANONICAL_ISSUE_NUMBER", "")
+          if re.fullmatch(r"[1-9][0-9]*", canonical_issue_number) is None:
+              raise SystemExit("Preflight governance canonical Issue is invalid.")
 
           def publish_pending(head_sha: str) -> bool:
               command = [
@@ -654,18 +904,29 @@ jobs:
                       return True
               return False
 
-          result = subprocess.run(
-              ["gh", "api", f"repos/{repository}/pulls/{number}"],
-              capture_output=True,
-              text=True,
-              check=False,
-          )
-          if result.returncode != 0:
+          # Invalidate the resolver-bound head before any refresh.  A GET
+          # outage must never leave a prior success authoritative on it.
+          if not publish_pending(fixed_head_sha):
+              raise SystemExit("Unable to publish fixed preflight governance pending state.")
+
+          pull = None
+          for _ in range(3):
+              result = subprocess.run(
+                  ["gh", "api", f"repos/{repository}/pulls/{number}"],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  continue
+              try:
+                  candidate = json.loads(result.stdout)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Preflight pull request is not JSON.") from error
+              pull = candidate
+              break
+          if pull is None:
               raise SystemExit("Unable to refresh preflight pull request.")
-          try:
-              pull = json.loads(result.stdout)
-          except json.JSONDecodeError as error:
-              raise SystemExit("Preflight pull request is not JSON.") from error
           base = pull.get("base") if isinstance(pull, dict) else None
           head = pull.get("head") if isinstance(pull, dict) else None
           if isinstance(pull, dict) and pull.get("number") == number and (
@@ -687,20 +948,38 @@ jobs:
               or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None
           ):
               raise SystemExit("Preflight pull request is invalid.")
-          if not publish_pending(head["sha"]):
+          if head["sha"].lower() != fixed_head_sha.lower() and not publish_pending(head["sha"]):
               raise SystemExit("Unable to publish preflight governance pending state.")
+          keyword = r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+          separator = r"(?:[ \t]*:[ \t]*|[ \t]+)"
+          reference = (
+              rf"(?:#(?P<short>[1-9][0-9]*)\b|https://github\.com/{re.escape(repository)}"
+              r"/issues/(?P<url>[1-9][0-9]*)(?=$|[\s.,;:!?)}\]>'\"]))"
+          )
+          body = pull.get("body")
+          if not isinstance(body, str):
+              raise SystemExit("Preflight pull request body is invalid.")
+          numbers = {
+              match.group("short") or match.group("url")
+              for match in re.finditer(rf"{keyword}{separator}{reference}", body, re.IGNORECASE)
+          }
+          if numbers != {canonical_issue_number}:
+              raise SystemExit("Preflight pull request canonical Issue changed before publishing.")
           PY
 
-  invalidate-overflow:
-    name: Invalidate overflow governance targets
+  invalidate-conflicts:
+    name: Invalidate conflicting canonical-Issue governance targets
     needs: resolve-targets
-    if: needs.resolve-targets.outputs.overflow == 'true'
+    if: needs.resolve-targets.outputs.has_conflicts == 'true'
     environment: pr-governance
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
-      group: pr-governance-overflow-${{ github.run_id }}
-      cancel-in-progress: false
+      group: pr-governance-issue-${{ matrix.canonical_issue_number }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve-targets.outputs.conflict_matrix) }}
     permissions:
       contents: read
       pull-requests: read
@@ -716,10 +995,11 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-statuses: write
 
-      - name: Publish overflow failures to current trusted pull request heads
+      - name: Publish canonical-Issue conflict failures to current trusted pull request heads
         env:
           GH_TOKEN: ${{ steps.governance-token.outputs.token }}
-          OVERFLOW_TARGETS: ${{ needs.resolve-targets.outputs.overflow_targets }}
+          CONFLICT_TARGETS: ${{ matrix.targets }}
+          CANONICAL_ISSUE_NUMBER: ${{ matrix.canonical_issue_number }}
         run: |
           python3 - <<'PY'
           import json
@@ -730,19 +1010,58 @@ jobs:
 
           repository = os.environ["GITHUB_REPOSITORY"]
           try:
-              requested = json.loads(os.environ["OVERFLOW_TARGETS"])
+              requested = json.loads(os.environ["CONFLICT_TARGETS"])
           except (KeyError, json.JSONDecodeError) as error:
-              raise SystemExit(f"Overflow governance targets are invalid: {error}") from error
-          if not isinstance(requested, list) or len(requested) < 257:
-              raise SystemExit("Overflow governance target count is invalid.")
+              raise SystemExit(f"Conflict governance targets are invalid: {error}") from error
+          if not isinstance(requested, list) or len(requested) < 2:
+              raise SystemExit("Conflict governance target count is invalid.")
+          canonical_issue_number = os.environ.get("CANONICAL_ISSUE_NUMBER", "")
+          if re.fullmatch(r"[1-9][0-9]*", canonical_issue_number) is None:
+              raise SystemExit("Conflict governance canonical Issue is invalid.")
           target_numbers: set[int] = set()
+          fixed_heads: dict[int, str] = {}
           for value in requested:
-              if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
-                  raise SystemExit("Overflow governance target is invalid.")
-              number = int(value)
+              if not isinstance(value, dict):
+                  raise SystemExit("Conflict governance target is invalid.")
+              number_value = value.get("pr_number")
+              target_canonical_issue_number = value.get("canonical_issue_number")
+              fixed_head = value.get("preflight_head_sha")
+              if (
+                  not isinstance(number_value, str)
+                  or re.fullmatch(r"[1-9][0-9]*", number_value) is None
+                  or target_canonical_issue_number != canonical_issue_number
+                  or not isinstance(fixed_head, str)
+                  or re.fullmatch(r"[0-9a-fA-F]{40}", fixed_head) is None
+              ):
+                  raise SystemExit("Conflict governance target is invalid.")
+              number = int(number_value)
               if number in target_numbers:
-                  raise SystemExit("Overflow governance targets contain a duplicate pull request.")
+                  raise SystemExit("Conflict governance targets contain a duplicate pull request.")
               target_numbers.add(number)
+              fixed_heads[number] = fixed_head
+
+          def post_failure(head_sha: str) -> bool:
+              command = [
+                  "gh", "api", "--method", "POST",
+                  f"repos/{repository}/statuses/{head_sha}",
+                  "-f", "state=failure",
+                  "-f", "context=KRR / PR governance (trusted)",
+                  "-f", "description=Canonical Issue has multiple active pull requests.",
+                  "-f", f"target_url={os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}?conflict_generation_run_id={os.environ['GITHUB_RUN_ID']}&canonical_issue_number={canonical_issue_number}",
+              ]
+              for _ in range(3):
+                  result = subprocess.run(command, capture_output=True, text=True, check=False)
+                  if result.returncode == 0:
+                      return True
+              return False
+
+          failures = 0
+          # Failure must reach every resolver-bound head before any GET.  A
+          # refresh outage must not leave an older success merge-authoritative.
+          for number in sorted(target_numbers):
+              if not post_failure(fixed_heads[number]):
+                  print(f"Unable to invalidate fixed conflict head for pull request {number}.", file=sys.stderr)
+                  failures += 1
 
           result = subprocess.run(
               ["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"],
@@ -765,22 +1084,49 @@ jobs:
                   if number in listed:
                       raise SystemExit("Overflow pull request response contains a duplicate pull request.")
                   listed[number] = pull
-          def post_failure(head_sha: str) -> bool:
-              command = [
-                  "gh", "api", "--method", "POST",
-                  f"repos/{repository}/statuses/{head_sha}",
-                  "-f", "state=failure",
-                  "-f", "context=KRR / PR governance (trusted)",
-                  "-f", "description=Governance target overflow requires bounded revalidation.",
-                  "-f", f"target_url={os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}?overflow_generation_run_id={os.environ['GITHUB_RUN_ID']}",
-              ]
-              for _ in range(3):
-                  result = subprocess.run(command, capture_output=True, text=True, check=False)
-                  if result.returncode == 0:
-                      return True
-              return False
 
-          failures = 0
+          keyword = r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+          separator = r"(?:[ \t]*:[ \t]*|[ \t]+)"
+          reference = (
+              rf"(?:#(?P<short>[1-9][0-9]*)\b|https://github\.com/{re.escape(repository)}"
+              r"/issues/(?P<url>[1-9][0-9]*)(?=$|[\s.,;:!?)}\]>'\"]))"
+          )
+          current_closers: set[int] = set()
+          for number, pull in listed.items():
+              body = pull.get("body")
+              head = pull.get("head")
+              if (
+                  pull.get("state") != "open"
+                  or type(pull.get("draft")) is not bool
+                  or not isinstance(body, str)
+                  or not isinstance(head, dict)
+                  or not isinstance(head.get("sha"), str)
+                  or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None
+              ):
+                  raise SystemExit("Conflict pull request response is invalid.")
+              issue_reference = (
+                  rf"(?:#{canonical_issue_number}\b|https://github\.com/{re.escape(repository)}"
+                  rf"/issues/{canonical_issue_number}(?=$|[\s.,;:!?)}}\]>'\"]))"
+              )
+              if re.search(rf"{keyword}{separator}{issue_reference}", body, re.IGNORECASE) is None:
+                  continue
+              numbers = {
+                  match.group("short") or match.group("url")
+                  for match in re.finditer(rf"{keyword}{separator}{reference}", body, re.IGNORECASE)
+              }
+              if len(numbers) != 1:
+                  if number in target_numbers and head["sha"].lower() != fixed_heads[number].lower() and not post_failure(head["sha"]):
+                      print(f"Unable to invalidate changed conflict pull request {number}.", file=sys.stderr)
+                      failures += 1
+                  raise SystemExit("Conflict pull request has no unique canonical Issue.")
+              if numbers == {canonical_issue_number}:
+                  current_closers.add(number)
+                  if number not in target_numbers and not post_failure(head["sha"]):
+                      print(f"Unable to invalidate newly discovered conflict pull request {number}.", file=sys.stderr)
+                      failures += 1
+          if current_closers != target_numbers:
+              print("Canonical Issue closer set changed before conflict invalidation.", file=sys.stderr)
+              failures += 1
           skipped = 0
           for number in sorted(target_numbers):
               if number not in listed:
@@ -810,15 +1156,11 @@ jobs:
                   print(f"Overflow pull request {number} is closed; skipped.", file=sys.stderr)
                   skipped += 1
                   continue
-              if isinstance(pull, dict) and pull.get("number") == number and pull.get("state") == "open" and pull.get("draft") is True:
-                  print(f"Overflow pull request {number} is Draft; skipped.", file=sys.stderr)
-                  skipped += 1
-                  continue
               if (
                   not isinstance(pull, dict)
                   or pull.get("number") != number
                   or pull.get("state") != "open"
-                  or pull.get("draft") is not False
+                  or type(pull.get("draft")) is not bool
                   or not isinstance(base, dict)
                   or not isinstance(head, dict)
                   or not isinstance(base.get("repo"), dict)
@@ -831,9 +1173,25 @@ jobs:
                   print(f"Overflow pull request {number} is invalid.", file=sys.stderr)
                   failures += 1
                   continue
-              if not post_failure(head["sha"]):
-                  print(f"Unable to publish overflow governance failure for pull request {number}.", file=sys.stderr)
+              if (
+                  head["sha"].lower() != fixed_heads[number].lower()
+                  and not post_failure(head["sha"])
+              ):
+                  print(f"Unable to publish changed conflict head for pull request {number}.", file=sys.stderr)
                   failures += 1
+              body = pull.get("body")
+              if not isinstance(body, str):
+                  print(f"Conflict pull request {number} body is invalid.", file=sys.stderr)
+                  failures += 1
+                  continue
+              numbers = {
+                  match.group("short") or match.group("url")
+                  for match in re.finditer(rf"{keyword}{separator}{reference}", body, re.IGNORECASE)
+              }
+              if numbers != {canonical_issue_number}:
+                  print(f"Conflict pull request {number} canonical Issue changed.", file=sys.stderr)
+                  failures += 1
+                  continue
           if failures:
               raise SystemExit("Overflow governance invalidation was incomplete.")
           PY
@@ -841,11 +1199,11 @@ jobs:
   pr-governance:
     name: Publish trusted governance status
     needs: [resolve-targets, preflight-governance]
-    if: needs.resolve-targets.outputs.has_targets == 'true' && needs.resolve-targets.outputs.overflow != 'true'
+    if: needs.resolve-targets.outputs.has_targets == 'true'
     environment: pr-governance
     runs-on: ubuntu-latest
     concurrency:
-      group: pr-governance-${{ matrix.pr_number }}
+      group: pr-governance-issue-${{ matrix.canonical_issue_number }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
@@ -857,12 +1215,14 @@ jobs:
           PR_NUMBER: ${{ matrix.pr_number }}
           SOURCE_RUN_ID: ${{ matrix.source_run_id }}
           SOURCE_KIND: ${{ matrix.source_kind }}
+          SOURCE_STATUS: ${{ matrix.source_status }}
           SOURCE_CONCLUSION: ${{ matrix.source_conclusion }}
           SOURCE_RUN_ATTEMPT: ${{ matrix.source_run_attempt }}
           SOURCE_RUN_NUMBER: ${{ matrix.source_run_number }}
           SOURCE_WORKFLOW_ID: ${{ matrix.source_workflow_id }}
           SOURCE_HEAD_SHA: ${{ matrix.source_head_sha }}
           SOURCE_BASE_SHA: ${{ matrix.source_base_sha }}
+          CANONICAL_ISSUE_NUMBER: ${{ matrix.canonical_issue_number }}
           ISSUE_GENERATION_RUN_ID: ${{ matrix.issue_generation_run_id }}
           ISSUE_NUMBER: ${{ matrix.issue_number }}
           ISSUE_UPDATED_AT: ${{ matrix.issue_updated_at }}
@@ -889,12 +1249,16 @@ jobs:
           number = positive_number(os.environ.get("PR_NUMBER", ""), "Pull request number")
           source_run_id = os.environ.get("SOURCE_RUN_ID", "")
           source_kind = os.environ.get("SOURCE_KIND", "")
+          source_status = os.environ.get("SOURCE_STATUS", "")
           source_conclusion = os.environ.get("SOURCE_CONCLUSION", "")
           source_run_attempt = os.environ.get("SOURCE_RUN_ATTEMPT", "")
           source_run_number = os.environ.get("SOURCE_RUN_NUMBER", "")
           source_workflow_id = os.environ.get("SOURCE_WORKFLOW_ID", "")
           source_head_sha = os.environ.get("SOURCE_HEAD_SHA", "")
           source_base_sha = os.environ.get("SOURCE_BASE_SHA", "")
+          canonical_issue_number = positive_number(
+              os.environ.get("CANONICAL_ISSUE_NUMBER", ""), "Canonical Issue number"
+          )
           issue_generation_run_id = os.environ.get("ISSUE_GENERATION_RUN_ID", "")
           issue_number = os.environ.get("ISSUE_NUMBER", "")
           issue_updated_at = os.environ.get("ISSUE_UPDATED_AT", "")
@@ -909,6 +1273,8 @@ jobs:
                   if source_conclusion or source_run_attempt or source_run_number or source_workflow_id or source_head_sha or source_base_sha:
                       fail("Review source cannot bind CI generation metadata.")
               elif source_kind == "ci":
+                  if source_status not in {"queued", "in_progress", "waiting", "requested", "completed"}:
+                      fail("CI source status is invalid.")
                   positive_number(source_run_attempt, "CI source run attempt")
                   positive_number(source_run_number, "CI source run number")
                   positive_number(source_workflow_id, "CI source workflow ID")
@@ -920,7 +1286,7 @@ jobs:
                       fail("CI source conclusion is invalid.")
               else:
                   fail("Source kind is invalid.")
-          elif source_kind or source_conclusion or source_run_attempt or source_run_number or source_workflow_id or source_head_sha or source_base_sha:
+          elif source_kind or source_status or source_conclusion or source_run_attempt or source_run_number or source_workflow_id or source_head_sha or source_base_sha:
               fail("Source metadata requires a source run.")
           if issue_generation_run_id:
               positive_number(issue_generation_run_id, "Issue generation run ID")
@@ -930,7 +1296,12 @@ jobs:
               fail("Issue freshness target is incomplete.")
           if issue_number:
               positive_number(issue_number, "Issue number")
-              if not issue_source and issue_action in {"opened", "edited", "deleted", "transferred", "closed", "reopened"}:
+              if not issue_source and issue_action in {
+                  "opened", "edited", "deleted", "transferred", "pinned", "unpinned",
+                  "closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
+                  "locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+                  "field_added", "field_removed",
+              }:
                   issue_source = "issues"
               if re.fullmatch(
                   r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
@@ -939,7 +1310,12 @@ jobs:
                   fail("Issue updated_at is invalid.")
               if not issue_generation_run_id:
                   fail("Issue freshness target requires an Issue generation.")
-              if issue_source == "issues" and issue_action not in {"opened", "edited", "deleted", "transferred", "closed", "reopened"}:
+              if issue_source == "issues" and issue_action not in {
+                  "opened", "edited", "deleted", "transferred", "pinned", "unpinned",
+                  "closed", "reopened", "assigned", "unassigned", "labeled", "unlabeled",
+                  "locked", "unlocked", "milestoned", "demilestoned", "typed", "untyped",
+                  "field_added", "field_removed",
+              }:
                   fail("Issue action is invalid.")
               if issue_source == "issue_comment":
                   if issue_action not in {"created", "edited", "deleted"}:
@@ -955,12 +1331,14 @@ jobs:
               output.write(f"pr_number={number}\n")
               output.write(f"source_run_id={source_run_id}\n")
               output.write(f"source_kind={source_kind}\n")
+              output.write(f"source_status={source_status}\n")
               output.write(f"source_conclusion={source_conclusion}\n")
               output.write(f"source_run_attempt={source_run_attempt}\n")
               output.write(f"source_run_number={source_run_number}\n")
               output.write(f"source_workflow_id={source_workflow_id}\n")
               output.write(f"source_head_sha={source_head_sha}\n")
               output.write(f"source_base_sha={source_base_sha}\n")
+              output.write(f"canonical_issue_number={canonical_issue_number}\n")
               output.write(f"issue_generation_run_id={issue_generation_run_id}\n")
               output.write(f"issue_number={issue_number}\n")
               output.write(f"issue_updated_at={issue_updated_at}\n")
@@ -1019,6 +1397,7 @@ jobs:
           SOURCE_WORKFLOW_ID: ${{ steps.event.outputs.source_workflow_id }}
           SOURCE_HEAD_SHA: ${{ steps.event.outputs.source_head_sha }}
           SOURCE_BASE_SHA: ${{ steps.event.outputs.source_base_sha }}
+          SOURCE_PR_NUMBER: ${{ steps.event.outputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
           EXPECTED_BASE_SHA: ${{ steps.pull-request.outputs.base_sha }}
           SOURCE_CONCLUSION: ${{ steps.event.outputs.source_conclusion }}
@@ -1036,7 +1415,10 @@ jobs:
               raise SystemExit(1)
           if not isinstance(source, dict):
               raise SystemExit(1)
+          source_run_id = int(os.environ["SOURCE_RUN_ID"])
+          source_pr_number = int(os.environ["SOURCE_PR_NUMBER"])
           expected = {
+              "id": source_run_id,
               "head_sha": os.environ["SOURCE_HEAD_SHA"],
               "run_attempt": int(os.environ["SOURCE_RUN_ATTEMPT"]),
               "run_number": int(os.environ["SOURCE_RUN_NUMBER"]),
@@ -1048,7 +1430,7 @@ jobs:
           if not isinstance(pull_requests, list) or len(pull_requests) != 1:
               raise SystemExit(1)
           pull = pull_requests[0]
-          if not isinstance(pull, dict) or not isinstance(pull.get("base"), dict) or not isinstance(pull.get("head"), dict) or not isinstance(pull["base"].get("repo"), dict) or not isinstance(pull["head"].get("repo"), dict) or pull["base"].get("sha") != os.environ["SOURCE_BASE_SHA"] or pull["head"].get("sha") != os.environ["SOURCE_HEAD_SHA"] or pull["base"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or pull["head"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
+          if not isinstance(pull, dict) or pull.get("number") != source_pr_number or not isinstance(pull.get("base"), dict) or not isinstance(pull.get("head"), dict) or not isinstance(pull["base"].get("repo"), dict) or not isinstance(pull["head"].get("repo"), dict) or pull["base"].get("sha") != os.environ["SOURCE_BASE_SHA"] or pull["head"].get("sha") != os.environ["SOURCE_HEAD_SHA"] or pull["base"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or pull["head"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
               raise SystemExit(1)
           if source["head_sha"] != os.environ["EXPECTED_HEAD_SHA"] or os.environ["SOURCE_BASE_SHA"] != os.environ["EXPECTED_BASE_SHA"]:
               raise SystemExit(1)
@@ -1057,19 +1439,28 @@ jobs:
               for page in pages
           ):
               raise SystemExit(1)
-          generations: list[tuple[int, int]] = []
+          generations: list[tuple[int, int, int]] = []
           for page in pages:
               for run in page["workflow_runs"]:
                   if not isinstance(run, dict):
                       raise SystemExit(1)
                   if run.get("event") != "pull_request" or run.get("head_sha") != os.environ["SOURCE_HEAD_SHA"]:
                       continue
+                  run_id = run.get("id")
                   number = run.get("run_number")
                   attempt = run.get("run_attempt")
-                  if type(number) is not int or number < 1 or type(attempt) is not int or attempt < 1:
+                  pulls = run.get("pull_requests")
+                  if type(run_id) is not int or run_id < 1 or run.get("workflow_id") != int(os.environ["SOURCE_WORKFLOW_ID"]) or type(number) is not int or number < 1 or type(attempt) is not int or attempt < 1 or not isinstance(pulls, list) or len(pulls) != 1:
                       raise SystemExit(1)
-                  generations.append((number, attempt))
-          if not generations or max(generations) != (int(os.environ["SOURCE_RUN_NUMBER"]), int(os.environ["SOURCE_RUN_ATTEMPT"])):
+                  candidate = pulls[0]
+                  base = candidate.get("base") if isinstance(candidate, dict) else None
+                  head = candidate.get("head") if isinstance(candidate, dict) else None
+                  if isinstance(candidate, dict) and candidate.get("number") != source_pr_number:
+                      continue
+                  if not isinstance(candidate, dict) or candidate.get("number") != source_pr_number or not isinstance(base, dict) or not isinstance(head, dict) or base.get("sha") != os.environ["SOURCE_BASE_SHA"] or head.get("sha") != os.environ["SOURCE_HEAD_SHA"] or not isinstance(base.get("repo"), dict) or not isinstance(head.get("repo"), dict) or base["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or head["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
+                      raise SystemExit(1)
+                  generations.append((number, attempt, run_id))
+          if not generations or max(generations) != (int(os.environ["SOURCE_RUN_NUMBER"]), int(os.environ["SOURCE_RUN_ATTEMPT"]), source_run_id):
               raise SystemExit(1)
           if os.environ["SOURCE_CONCLUSION"] == "pending":
               if source.get("status") not in {"queued", "in_progress", "waiting", "requested"}:
@@ -1095,6 +1486,7 @@ jobs:
           HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
           SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
           SOURCE_KIND: ${{ steps.event.outputs.source_kind }}
+          SOURCE_STATUS: ${{ steps.event.outputs.source_status }}
           SOURCE_CONCLUSION: ${{ steps.event.outputs.source_conclusion }}
           SOURCE_RUN_ATTEMPT: ${{ steps.event.outputs.source_run_attempt }}
           SOURCE_RUN_NUMBER: ${{ steps.event.outputs.source_run_number }}
@@ -1111,6 +1503,15 @@ jobs:
           COMMENT_UPDATED_AT: ${{ steps.event.outputs.comment_updated_at }}
         run: |
           target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ "${SOURCE_KIND}" == ci ]]; then
+            case "${SOURCE_STATUS}:${SOURCE_CONCLUSION}" in
+              queued:pending|in_progress:pending|waiting:pending|requested:pending|completed:success|completed:failure|completed:cancelled|completed:skipped|completed:timed_out|completed:action_required|completed:neutral|completed:stale|completed:startup_failure) ;;
+              *) echo 'CI source status or conclusion is invalid.' >&2; exit 1 ;;
+            esac
+          elif [[ -n "${SOURCE_STATUS}" ]]; then
+            echo 'Non-CI source cannot bind a CI status.' >&2
+            exit 1
+          fi
           if [[ -n "${SOURCE_RUN_ID}" ]]; then
             target_url="${target_url}?source_run_id=${SOURCE_RUN_ID}"
             if [[ -n "${SOURCE_RUN_ATTEMPT}" ]]; then
@@ -1122,6 +1523,7 @@ jobs:
             if [[ -n "${SOURCE_WORKFLOW_ID}" ]]; then
               target_url="${target_url}&source_workflow_id=${SOURCE_WORKFLOW_ID}&source_head_sha=${SOURCE_HEAD_SHA}"
               target_url="${target_url}&source_base_sha=${SOURCE_BASE_SHA}"
+              target_url="${target_url}&source_status=${SOURCE_STATUS}&source_conclusion=${SOURCE_CONCLUSION}"
             fi
           elif [[ -n "${ISSUE_GENERATION_RUN_ID}" ]]; then
             target_url="${target_url}?issue_generation_run_id=${ISSUE_GENERATION_RUN_ID}&issue_number=${ISSUE_NUMBER}&issue_updated_at=${ISSUE_UPDATED_AT}"
@@ -1195,17 +1597,22 @@ jobs:
                       raise SystemExit("Pending governance generation is invalid.") from error
                   allowed = {
                       "source_run_id", "source_run_attempt", "source_run_number",
-                      "source_workflow_id", "source_head_sha", "source_base_sha", "issue_generation_run_id",
+                      "source_workflow_id", "source_head_sha", "source_base_sha", "source_status", "source_conclusion", "issue_generation_run_id",
                       "issue_number", "issue_updated_at", "preflight_generation_run_id", "overflow_generation_run_id",
+                      "conflict_generation_run_id", "canonical_issue_number",
                   }
                   if any(key not in allowed or len(values) != 1 or not values[0] for key, values in query.items()):
                       raise SystemExit("Pending governance generation is invalid.")
-                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id"):
+                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id", "conflict_generation_run_id", "canonical_issue_number"):
                       if key in query and re.fullmatch(r"[1-9][0-9]*", query[key][0]) is None:
                           raise SystemExit("Pending governance generation is invalid.")
                   if "source_head_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_head_sha"][0]) is None:
                       raise SystemExit("Pending governance generation is invalid.")
                   if "source_base_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_base_sha"][0]) is None:
+                      raise SystemExit("Pending governance generation is invalid.")
+                  if "source_status" in query and query["source_status"][0] not in {"queued", "in_progress", "waiting", "requested", "completed"}:
+                      raise SystemExit("Pending governance generation is invalid.")
+                  if "source_conclusion" in query and query["source_conclusion"][0] not in {"pending", "success", "failure", "cancelled", "skipped", "timed_out", "action_required", "neutral", "stale", "startup_failure"}:
                       raise SystemExit("Pending governance generation is invalid.")
                   marker_status_id = status.get("id")
                   if type(marker_status_id) is not int or marker_status_id < 1:
@@ -1233,18 +1640,18 @@ jobs:
           HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
         run: |
           set +e
-          verified_base="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+          current_base="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
           base_exit=$?
-          verified_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
           head_exit=$?
-          verified_branch="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.ref')"
+          current_branch="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.ref')"
           branch_exit=$?
           if [[ "${base_exit}" -eq 0 && "${head_exit}" -eq 0 && "${branch_exit}" -eq 0 ]]; then
             python3 scripts/hooks/verify_push_issue.py \
               --pr-number "${PR_NUMBER}" \
-              --pr-base-sha "${verified_base}" \
-              --pr-head-sha "${verified_head}" \
-              --pr-branch "${verified_branch}" \
+              --pr-base-sha "${current_base}" \
+              --pr-head-sha "${current_head}" \
+              --pr-branch "${current_branch}" \
               --repository "${GITHUB_REPOSITORY}"
             verification_exit=$?
           else
@@ -1254,24 +1661,26 @@ jobs:
             python3 scripts/review/verify_pr_ready.py \
               --pr "${PR_NUMBER}" \
               --repository "${GITHUB_REPOSITORY}" \
-              --allow-ready
+              --allow-ready \
+              --expected-base-sha "${current_base}" \
+              --expected-head-sha "${current_head}"
             verification_exit=$?
           fi
-          current_base="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
-          current_base_exit=$?
-          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
-          current_head_exit=$?
-          if [[ "${current_base_exit}" -ne 0 || "${current_head_exit}" -ne 0 ]]; then
+          final_base="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+          final_base_exit=$?
+          final_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          final_head_exit=$?
+          if [[ "${final_base_exit}" -ne 0 || "${final_head_exit}" -ne 0 ]]; then
             verification_exit=1
-            current_base="${verified_base}"
-            current_head="${verified_head}"
+            final_base="${current_base}"
+            final_head="${current_head}"
           fi
           {
             echo "exit_code=${verification_exit}"
-            echo "verified_base=${verified_base}"
-            echo "verified_head=${verified_head}"
-            echo "current_base=${current_base}"
-            echo "current_head=${current_head}"
+            echo "verified_base=${current_base}"
+            echo "verified_head=${current_head}"
+            echo "current_base=${final_base}"
+            echo "current_head=${final_head}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Revalidate final governance contract before success
@@ -1310,14 +1719,16 @@ jobs:
             python3 scripts/review/verify_pr_ready.py \
               --pr "${PR_NUMBER}" \
               --repository "${GITHUB_REPOSITORY}" \
-              --allow-ready
+              --allow-ready \
+              --expected-base-sha "${current_base}" \
+              --expected-head-sha "${current_head}"
             revalidation_exit=$?
           fi
           issue_freshness_exit=0
           if [[ -n "${ISSUE_NUMBER}" ]]; then
             case "${ISSUE_SOURCE}:${ISSUE_ACTION}" in
               issues:deleted|issues:transferred) ;;
-              issues:opened|issues:edited|issues:closed|issues:reopened)
+              issues:opened|issues:edited|issues:pinned|issues:unpinned|issues:closed|issues:reopened|issues:assigned|issues:unassigned|issues:labeled|issues:unlabeled|issues:locked|issues:unlocked|issues:milestoned|issues:demilestoned|issues:typed|issues:untyped|issues:field_added|issues:field_removed)
                 current_issue_updated_at="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" --jq '.updated_at')"
                 issue_freshness_exit=$?
                 if [[ "${issue_freshness_exit}" -eq 0 && "${current_issue_updated_at}" != "${ISSUE_UPDATED_AT}" ]]; then
@@ -1414,17 +1825,22 @@ jobs:
                       raise SystemExit("Final governance generation is invalid.") from error
                   allowed = {
                       "source_run_id", "source_run_attempt", "source_run_number",
-                      "source_workflow_id", "source_head_sha", "source_base_sha", "issue_generation_run_id",
+                      "source_workflow_id", "source_head_sha", "source_base_sha", "source_status", "source_conclusion", "issue_generation_run_id",
                       "issue_number", "issue_updated_at", "preflight_generation_run_id", "overflow_generation_run_id",
+                      "conflict_generation_run_id", "canonical_issue_number",
                   }
                   if any(key not in allowed or len(values) != 1 or not values[0] for key, values in query.items()):
                       raise SystemExit("Final governance generation is invalid.")
-                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id"):
+                  for key in ("source_run_id", "source_run_attempt", "source_run_number", "source_workflow_id", "issue_generation_run_id", "issue_number", "preflight_generation_run_id", "overflow_generation_run_id", "conflict_generation_run_id", "canonical_issue_number"):
                       if key in query and re.fullmatch(r"[1-9][0-9]*", query[key][0]) is None:
                           raise SystemExit("Final governance generation is invalid.")
                   if "source_head_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_head_sha"][0]) is None:
                       raise SystemExit("Final governance generation is invalid.")
                   if "source_base_sha" in query and re.fullmatch(r"[0-9a-fA-F]{40}", query["source_base_sha"][0]) is None:
+                      raise SystemExit("Final governance generation is invalid.")
+                  if "source_status" in query and query["source_status"][0] not in {"queued", "in_progress", "waiting", "requested", "completed"}:
+                      raise SystemExit("Final governance generation is invalid.")
+                  if "source_conclusion" in query and query["source_conclusion"][0] not in {"pending", "success", "failure", "cancelled", "skipped", "timed_out", "action_required", "neutral", "stale", "startup_failure"}:
                       raise SystemExit("Final governance generation is invalid.")
                   marker_status_id = status.get("id")
                   if type(marker_status_id) is not int or marker_status_id < 1:
@@ -1447,6 +1863,7 @@ jobs:
           SOURCE_HEAD_SHA: ${{ steps.event.outputs.source_head_sha }}
           SOURCE_BASE_SHA: ${{ steps.event.outputs.source_base_sha }}
           SOURCE_CONCLUSION: ${{ steps.event.outputs.source_conclusion }}
+          SOURCE_PR_NUMBER: ${{ steps.event.outputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
           EXPECTED_BASE_SHA: ${{ steps.pull-request.outputs.base_sha }}
         run: |
@@ -1466,7 +1883,10 @@ jobs:
               for page in pages
           ):
               raise SystemExit(1)
+          source_run_id = int(os.environ["SOURCE_RUN_ID"])
+          source_pr_number = int(os.environ["SOURCE_PR_NUMBER"])
           expected = {
+              "id": source_run_id,
               "head_sha": os.environ["SOURCE_HEAD_SHA"],
               "run_attempt": int(os.environ["SOURCE_RUN_ATTEMPT"]),
               "run_number": int(os.environ["SOURCE_RUN_NUMBER"]),
@@ -1475,23 +1895,32 @@ jobs:
           if any(source.get(key) != value for key, value in expected.items()):
               raise SystemExit(1)
           pulls = source.get("pull_requests")
-          if not isinstance(pulls, list) or len(pulls) != 1 or not isinstance(pulls[0], dict) or not isinstance(pulls[0].get("base"), dict) or not isinstance(pulls[0].get("head"), dict) or not isinstance(pulls[0]["base"].get("repo"), dict) or not isinstance(pulls[0]["head"].get("repo"), dict) or pulls[0]["base"].get("sha") != os.environ["SOURCE_BASE_SHA"] or pulls[0]["head"].get("sha") != os.environ["SOURCE_HEAD_SHA"] or pulls[0]["base"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or pulls[0]["head"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
+          if not isinstance(pulls, list) or len(pulls) != 1 or not isinstance(pulls[0], dict) or pulls[0].get("number") != source_pr_number or not isinstance(pulls[0].get("base"), dict) or not isinstance(pulls[0].get("head"), dict) or not isinstance(pulls[0]["base"].get("repo"), dict) or not isinstance(pulls[0]["head"].get("repo"), dict) or pulls[0]["base"].get("sha") != os.environ["SOURCE_BASE_SHA"] or pulls[0]["head"].get("sha") != os.environ["SOURCE_HEAD_SHA"] or pulls[0]["base"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or pulls[0]["head"]["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
               raise SystemExit(1)
           if source["head_sha"] != os.environ["EXPECTED_HEAD_SHA"] or os.environ["SOURCE_BASE_SHA"] != os.environ["EXPECTED_BASE_SHA"]:
               raise SystemExit(1)
-          generations: list[tuple[int, int]] = []
+          generations: list[tuple[int, int, int]] = []
           for page in pages:
               for run in page["workflow_runs"]:
                   if not isinstance(run, dict):
                       raise SystemExit(1)
                   if run.get("event") != "pull_request" or run.get("head_sha") != os.environ["SOURCE_HEAD_SHA"]:
                       continue
+                  run_id = run.get("id")
                   number = run.get("run_number")
                   attempt = run.get("run_attempt")
-                  if type(number) is not int or number < 1 or type(attempt) is not int or attempt < 1:
+                  candidate_pulls = run.get("pull_requests")
+                  if type(run_id) is not int or run_id < 1 or run.get("workflow_id") != int(os.environ["SOURCE_WORKFLOW_ID"]) or type(number) is not int or number < 1 or type(attempt) is not int or attempt < 1 or not isinstance(candidate_pulls, list) or len(candidate_pulls) != 1:
                       raise SystemExit(1)
-                  generations.append((number, attempt))
-          if not generations or max(generations) != (int(os.environ["SOURCE_RUN_NUMBER"]), int(os.environ["SOURCE_RUN_ATTEMPT"])):
+                  candidate = candidate_pulls[0]
+                  base = candidate.get("base") if isinstance(candidate, dict) else None
+                  head = candidate.get("head") if isinstance(candidate, dict) else None
+                  if isinstance(candidate, dict) and candidate.get("number") != source_pr_number:
+                      continue
+                  if not isinstance(candidate, dict) or candidate.get("number") != source_pr_number or not isinstance(base, dict) or not isinstance(head, dict) or base.get("sha") != os.environ["SOURCE_BASE_SHA"] or head.get("sha") != os.environ["SOURCE_HEAD_SHA"] or not isinstance(base.get("repo"), dict) or not isinstance(head.get("repo"), dict) or base["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"] or head["repo"].get("full_name") != os.environ["GITHUB_REPOSITORY"]:
+                      raise SystemExit(1)
+                  generations.append((number, attempt, run_id))
+          if not generations or max(generations) != (int(os.environ["SOURCE_RUN_NUMBER"]), int(os.environ["SOURCE_RUN_ATTEMPT"]), source_run_id):
               raise SystemExit(1)
           if os.environ["SOURCE_CONCLUSION"] == "pending":
               if source.get("status") not in {"queued", "in_progress", "waiting", "requested"}:
@@ -1508,6 +1937,7 @@ jobs:
           HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
           SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}
           SOURCE_KIND: ${{ steps.event.outputs.source_kind }}
+          SOURCE_STATUS: ${{ steps.event.outputs.source_status }}
           SOURCE_CONCLUSION: ${{ steps.event.outputs.source_conclusion }}
           SOURCE_RUN_ATTEMPT: ${{ steps.event.outputs.source_run_attempt }}
           SOURCE_RUN_NUMBER: ${{ steps.event.outputs.source_run_number }}
@@ -1598,6 +2028,15 @@ jobs:
             final_exit=0
           fi
           target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ "${SOURCE_KIND}" == ci ]]; then
+            case "${SOURCE_STATUS}:${SOURCE_CONCLUSION}" in
+              queued:pending|in_progress:pending|waiting:pending|requested:pending|completed:success|completed:failure|completed:cancelled|completed:skipped|completed:timed_out|completed:action_required|completed:neutral|completed:stale|completed:startup_failure) ;;
+              *) echo 'CI source status or conclusion is invalid.' >&2; exit 1 ;;
+            esac
+          elif [[ -n "${SOURCE_STATUS}" ]]; then
+            echo 'Non-CI source cannot bind a CI status.' >&2
+            exit 1
+          fi
           if [[ -n "${SOURCE_RUN_ID}" ]]; then
             target_url="${target_url}?source_run_id=${SOURCE_RUN_ID}"
             if [[ -n "${SOURCE_RUN_ATTEMPT}" ]]; then
@@ -1609,6 +2048,7 @@ jobs:
             if [[ -n "${SOURCE_WORKFLOW_ID}" ]]; then
               target_url="${target_url}&source_workflow_id=${SOURCE_WORKFLOW_ID}&source_head_sha=${SOURCE_HEAD_SHA}"
               target_url="${target_url}&source_base_sha=${SOURCE_BASE_SHA}"
+              target_url="${target_url}&source_status=${SOURCE_STATUS}&source_conclusion=${SOURCE_CONCLUSION}"
             fi
           elif [[ -n "${ISSUE_GENERATION_RUN_ID}" ]]; then
             target_url="${target_url}?issue_generation_run_id=${ISSUE_GENERATION_RUN_ID}&issue_number=${ISSUE_NUMBER}&issue_updated_at=${ISSUE_UPDATED_AT}"

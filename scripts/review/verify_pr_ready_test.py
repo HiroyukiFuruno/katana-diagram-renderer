@@ -41,7 +41,8 @@ def successful_state() -> tuple[
         "isDraft": True,
         "baseRefOid": "c" * 40,
         "headRefOid": HEAD,
-        "body": "",
+        "body": "Closes #64",
+        "updatedAt": "2026-08-29T03:03:00Z",
         "statusCheckRollup": [
             {
                 "__typename": "CheckRun",
@@ -75,6 +76,10 @@ def successful_state() -> tuple[
         ],
     }
     return pull_request, threads, comments, reactions
+
+
+def current_canonical_closer() -> list[dict[str, object]]:
+    return [{"number": 72, "isDraft": True, "body": "Closes #64"}]
 
 
 class VerifyPrReadyTest(unittest.TestCase):
@@ -162,15 +167,15 @@ class VerifyPrReadyTest(unittest.TestCase):
             [],
         )
 
-    def test_closing_contract_accepts_empty_sets_and_rejects_extra_closing_reference(self) -> None:
-        self.assertEqual(
-            subject.closing_reference_errors(
-                repository="owner/repo",
-                body="",
-                referenced_issues=(),
-            ),
-            [],
+    def test_closing_contract_rejects_zero_canonical_open_issues(self) -> None:
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="",
+            referenced_issues=(),
         )
+        self.assertIn("ちょうど1件", " ".join(errors))
+
+    def test_closing_contract_rejects_extra_closing_reference_without_a_canonical_issue(self) -> None:
         errors = subject.closing_reference_errors(
             repository="owner/repo",
             body="Fixes #64",
@@ -197,64 +202,98 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
         self.assertIn("余分=#65", " ".join(errors))
 
-    def test_closing_contract_accepts_exact_same_repo_issue_set(self) -> None:
-        self.assertEqual(
-            subject.closing_reference_errors(
-                repository="owner/repo",
-                body="Closes #64\nFixes https://github.com/owner/repo/issues/65",
-                referenced_issues=(
-                    self.issue(64, "2026-08-29T03:03:00Z"),
-                    self.issue(65, "2026-08-29T03:03:00Z"),
-                ),
+    def test_closing_contract_rejects_multiple_matching_issues(self) -> None:
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="Closes #64\nFixes https://github.com/owner/repo/issues/65",
+            referenced_issues=(
+                self.issue(64, "2026-08-29T03:03:00Z"),
+                self.issue(65, "2026-08-29T03:03:00Z"),
             ),
-            [],
         )
+        self.assertIn("ちょうど1件", " ".join(errors))
 
-    def test_closing_contract_accepts_keyword_variants_and_same_repo_url(self) -> None:
+    def test_closing_contract_rejects_multiple_keyword_variants_and_same_repo_url(self) -> None:
         referenced_issues = (
             self.issue(64, "2026-08-29T03:03:00Z"),
             self.issue(65, "2026-08-29T03:03:00Z"),
             self.issue(66, "2026-08-29T03:03:00Z"),
         )
-        self.assertEqual(
-            subject.closing_reference_errors(
-                repository="owner/repo",
-                body=(
-                    "fixed #64\n"
-                    "Resolve: https://github.com/owner/repo/issues/65\n"
-                    "CLOSED #66\n"
-                    "Fixes https://github.com/other/repo/issues/67"
-                ),
-                referenced_issues=referenced_issues,
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body=(
+                "fixed #64\n"
+                "Resolve: https://github.com/owner/repo/issues/65\n"
+                "CLOSED #66\n"
+                "Fixes https://github.com/other/repo/issues/67"
             ),
-            [],
+            referenced_issues=referenced_issues,
         )
+        self.assertIn("ちょうど1件", " ".join(errors))
 
-    def test_closing_target_capacity_allows_256_and_rejects_257(self) -> None:
+    def test_closing_contract_rejects_closed_canonical_issue(self) -> None:
+        closed_issue = subject.issue_contract.Issue(
+            number=64,
+            state="CLOSED",
+            body="Issue body",
+            url="https://github.com/owner/repo/issues/64",
+            updated_at="2026-08-29T03:03:00Z",
+        )
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="Closes #64",
+            referenced_issues=(closed_issue,),
+        )
+        self.assertIn("OPEN", " ".join(errors))
+
+    def test_closing_contract_rejects_noncanonical_issue_url(self) -> None:
+        issue = subject.issue_contract.Issue(
+            number=64,
+            state="OPEN",
+            body="Issue body",
+            url="https://github.com/example/other/issues/64",
+            updated_at="2026-08-29T03:03:00Z",
+        )
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="Closes #64",
+            referenced_issues=(issue,),
+        )
+        self.assertIn("canonical", " ".join(errors))
+
+    def test_open_pull_request_contract_allows_only_the_current_canonical_closer(self) -> None:
         issue = self.issue(64, "2026-08-29T03:03:00Z")
 
-        def pull_requests(count: int) -> list[dict[str, object]]:
-            return [
-                {"number": 1_000 + index, "isDraft": False, "body": "Closes #64"}
+        def pull_requests(count: int, *, sibling_is_draft: bool) -> list[dict[str, object]]:
+            return current_canonical_closer() + [
+                {
+                    "number": 1_000 + index,
+                    "isDraft": sibling_is_draft,
+                    "body": "Closes #64",
+                }
                 for index in range(count)
             ]
 
         self.assertEqual(
-            subject.closing_target_capacity_errors(
+            subject.closing_open_pull_request_errors(
                 repository="owner/repo",
                 current_pull_request=72,
                 referenced_issues=(issue,),
-                open_pull_requests=pull_requests(255),
+                open_pull_requests=pull_requests(0, sibling_is_draft=False),
             ),
             [],
         )
-        errors = subject.closing_target_capacity_errors(
-            repository="owner/repo",
-            current_pull_request=72,
-            referenced_issues=(issue,),
-            open_pull_requests=pull_requests(256),
-        )
-        self.assertIn("257", " ".join(errors))
+        for sibling_is_draft in (False, True):
+            with self.subTest(sibling_is_draft=sibling_is_draft):
+                open_pull_requests = pull_requests(1, sibling_is_draft=sibling_is_draft)
+                errors = subject.closing_open_pull_request_errors(
+                    repository="owner/repo",
+                    current_pull_request=72,
+                    referenced_issues=(issue,),
+                    open_pull_requests=open_pull_requests,
+                )
+                self.assertIn("open PRは自身だけ", " ".join(errors))
+                self.assertIn("#72, #1000", " ".join(errors))
 
     def test_open_pull_requests_reads_all_pages(self) -> None:
         def payload(nodes: list[dict[str, object]], has_next_page: bool, cursor: str | None) -> dict[str, object]:
@@ -805,7 +844,8 @@ class VerifyPrReadyTest(unittest.TestCase):
             "isDraft": True,
             "baseRefOid": "c" * 40,
             "headRefOid": HEAD,
-            "body": "",
+            "body": "Closes #64",
+            "updatedAt": "2026-08-29T03:03:00Z",
             "statusCheckRollup": [
                 {
                     "__typename": "CheckRun",
@@ -891,7 +931,8 @@ class VerifyPrReadyTest(unittest.TestCase):
             raise AssertionError(f"unexpected gh call: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
@@ -936,7 +977,8 @@ class VerifyPrReadyTest(unittest.TestCase):
             raise AssertionError(f"unexpected gh call: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
@@ -1031,7 +1073,8 @@ class VerifyPrReadyTest(unittest.TestCase):
             raise AssertionError(f"unexpected gh call: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
@@ -1100,7 +1143,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_rejects_boundary_changed_during_readiness_check(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
-        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+        pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
         changed_pull_request = dict(pull_request)
         changed_pull_request["headRefOid"] = "d" * 40
 
@@ -1117,7 +1160,8 @@ class VerifyPrReadyTest(unittest.TestCase):
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             with self.assertRaisesRegex(ValueError, "base/head changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
@@ -1204,7 +1248,8 @@ class VerifyPrReadyTest(unittest.TestCase):
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             with self.assertRaisesRegex(ValueError, "base/head changed|snapshot"):
                 subject.main(
@@ -1227,7 +1272,8 @@ class VerifyPrReadyTest(unittest.TestCase):
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             self.assertEqual(
                 subject.main(
@@ -1245,6 +1291,111 @@ class VerifyPrReadyTest(unittest.TestCase):
                 0,
             )
 
+    def test_rejects_issue_edit_between_identical_pr_boundaries(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        initial_issue = self.issue(64, "2026-08-29T03:00:00Z")
+        edited_issue = self.issue(64, "2026-08-29T03:03:00Z")
+
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            side_effect=[(initial_issue,), (edited_issue,)],
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "canonical Issue snapshot changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_issue_body_change_with_the_same_updated_at(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        initial_issue = self.issue(64, "2026-08-29T03:00:00Z")
+        changed_issue = subject.issue_contract.Issue(
+            number=64,
+            state="OPEN",
+            body="Changed Issue body",
+            url="https://github.com/owner/repo/issues/64",
+            updated_at="2026-08-29T03:00:00Z",
+        )
+
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            side_effect=[(initial_issue,), (changed_issue,)],
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "canonical Issue snapshot changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_pr_updated_at_change_after_an_aba_body_mutation(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["updatedAt"] = "2026-08-29T03:04:00Z"
+
+        with patch.object(
+            subject, "_gh_json", side_effect=[pull_request, changed_pull_request]
+        ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
+            subject, "_review_threads", return_value=threads
+        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "updatedAt changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_body_change_after_initial_closing_contract(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["body"] = "Closes #65"
+
+        with patch.object(
+            subject, "_gh_json", side_effect=[pull_request, changed_pull_request]
+        ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
+            subject, "_review_threads", return_value=threads
+        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "pull request body changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_new_open_closer_after_initial_contract(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        initial_open_pull_requests = current_canonical_closer()
+        changed_open_pull_requests = initial_open_pull_requests + [
+            {"number": 73, "isDraft": True, "body": "Fixes #64"}
+        ]
+
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject,
+            "_open_pull_requests",
+            side_effect=[initial_open_pull_requests, changed_open_pull_requests],
+        ):
+            with self.assertRaisesRegex(ValueError, "open PR closer set changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
     def test_existing_readiness_error_is_not_masked_by_snapshot_refence(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
         pull_request["isDraft"] = False
@@ -1253,8 +1404,9 @@ class VerifyPrReadyTest(unittest.TestCase):
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
-        ), patch.object(subject, "_verify_pr_boundary_unchanged") as verify_boundary:
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ), patch.object(subject, "_verify_final_readiness_snapshot_unchanged") as verify_snapshot:
             self.assertEqual(
                 subject.main(
                     [
@@ -1270,7 +1422,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 ),
                 1,
             )
-            verify_boundary.assert_not_called()
+            verify_snapshot.assert_not_called()
 
     def test_pr_ready_check_wires_one_snapshot_to_both_readiness_gates(self) -> None:
         justfile = (Path(__file__).parents[2] / "Justfile").read_text(encoding="utf-8")
@@ -1283,7 +1435,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
-        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+        pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
         changed_pull_request = dict(pull_request)
         changed_pull_request["baseRefOid"] = "e" * 40
 
@@ -1300,7 +1452,8 @@ class VerifyPrReadyTest(unittest.TestCase):
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             with self.assertRaisesRegex(ValueError, "base/head changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
@@ -1314,14 +1467,15 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_accepts_unchanged_boundary_after_readiness_check(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
-        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+        pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             self.assertEqual(
                 subject.main(["--pr", "72", "--repository", "owner/repo"]), 0
@@ -1329,19 +1483,20 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_does_not_fetch_final_boundary_when_readiness_has_errors(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
-        pull_request.update({"baseRefOid": "c" * 40, "body": "", "isDraft": False})
+        pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64", "isDraft": False})
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
         ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
             subject, "_comment_reactions", return_value=reactions
         ), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=()
-        ), patch.object(subject, "_verify_pr_boundary_unchanged") as verify_boundary:
+            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
+        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ), patch.object(subject, "_verify_final_readiness_snapshot_unchanged") as verify_snapshot:
             self.assertEqual(
                 subject.main(["--pr", "72", "--repository", "owner/repo"]), 1
             )
-            verify_boundary.assert_not_called()
+            verify_snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

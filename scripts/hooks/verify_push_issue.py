@@ -440,12 +440,22 @@ def referenced_issue_snapshot(
         issue = issue_loader(number)
         if issue is None:
             raise ContractViolation(f"Issue #{number}を対象repositoryで確認できません")
-        if issue.number != number:
+        if type(issue.number) is not int or issue.number != number:
             raise ContractViolation(f"Issue #{number}のsnapshot番号が一致しません")
-        if not isinstance(issue.state, str) or not isinstance(issue.body, str):
+        if (
+            not isinstance(issue.state, str)
+            or not issue.state
+            or not isinstance(issue.body, str)
+            or not isinstance(issue.url, str)
+        ):
             raise ContractViolation(f"Issue #{number}のsnapshot形式が不正です")
         if not isinstance(issue.updated_at, str) or not issue.updated_at:
             raise ContractViolation(f"Issue #{number}のupdated_atが不正です")
+        canonical_url = f"https://github.com/{repository}/issues/{number}"
+        if issue.url.casefold() != canonical_url.casefold():
+            raise ContractViolation(
+                f"Issue #{number}は対象repositoryのcanonical Issue URLではありません"
+            )
         snapshot.append(issue)
     return tuple(snapshot)
 
@@ -501,6 +511,26 @@ def _trusted_workflow_path_errors(changed_paths: Sequence[str]) -> list[str]:
     )
 
 
+def _validate_pr_canonical_issue(
+    *,
+    repository: str,
+    number: int,
+    issue_loader: IssueLoader,
+) -> None:
+    issue = issue_loader(number)
+    if issue is None:
+        raise ContractViolation(f"Issue #{number}を対象repositoryで確認できません")
+    if type(issue.number) is not int or issue.number != number:
+        raise ContractViolation(f"Issue #{number}のsnapshot番号が一致しません")
+    if issue.state != "OPEN":
+        raise ContractViolation(f"Issue #{number}はOPENではありません: {issue.state}")
+    canonical_url = f"https://github.com/{repository}/issues/{number}"
+    if not isinstance(issue.url, str) or issue.url.casefold() != canonical_url.casefold():
+        raise ContractViolation(
+            f"Issue #{number}は対象repositoryのcanonical Issue URLではありません"
+        )
+
+
 def validate_pr_range(
     *,
     repository: str,
@@ -524,6 +554,20 @@ def validate_pr_range(
         base_sha=base_sha,
         head_sha=head_sha,
     )
+    references: set[int] = set()
+    for message in commit_messages:
+        references.update(issue_numbers(message, repository))
+    if len(references) != 1:
+        raise ContractViolation(
+            "PR rangeの参照Issueは同一repositoryのcanonicalなOPEN Issue 1件である必要があります: "
+            f"件数={len(references)}"
+        )
+    _validate_pr_canonical_issue(
+        repository=repository,
+        number=next(iter(references)),
+        issue_loader=issue_loader,
+    )
+
     changed_paths = _pr_changed_paths(repository=repository, pr_number=pr_number)
     protected_workflows = _trusted_workflow_path_errors(changed_paths)
     if protected_workflows:
@@ -539,9 +583,6 @@ def validate_pr_range(
         changed_paths=changed_paths,
         issue_loader=issue_loader,
     )
-    references: set[int] = set()
-    for message in commit_messages:
-        references.update(issue_numbers(message, repository))
     return references
 
 

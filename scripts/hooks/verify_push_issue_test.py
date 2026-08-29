@@ -329,6 +329,21 @@ class VerifyPushIssueTest(unittest.TestCase):
         )
         self.validate(messages=messages)
 
+    def test_push_contract_allows_multiple_commits_to_reference_different_issues(self) -> None:
+        messages = [
+            "feat: first\n\nRefs #64",
+            "fix: second\n\nRefs #65",
+        ]
+        issues = {64: self.issue(64), 65: self.issue(65)}
+        subject.validate_contract(
+            branch="feature/contract",
+            default_branch="master",
+            repository="HiroyukiFuruno/katana-render-runtime",
+            commit_messages=messages,
+            changed_paths=["scripts/hooks/pre-push.sh"],
+            issue_loader=issues.get,
+        )
+
     def test_foreign_repository_issue_does_not_satisfy_the_contract(self) -> None:
         with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
             self.validate(
@@ -451,6 +466,127 @@ class VerifyPushIssueTest(unittest.TestCase):
 
         self.assertEqual(references, {64})
 
+    def test_pr_range_rejects_zero_referenced_issues(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: unlinked"}}
+            ],
+        }
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "1件"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_rejects_multiple_referenced_issues(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {
+                    "sha": head_sha,
+                    "commit": {"message": "fix: linked\n\nRefs #64 #65"},
+                }
+            ],
+        }
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "1件"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_rejects_noncanonical_issue_url(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: linked\n\nRefs #64"}}
+            ],
+        }
+        noncanonical = self.issue(64)
+        noncanonical = subject.Issue(
+            number=noncanonical.number,
+            state=noncanonical.state,
+            body=noncanonical.body,
+            url="https://github.com/example/other/issues/64",
+            updated_at=noncanonical.updated_at,
+        )
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "canonical"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda _number: noncanonical,
+                )
+
+    def test_pr_range_rejects_non_integer_canonical_issue_number(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: linked\n\nRefs #64"}}
+            ],
+        }
+
+        for invalid_number in (True, "64"):
+            with self.subTest(invalid_number=invalid_number):
+                invalid_issue = subject.Issue(
+                    number=invalid_number,  # type: ignore[arg-type]
+                    state="OPEN",
+                    body="Issue body",
+                    url="https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64",
+                    updated_at="2026-08-29T03:03:00Z",
+                )
+                with patch.object(subject, "_gh_json", return_value=compare):
+                    with self.assertRaisesRegex(subject.ContractViolation, "snapshot番号"):
+                        subject.validate_pr_range(
+                            repository="HiroyukiFuruno/katana-render-runtime",
+                            pr_number=72,
+                            base_sha=base_sha,
+                            head_sha=head_sha,
+                            branch="fix/issue-contract",
+                            issue_loader=lambda _number: invalid_issue,
+                        )
+
     def test_referenced_issue_snapshot_uses_complete_base_to_head_commit_references(self) -> None:
         base_sha = "a" * 40
         head_sha = "b" * 40
@@ -494,7 +630,12 @@ class VerifyPushIssueTest(unittest.TestCase):
                 {"sha": head_sha, "commit": {"message": "fix: freshness\n\nRefs #64"}}
             ],
         }
-        missing_time = subject.Issue(64, "OPEN", "body", "https://example/issues/64")
+        missing_time = subject.Issue(
+            64,
+            "OPEN",
+            "body",
+            "https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64",
+        )
         with patch.object(subject, "_gh_json", return_value=compare):
             with self.assertRaisesRegex(subject.ContractViolation, "updated_at"):
                 subject.referenced_issue_snapshot(
@@ -503,6 +644,41 @@ class VerifyPushIssueTest(unittest.TestCase):
                     head_sha=head_sha,
                     issue_loader=lambda _number: missing_time,
                 )
+
+    def test_referenced_issue_snapshot_rejects_noncanonical_or_noninteger_issue(self) -> None:
+        repository = "HiroyukiFuruno/katana-render-runtime"
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        cases = (
+            subject.Issue(
+                True,
+                "OPEN",
+                "body",
+                f"https://github.com/{repository}/issues/64",
+                "2026-08-29T03:03:00Z",
+            ),
+            subject.Issue(
+                64,
+                "OPEN",
+                "body",
+                "https://github.com/example/other/issues/64",
+                "2026-08-29T03:03:00Z",
+            ),
+        )
+        with patch.object(
+            subject,
+            "_pr_commit_messages",
+            return_value=["fix: canonical snapshot\n\nRefs #64"],
+        ):
+            for invalid_issue in cases:
+                with self.subTest(issue=invalid_issue):
+                    with self.assertRaisesRegex(subject.ContractViolation, "snapshot番号|canonical"):
+                        subject.referenced_issue_snapshot(
+                            repository=repository,
+                            base_sha=base_sha,
+                            head_sha=head_sha,
+                            issue_loader=lambda _number: invalid_issue,
+                        )
 
     def test_pr_range_fails_closed_when_compare_commits_are_truncated(self) -> None:
         base_sha = "a" * 40
@@ -771,9 +947,9 @@ class VerifyPushIssueTest(unittest.TestCase):
         self.assertNotIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
         self.assertIn(checkout, workflow)
         self.assertIn(verifier, workflow)
-        self.assertIn("--pr-base-sha \"${verified_base}\"", workflow)
-        self.assertIn("--pr-head-sha \"${verified_head}\"", workflow)
-        self.assertIn("--pr-branch \"${verified_branch}\"", workflow)
+        self.assertIn("--pr-base-sha \"${current_base}\"", workflow)
+        self.assertIn("--pr-head-sha \"${current_head}\"", workflow)
+        self.assertIn("--pr-branch \"${current_branch}\"", workflow)
         self.assertLess(workflow.index(checkout), workflow.index(verifier))
 
     def test_final_trusted_status_compares_against_resolved_base_sha(self) -> None:

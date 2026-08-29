@@ -131,18 +131,26 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
         self.assertIn("source_workflow_id=${SOURCE_WORKFLOW_ID}", self.workflow)
         self.assertIn("source_head_sha=${SOURCE_HEAD_SHA}", self.workflow)
         self.assertIn("source_base_sha=${SOURCE_BASE_SHA}", self.workflow)
+        self.assertIn("source_status=${SOURCE_STATUS}", self.workflow)
+        self.assertIn("source_conclusion=${SOURCE_CONCLUSION}", self.workflow)
+        self.assertIn('"source_status", "source_conclusion"', self.workflow)
+        self.assertIn("SOURCE_STATUS: ${{ steps.event.outputs.source_status }}", self.workflow)
+        self.assertIn("CI source status or conclusion is invalid.", self.workflow)
+        self.assertIn("Non-CI source cannot bind a CI status.", self.workflow)
         self.assertIn("Revalidate final CI source generation", self.workflow)
         self.assertIn("SOURCE_GENERATIONS", self.workflow)
         self.assertIn("max(generations)", self.workflow)
 
     def test_ci_source_fences_reject_a_base_update_after_the_run_started(self) -> None:
         source_run = {
+            "id": 900,
             "head_sha": "a" * 40,
             "run_attempt": 2,
             "run_number": 8,
             "workflow_id": 44,
             "status": "in_progress",
             "pull_requests": [{
+                "number": 72,
                 "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
                 "head": {"repo": {"full_name": "owner/repository"}},
             }],
@@ -207,12 +215,14 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
 
     def test_ci_source_fences_accept_only_the_current_generation(self) -> None:
         source_run = {
+            "id": 900,
             "head_sha": "a" * 40,
             "run_attempt": 2,
             "run_number": 8,
             "workflow_id": 44,
             "status": "in_progress",
             "pull_requests": [{
+                "number": 72,
                 "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
                 "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
             }],
@@ -220,6 +230,7 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
         base_environment = os.environ | {
             "GITHUB_REPOSITORY": "owner/repository",
             "SOURCE_RUN_JSON": json.dumps(source_run),
+            "SOURCE_RUN_ID": "900", "SOURCE_PR_NUMBER": "72",
             "SOURCE_RUN_ATTEMPT": "2", "SOURCE_RUN_NUMBER": "8",
             "SOURCE_WORKFLOW_ID": "44", "SOURCE_HEAD_SHA": "a" * 40,
             "SOURCE_BASE_SHA": "b" * 40, "EXPECTED_HEAD_SHA": "a" * 40,
@@ -231,13 +242,21 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
         )
         for latest, expected_exit in (((8, 2), 0), ((8, 3), 1), ((9, 1), 1)):
             runs = [{
-                "event": "pull_request", "head_sha": "a" * 40,
-                "run_number": 8, "run_attempt": 2,
+                "id": 900, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
+                "run_number": 8, "run_attempt": 2, "pull_requests": [{
+                    "number": 72,
+                    "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
+                    "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+                }],
             }]
             if latest != (8, 2):
                 runs.append({
-                    "event": "pull_request", "head_sha": "a" * 40,
-                    "run_number": latest[0], "run_attempt": latest[1],
+                    "id": 901, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
+                    "run_number": latest[0], "run_attempt": latest[1], "pull_requests": [{
+                        "number": 72,
+                        "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
+                        "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+                    }],
                 })
             generations = [{"workflow_runs": runs}]
             environment = base_environment | {"SOURCE_GENERATIONS": json.dumps(generations)}
@@ -247,6 +266,63 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                     capture_output=True, text=True, env=environment, check=False,
                 )
                 self.assertEqual(result.returncode, expected_exit, f"{latest}, {name}: {result.stderr}")
+
+        foreign_same_head = {
+            "id": 901, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
+            "run_number": 99, "run_attempt": 1, "pull_requests": [{
+                "number": 73,
+                "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+            }],
+        }
+        environment = base_environment | {"SOURCE_GENERATIONS": json.dumps([{"workflow_runs": [runs[0], foreign_same_head]}])}
+        for name in names:
+            result = subprocess.run(
+                [sys.executable, "-c", self.ci_source_fence(name)],
+                capture_output=True, text=True, env=environment, check=False,
+            )
+            self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
+
+    def test_readiness_gate_uses_one_complete_current_pr_snapshot(self) -> None:
+        start = self.workflow.index("      - name: Verify PR readiness")
+        end = self.workflow.index("\n      - name: Revalidate final governance contract before success", start)
+        step = self.workflow[start:end]
+        base_assignment = step.index('current_base="$(gh api')
+        head_assignment = step.index('current_head="$(gh api')
+        readiness_call = step.index("python3 scripts/review/verify_pr_ready.py")
+        self.assertLess(base_assignment, readiness_call)
+        self.assertLess(head_assignment, readiness_call)
+        invocation = step[readiness_call : step.index("verification_exit=$?", readiness_call)]
+        self.assertIn('--expected-base-sha "${current_base}"', invocation)
+        self.assertIn('--expected-head-sha "${current_head}"', invocation)
+        self.assertNotIn('--expected-base-sha "${verified_base}"', invocation)
+        self.assertNotIn('--expected-head-sha "${verified_head}"', invocation)
+        self.assertEqual(invocation.count("--expected-base-sha"), 1)
+        self.assertEqual(invocation.count("--expected-head-sha"), 1)
+
+    def test_readiness_snapshot_is_not_reused_after_a_base_or_head_swap(self) -> None:
+        start = self.workflow.index("      - name: Verify PR readiness")
+        end = self.workflow.index("\n      - name: Revalidate final governance contract before success", start)
+        step = self.workflow[start:end]
+        readiness_call = step.index("python3 scripts/review/verify_pr_ready.py")
+        invocation = step[readiness_call : step.index("verification_exit=$?", readiness_call)]
+        self.assertRegex(
+            invocation,
+            r'--expected-base-sha "\$\{current_base\}" \\\s*\n\s*--expected-head-sha "\$\{current_head\}"',
+        )
+        self.assertNotRegex(invocation, r'--expected-(?:base|head)-sha "\$\{verified_(?:base|head)\}"')
+        self.assertLess(
+            self.workflow.index("      - name: Verify PR readiness"),
+            self.workflow.index("      - name: Revalidate final governance contract before success"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Revalidate final governance contract before success"),
+            self.workflow.index("      - name: Fence final status against newer governance generation"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Fence final status against newer governance generation"),
+            self.workflow.index("      - name: Revalidate final CI source generation"),
+        )
 
     def test_preflight_invalidates_each_normal_matrix_target(self) -> None:
         program = self.publisher_program("Publish preflight pending state to current trusted pull request heads")
@@ -259,8 +335,9 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "with open(os.environ['FAKE_GH_LOG'], 'a', encoding='utf-8') as out: out.write(json.dumps(args) + '\\n')\n"
                 "text = ' '.join(args)\n"
-                "if '/pulls/1' in text: print(json.dumps({'number': 1, 'state': 'open', 'draft': False, 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'a'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
-                "elif '/pulls/2' in text: print(json.dumps({'number': 2, 'state': 'open', 'draft': False, 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'b'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
+                "if '/pulls/' in text and os.environ.get('FAIL_PULL_GET') == '1': sys.exit(1)\n"
+                "if '/pulls/1' in text: print(json.dumps({'number': 1, 'state': 'open', 'draft': False, 'body': 'Fixes #64', 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'a'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
+                "elif '/pulls/2' in text: print(json.dumps({'number': 2, 'state': 'open', 'draft': False, 'body': 'Fixes #64', 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'b'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
                 "elif '--method' in args and 'b'*40 in text and os.environ.get('FAIL_SECOND') == '1': sys.exit(1)\n"
                 "elif '--method' in args: sys.exit(0)\n"
                 "else: sys.exit(97)\n",
@@ -274,23 +351,46 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com",
                 "GITHUB_RUN_ID": "999",
             }
-            for number in ("1", "2"):
+            for number, head in (("1", "a" * 40), ("2", "b" * 40)):
                 result = subprocess.run(
                     [sys.executable, "-c", program],
                     capture_output=True,
                     text=True,
-                    env=base_environment | {"PR_NUMBER": number},
+                    env=base_environment | {"PR_NUMBER": number, "FIXED_HEAD_SHA": head, "CANONICAL_ISSUE_NUMBER": "64"},
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
             successful_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(sum("/statuses/" in " ".join(call) for call in successful_calls), 2)
-            failed_environment = base_environment | {"FAIL_SECOND": "1", "PR_NUMBER": "2"}
+            failed_environment = base_environment | {
+                "FAIL_SECOND": "1", "PR_NUMBER": "2", "FIXED_HEAD_SHA": "b" * 40, "CANONICAL_ISSUE_NUMBER": "64",
+            }
             log.unlink()
             result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=failed_environment, check=False)
             self.assertNotEqual(result.returncode, 0)
             failed_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(sum("/statuses/" in " ".join(call) for call in failed_calls), 3)
+
+            log.unlink()
+            unavailable_environment = base_environment | {
+                "FAIL_PULL_GET": "1", "PR_NUMBER": "1", "FIXED_HEAD_SHA": "a" * 40, "CANONICAL_ISSUE_NUMBER": "64",
+            }
+            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=unavailable_environment, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            unavailable_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(sum("/statuses/" in " ".join(call) for call in unavailable_calls), 1)
+            self.assertEqual(sum("/pulls/1" in " ".join(call) for call in unavailable_calls), 3)
+
+            log.unlink()
+            mismatch_environment = base_environment | {
+                "PR_NUMBER": "1", "FIXED_HEAD_SHA": "a" * 40,
+                "CANONICAL_ISSUE_NUMBER": "65",
+            }
+            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=mismatch_environment, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical Issue changed", result.stderr)
+            mismatch_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(sum("/statuses/" in " ".join(call) for call in mismatch_calls), 1)
 
     def test_pr_workflow_blob_must_match_the_default_branch_without_checkout(self) -> None:
         resolver = self.resolver()
@@ -380,7 +480,7 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                 "PR_NUMBER": "72", "SOURCE_RUN_ID": "900", "SOURCE_KIND": "ci",
                 "SOURCE_CONCLUSION": "pending", "SOURCE_RUN_ATTEMPT": "2",
                 "SOURCE_RUN_NUMBER": "8", "SOURCE_WORKFLOW_ID": "44",
-                "SOURCE_HEAD_SHA": "a" * 40, "ISSUE_GENERATION_RUN_ID": "901",
+                "SOURCE_HEAD_SHA": "a" * 40, "CANONICAL_ISSUE_NUMBER": "64", "ISSUE_GENERATION_RUN_ID": "901",
                 "ISSUE_NUMBER": "64", "ISSUE_UPDATED_AT": "2026-08-29T00:00:00Z",
                 "ISSUE_ACTION": "created", "ISSUE_SOURCE": "issue_comment",
                 "COMMENT_ID": "3", "COMMENT_CREATED_AT": "2026-08-29T00:00:00Z",
@@ -406,9 +506,10 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
             environment.update(
                 {
                     "SOURCE_RUN_ID": "900", "SOURCE_KIND": "ci",
-                    "SOURCE_CONCLUSION": "pending", "SOURCE_RUN_ATTEMPT": "2",
+                    "SOURCE_STATUS": "in_progress", "SOURCE_CONCLUSION": "pending", "SOURCE_RUN_ATTEMPT": "2",
                     "SOURCE_RUN_NUMBER": "8", "SOURCE_WORKFLOW_ID": "44",
                     "SOURCE_HEAD_SHA": "a" * 40, "SOURCE_BASE_SHA": "b" * 40,
+                    "CANONICAL_ISSUE_NUMBER": "64",
                     "ISSUE_GENERATION_RUN_ID": "",
                     "ISSUE_NUMBER": "", "ISSUE_UPDATED_AT": "", "ISSUE_ACTION": "",
                     "ISSUE_SOURCE": "", "COMMENT_ID": "", "COMMENT_CREATED_AT": "",

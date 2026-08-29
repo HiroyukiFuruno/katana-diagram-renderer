@@ -26,7 +26,7 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def run_sensor_resolver(
-        self, run: object, default_blob: object, sensor_blob: object
+        self, run: object, default_blob: object, sensor_blob: object, pulls: object | None = None
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         match = re.search(
             r"- name: Resolve PR targets from a trusted event.*?"
@@ -44,6 +44,7 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
                 "DEFAULT": temporary_path / "default.json",
                 "SENSOR": temporary_path / "sensor.json",
                 "REPOSITORY": temporary_path / "repository.json",
+                "PULLS": temporary_path / "pulls.json",
             }
             response_paths["RUN"].write_text(json.dumps(run), encoding="utf-8")
             response_paths["DEFAULT"].write_text(
@@ -55,6 +56,13 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
             response_paths["REPOSITORY"].write_text(
                 json.dumps({"default_branch": "master"}), encoding="utf-8"
             )
+            response_paths["PULLS"].write_text(
+                json.dumps(pulls if pulls is not None else [[{
+                    "number": 72, "state": "open", "draft": False,
+                    "body": "Fixes #64", "head": {"sha": "b" * 40},
+                }]]),
+                encoding="utf-8",
+            )
             fake_gh.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
@@ -63,6 +71,8 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
                 "cat \"${FAKE_DEFAULT}\" ;;\n"
                 "  *'contents/.github/workflows/pr-governance-review-events.yml?ref='*) "
                 "cat \"${FAKE_SENSOR}\" ;;\n"
+                "  */pulls?state=open*) cat \"${FAKE_PULLS}\" ;;\n"
+                "  */pulls/72) printf '%s' '{\"number\":72,\"body\":\"Fixes #64\",\"head\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
                 "  'api repos/owner/repository') cat \"${FAKE_REPOSITORY}\" ;;\n"
                 "  *) exit 91 ;;\n"
                 "esac\n",
@@ -82,6 +92,7 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
                     "FAKE_DEFAULT": str(response_paths["DEFAULT"]),
                     "FAKE_SENSOR": str(response_paths["SENSOR"]),
                     "FAKE_REPOSITORY": str(response_paths["REPOSITORY"]),
+                    "FAKE_PULLS": str(response_paths["PULLS"]),
                     "PATH": f"{temporary_directory}{os.pathsep}{environment['PATH']}",
                 }
             )
@@ -126,7 +137,8 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
             "Scheduled open pull request response contains a non-open pull request.",
             self.publisher,
         )
-        self.assertIn("if not draft:", self.publisher)
+        self.assertIn("canonical_issue(", self.publisher)
+        self.assertIn("MAX_MATRIX_TARGETS", self.publisher)
 
     def test_sensor_workflow_run_keeps_the_existing_strict_server_binding(
         self,
@@ -178,6 +190,47 @@ class PrGovernanceThreadEventTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Trusted workflow blob response is invalid", result.stderr)
+
+    def test_sensor_source_groups_all_closers_but_ignores_unrelated_open_prs(self) -> None:
+        sensor_sha = "a" * 40
+        run = {
+            "name": "PR governance review sensor",
+            "event": "pull_request_review",
+            "path": ".github/workflows/pr-governance-review-events.yml",
+            "head_sha": "b" * 40,
+            "repository": {"full_name": "owner/repository"},
+            "pull_requests": [{"number": 72}],
+        }
+        pulls = [[
+            {"number": 72, "state": "open", "draft": False, "body": "Fixes #64", "head": {"sha": "b" * 40}},
+            {"number": 73, "state": "open", "draft": True, "body": "Fixes #64", "head": {"sha": "c" * 40}},
+            {"number": 74, "state": "open", "draft": True, "body": "Fixes #65", "head": {"sha": "d" * 40}},
+            {"number": 75, "state": "open", "draft": False, "body": "No closer", "head": {"sha": "e" * 40}},
+        ]]
+        result, outputs = self.run_sensor_resolver(
+            run, {"sha": sensor_sha, "type": "file"}, {"sha": sensor_sha, "type": "file"}, pulls
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(outputs["matrix"]), {"include": []})
+        conflict = json.loads(outputs["conflict_matrix"])["include"]
+        self.assertEqual(len(conflict), 1)
+        self.assertEqual(
+            [item["pr_number"] for item in json.loads(conflict[0]["targets"])], ["72", "73"]
+        )
+
+    def test_sensor_source_rejects_a_target_with_more_than_one_closing_issue(self) -> None:
+        sensor_sha = "a" * 40
+        run = {
+            "name": "PR governance review sensor", "event": "pull_request_review",
+            "path": ".github/workflows/pr-governance-review-events.yml", "head_sha": "b" * 40,
+            "repository": {"full_name": "owner/repository"}, "pull_requests": [{"number": 72}],
+        }
+        result, _ = self.run_sensor_resolver(
+            run, {"sha": sensor_sha, "type": "file"}, {"sha": sensor_sha, "type": "file"},
+            [[{"number": 72, "state": "open", "draft": False, "body": "Fixes #64 Fixes #65", "head": {"sha": "b" * 40}}]],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly one canonical", result.stderr)
 
     def test_thread_state_revalidation_remains_paginated_and_fail_closed(self) -> None:
         self.assertIn("reviewThreads(first: 100", self.readiness)
