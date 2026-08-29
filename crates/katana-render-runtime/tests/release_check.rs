@@ -181,6 +181,84 @@ fn linux_release_workflows_install_the_runtime_test_prerequisites()
 }
 
 #[test]
+fn pre_push_uses_the_ordered_issue_contract_dispatcher() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    let lefthook = std::fs::read_to_string(root.join("lefthook.yml"))?;
+    let dispatcher = std::fs::read_to_string(root.join("scripts/hooks/pre-push.sh"))?;
+
+    assert!(lefthook.contains("run: bash scripts/hooks/pre-push.sh"));
+    let repository_check = dispatcher
+        .find("just check")
+        .ok_or("repository check is missing from pre-push dispatcher")?;
+    let issue_contract = dispatcher
+        .find("python3 scripts/hooks/verify_push_issue.py")
+        .ok_or("Issue contract is missing from pre-push dispatcher")?;
+    assert!(
+        repository_check < issue_contract,
+        "repository-specific check must run before the Issue contract"
+    );
+    Ok(())
+}
+
+#[test]
+fn local_quality_gate_runs_repository_automation_contract_tests()
+-> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let check = recipe_body(&justfile, "check")?;
+    let automation = recipe_body(&justfile, "automation-contract-test")?;
+
+    assert!(check.contains("automation-contract-test"));
+    assert!(automation.contains("unittest discover -s scripts/hooks"));
+    assert!(automation.contains("cleanup_release_state_test.py"));
+    Ok(())
+}
+
+#[test]
+fn dependency_update_all_keeps_direct_transitive_and_strict_quality_gates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let justfile = std::fs::read_to_string(workspace_root()?.join("Justfile"))?;
+    let recipe = recipe_body(&justfile, "depends-update-all")?;
+
+    for required in [
+        "{{CARGO}} upgrade -i",
+        "{{CARGO}} update",
+        "bun update --latest",
+        "runtime-assets/depends-update-all.ts",
+        "just mermaid-compare-full",
+        "just drawio-compare-full",
+        "just check",
+        "just coverage",
+    ] {
+        assert!(
+            recipe.contains(required),
+            "depends-update-all must require {required}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn release_workflow_runs_safe_cleanup_after_crates_publish()
+-> Result<(), Box<dyn std::error::Error>> {
+    let workflow =
+        std::fs::read_to_string(workspace_root()?.join(".github/workflows/release.yml"))?;
+    let publish = workflow
+        .find("- name: Publish crates.io")
+        .ok_or("crates.io publish step is missing")?;
+    let cleanup = workflow
+        .find("- name: Cleanup published release state")
+        .ok_or("release cleanup step is missing")?;
+
+    assert!(
+        publish < cleanup,
+        "cleanup must run after crates.io publish"
+    );
+    assert!(workflow.contains("python3 scripts/release/cleanup_release_state.py"));
+    assert!(workflow.contains("--release-branch \"${RELEASE_BRANCH}\""));
+    Ok(())
+}
+
+#[test]
 fn html_platform_prerequisite_and_fallback_policy_is_contractually_documented()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
@@ -315,9 +393,15 @@ fn workspace_root() -> Result<&'static Path, Box<dyn std::error::Error>> {
 
 fn recipe_body<'a>(justfile: &'a str, recipe: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
     let header = format!("{recipe}:");
-    let start = justfile
-        .find(&header)
-        .ok_or_else(|| format!("{recipe} recipe is missing"))?;
+    let line_header = format!("\n{header}");
+    let start = if justfile.starts_with(&header) {
+        0
+    } else {
+        justfile
+            .find(&line_header)
+            .map(|index| index + 1)
+            .ok_or_else(|| format!("{recipe} recipe is missing"))?
+    };
     let body = &justfile[start + header.len()..];
     Ok(body.split("\n\n").next().unwrap_or(body))
 }

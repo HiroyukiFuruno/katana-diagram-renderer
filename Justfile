@@ -170,8 +170,13 @@ runtime-package-asset-check:
         fi; \
       done
 
+# Verify repository hook and release cleanup contracts
+automation-contract-test:
+    python3 -m unittest discover -s scripts/hooks -p '*_test.py'
+    python3 -m unittest discover -s scripts/release -p 'cleanup_release_state_test.py'
+
 # Run the local quality gate
-check: fmt-check lint runtime-bundle-check runtime-asset-script-test unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-package-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
+check: fmt-check lint runtime-bundle-check runtime-asset-script-test automation-contract-test unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-package-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
     @echo "checks passed"
 
 # Sweep old build artifacts locally (older than 7 days)
@@ -232,6 +237,7 @@ depends-update-all:
     just drawio-compare-full
     just drawio-compare-ci
     just check
+    just coverage
 
 # Install pinned PlantUML LGPL JAR into the PlantUML cache
 plantuml-install version=PLANTUML_JAR_VERSION output=PLANTUML_CACHE_JAR:
