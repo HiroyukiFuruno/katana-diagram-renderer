@@ -1122,6 +1122,165 @@ class VerifyPrReadyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "base/head changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
+    def test_rejects_malformed_expected_snapshot_sha(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expected base and head"):
+            subject.main(
+                [
+                    "--pr",
+                    "72",
+                    "--repository",
+                    "owner/repo",
+                    "--expected-base-sha",
+                    "not-a-sha",
+                    "--expected-head-sha",
+                    HEAD,
+                ]
+            )
+
+    def test_rejects_malformed_expected_head_snapshot_sha(self) -> None:
+        with self.assertRaisesRegex(ValueError, "expected base and head"):
+            subject.main(
+                [
+                    "--pr",
+                    "72",
+                    "--repository",
+                    "owner/repo",
+                    "--expected-base-sha",
+                    "c" * 40,
+                    "--expected-head-sha",
+                    "not-a-sha",
+                ]
+            )
+
+    def test_rejects_missing_expected_snapshot_sha(self) -> None:
+        with self.assertRaises(SystemExit):
+            subject.main(
+                [
+                    "--pr",
+                    "72",
+                    "--repository",
+                    "owner/repo",
+                    "--expected-base-sha",
+                    "c" * 40,
+                ]
+            )
+
+    def test_rejects_initial_snapshot_different_from_expected(self) -> None:
+        pull_request, _, _, _ = successful_state()
+        pull_request["baseRefOid"] = "d" * 40
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=[]
+        ), patch.object(subject, "_review_threads", return_value=[]), patch.object(
+            subject, "_comment_reactions", return_value={}
+        ):
+            with self.assertRaisesRegex(ValueError, "initial base/head"):
+                subject.main(
+                    [
+                        "--pr",
+                        "72",
+                        "--repository",
+                        "owner/repo",
+                        "--expected-base-sha",
+                        "c" * 40,
+                        "--expected-head-sha",
+                        HEAD,
+                    ]
+                )
+
+    def test_rejects_success_final_snapshot_different_from_expected(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["headRefOid"] = "d" * 40
+        snapshot_count = 0
+
+        def two_snapshots(*arguments: str) -> object:
+            nonlocal snapshot_count
+            self.assertEqual(arguments[:2], ("pr", "view"))
+            snapshot_count += 1
+            return pull_request if snapshot_count == 1 else changed_pull_request
+
+        with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
+            with self.assertRaisesRegex(ValueError, "base/head changed|snapshot"):
+                subject.main(
+                    [
+                        "--pr",
+                        "72",
+                        "--repository",
+                        "owner/repo",
+                        "--expected-base-sha",
+                        "c" * 40,
+                        "--expected-head-sha",
+                        HEAD,
+                    ]
+                )
+
+    def test_accepts_matching_start_and_final_snapshots(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
+            self.assertEqual(
+                subject.main(
+                    [
+                        "--pr",
+                        "72",
+                        "--repository",
+                        "owner/repo",
+                        "--expected-base-sha",
+                        "c" * 40,
+                        "--expected-head-sha",
+                        HEAD,
+                    ]
+                ),
+                0,
+            )
+
+    def test_existing_readiness_error_is_not_masked_by_snapshot_refence(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        pull_request["isDraft"] = False
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ), patch.object(subject, "_verify_pr_boundary_unchanged") as verify_boundary:
+            self.assertEqual(
+                subject.main(
+                    [
+                        "--pr",
+                        "72",
+                        "--repository",
+                        "owner/repo",
+                        "--expected-base-sha",
+                        "c" * 40,
+                        "--expected-head-sha",
+                        HEAD,
+                    ]
+                ),
+                1,
+            )
+            verify_boundary.assert_not_called()
+
+    def test_pr_ready_check_wires_one_snapshot_to_both_readiness_gates(self) -> None:
+        justfile = (Path(__file__).parents[2] / "Justfile").read_text(encoding="utf-8")
+        check_start = justfile.index("pr-ready-check pr:")
+        check_end = justfile.index("\n\n# ", check_start)
+        check = justfile[check_start:check_end]
+        self.assertIn("verify_push_issue.py --pr-number \"$pr\" --pr-base-sha \"$base_sha\" --pr-head-sha \"$head_sha\"", check)
+        self.assertIn("verify_pr_ready.py --pr \"$pr\" --repository \"$repository\" --require-draft --expected-base-sha \"$base_sha\" --expected-head-sha \"$head_sha\"", check)
+        self.assertLess(check.index("verify_push_issue.py"), check.index("verify_pr_ready.py"))
+
     def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
         pull_request.update({"baseRefOid": "c" * 40, "body": ""})

@@ -233,7 +233,7 @@ pr-ready-check pr:
       exit 2
     fi
     python3 scripts/hooks/verify_push_issue.py --pr-number "$pr" --pr-base-sha "$base_sha" --pr-head-sha "$head_sha" --pr-branch "$branch" --repository "$repository"
-    python3 scripts/review/verify_pr_ready.py --pr "$pr" --repository "$repository" --require-draft
+    python3 scripts/review/verify_pr_ready.py --pr "$pr" --repository "$repository" --require-draft --expected-base-sha "$base_sha" --expected-head-sha "$head_sha"
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:

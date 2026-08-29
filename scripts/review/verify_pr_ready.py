@@ -629,6 +629,39 @@ def _verify_pr_boundary_unchanged(
         raise ValueError("pull request base/head changed during readiness check")
 
 
+def _expected_boundary(
+    expected_base: str | None, expected_head: str | None
+) -> tuple[str, str] | None:
+    """Validate an optional caller-supplied immutable PR boundary."""
+
+    if (expected_base is None) != (expected_head is None):
+        raise ValueError("expected base and head SHA must be provided together")
+    if expected_base is None:
+        return None
+    if (
+        re.fullmatch(r"[0-9a-fA-F]{40}", expected_base) is None
+        or re.fullmatch(r"[0-9a-fA-F]{40}", expected_head) is None
+    ):
+        raise ValueError("expected base and head SHA must be 40-character SHAs")
+    return expected_base.lower(), expected_head.lower()
+
+
+def _require_boundary(
+    base: object, head: object, expected: tuple[str, str] | None
+) -> tuple[str, str]:
+    if not isinstance(base, str) or not isinstance(head, str):
+        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    if (
+        re.fullmatch(r"[0-9a-fA-F]{40}", base) is None
+        or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None
+    ):
+        raise ValueError("pull request baseRefOid/headRefOid must be 40-character SHAs")
+    boundary = base.lower(), head.lower()
+    if expected is not None and boundary != expected:
+        raise ValueError("pull request initial base/head does not match expected boundary")
+    return boundary
+
+
 def _review_threads(repository: str, pull_request: int) -> list[dict[str, object]]:
     query = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -809,6 +842,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--repository", help="GitHub repository as OWNER/REPOSITORY")
+    parser.add_argument("--expected-base-sha")
+    parser.add_argument("--expected-head-sha")
     draft_group = parser.add_mutually_exclusive_group()
     draft_group.add_argument(
         "--require-draft", dest="require_draft", action="store_true", default=True
@@ -817,6 +852,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--allow-ready", dest="require_draft", action="store_false"
     )
     arguments = parser.parse_args(argv)
+    if (arguments.expected_base_sha is None) != (arguments.expected_head_sha is None):
+        parser.error("--expected-base-sha and --expected-head-sha must be provided together")
+    expected_boundary = _expected_boundary(
+        arguments.expected_base_sha, arguments.expected_head_sha
+    )
 
     repository = _repository_name(arguments.repository)
     pull_request = _gh_json(
@@ -842,10 +882,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     threads = _review_threads(repository, arguments.pr)
     reactions = _comment_reactions(repository, comments)
-    base = pull_request.get("baseRefOid")
-    head = pull_request.get("headRefOid")
-    if not isinstance(base, str) or not isinstance(head, str):
-        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    base, head = _require_boundary(
+        pull_request.get("baseRefOid"), pull_request.get("headRefOid"), expected_boundary
+    )
     referenced_issues = issue_contract.referenced_issue_snapshot(
         repository=repository,
         base_sha=base,
