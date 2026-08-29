@@ -425,13 +425,90 @@ fn assert_agent_pr_review_contract(root: &Path) -> TestResult {
 fn assert_primary_pr_skill_contracts(root: &Path) -> TestResult {
     for path in [
         ".codex/skills/create_pull_request/SKILL.md",
+        ".agents/skills/create_pull_request/SKILL.md",
         ".codex/skills/impl-release/SKILL.md",
     ] {
-        let skill = std::fs::read_to_string(root.join(path))?;
-        assert_in_order(&skill, PRIMARY_SKILL_ORDER)?;
-        assert_unresolved_threads_are_required(&skill, path);
+        assert_primary_skill_contract(root, path)?;
     }
     Ok(())
+}
+
+fn assert_primary_skill_contract(root: &Path, path: &str) -> TestResult {
+    let skill = std::fs::read_to_string(root.join(path))?;
+    assert_in_order(&skill, PRIMARY_SKILL_ORDER)?;
+    assert_unresolved_threads_are_required(&skill, path);
+    if path == ".codex/skills/create_pull_request/SKILL.md"
+        || path == ".agents/skills/create_pull_request/SKILL.md"
+    {
+        assert_closing_issue_contract(&skill, path)?;
+    }
+    if path == ".agents/skills/create_pull_request/SKILL.md" {
+        assert_agents_pr_skill_contract(&skill);
+    }
+    Ok(())
+}
+
+fn assert_agents_pr_skill_contract(skill: &str) {
+    assert!(skill.contains("gh pr create --draft"));
+    assert!(skill.contains("phase=initial head=${head_sha}"));
+    assert!(skill.contains("phase=final head=${head_sha}"));
+    assert!(skill.contains("thread への reply→resolve") || skill.contains("thread への reply"));
+    assert!(skill.contains("just PR=\"<pr-number>\" pr-ready-check &&"));
+    assert!(skill.contains("gh pr ready"));
+    assert!(!skill.contains("gh pr create --base \"<base-branch>\""));
+}
+
+fn assert_closing_issue_contract(skill: &str, path: &str) -> TestResult {
+    assert_closing_issue_order(skill, path)?;
+    assert_closing_issue_examples(skill, path);
+    assert_closing_issue_capacity(skill);
+    Ok(())
+}
+
+fn assert_closing_issue_order(skill: &str, path: &str) -> TestResult {
+    let closing = skill
+        .find("GitHub closing keyword")
+        .ok_or_else(|| format!("{path} must require GitHub closing keywords"))?;
+    let draft = skill
+        .find("gh pr create --draft")
+        .ok_or_else(|| format!("{path} must create Draft PRs"))?;
+    let ready = skill
+        .find("gh pr ready")
+        .ok_or_else(|| format!("{path} must describe Ready promotion"))?;
+    assert!(
+        closing < draft,
+        "{path} must collect closing references before Draft creation"
+    );
+    assert!(
+        closing < ready,
+        "{path} must retain the closing contract before Ready"
+    );
+    Ok(())
+}
+
+fn assert_closing_issue_examples(skill: &str, path: &str) {
+    for required in [
+        "Closes #N",
+        "Fixes #N",
+        "Resolves #N",
+        "Refs #N",
+        "完全一致",
+        "不足も余分も許可しません",
+    ] {
+        assert!(skill.contains(required), "{path} must document {required}");
+    }
+}
+
+fn assert_closing_issue_capacity(skill: &str) {
+    assert!(skill.contains("256 non-Draft target invariant"));
+    assert!(skill.contains("bypass"));
+    assert!(skill.contains("Draft に戻す") || skill.contains("Draftへ戻す"));
+    assert!(
+        skill.contains("closing reference を外す")
+            || skill.contains("closing referenceを外す")
+            || skill.contains("closing reference を外して")
+            || skill.contains("closing referenceを外して")
+    );
 }
 
 fn assert_unresolved_threads_are_required(skill: &str, path: &str) {

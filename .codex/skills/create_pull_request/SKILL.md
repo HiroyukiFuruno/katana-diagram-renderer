@@ -57,6 +57,8 @@ template があれば優先します。
 
 ## 4. Draft PR を作る
 
+Draft PR を作る前に、branch の全 commit が参照する同一 repository の Issue 集合を収集します。PR 本文の closing Issue 集合は commit 参照 Issue 集合と完全一致させ、不足も余分も許可しません。各 Issue には GitHub closing keyword（`Closes #N`、`Fixes #N`、`Resolves #N`、または同一 repository の完全な Issue URL）による closing reference を含めます。`Refs #N` だけでは不十分です。
+
 ```bash
 gh pr create --draft --base "<base-branch>" --head "<current-branch>" --title "<title>" --body-file "<body-file>"
 ```
@@ -111,6 +113,7 @@ gh api graphql \
 - 未resolve thread が 0 件である。
 - CI が green である。
 - self-review、lint、テスト、coverage、OpenSpec/DoD がすべて PASS である。
+- 各 Issue の `non-Draft target` は 256 件以下である（256 non-Draft target invariant）。超過した場合は bypass せず、影響する PR を Draft に戻すか closing reference を外してから merge 前に解消します。
 
 ## 6. Ready 化と承認依頼
 
