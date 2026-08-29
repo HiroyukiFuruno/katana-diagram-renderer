@@ -39,7 +39,9 @@ def successful_state() -> tuple[
 ]:
     pull_request = {
         "isDraft": True,
+        "baseRefOid": "c" * 40,
         "headRefOid": HEAD,
+        "body": "",
         "statusCheckRollup": [
             {
                 "__typename": "CheckRun",
@@ -82,6 +84,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         threads: list[dict[str, object]] | None = None,
         comments: list[dict[str, object]] | None = None,
         reactions: dict[int, list[dict[str, object]]] | None = None,
+        referenced_issues: tuple[subject.issue_contract.Issue, ...] = (),
     ) -> list[str]:
         default_pr, default_threads, default_comments, default_reactions = (
             successful_state()
@@ -93,10 +96,270 @@ class VerifyPrReadyTest(unittest.TestCase):
             reactions if reactions is not None else default_reactions,
             review_bot=BOT,
             require_draft=True,
+            referenced_issues=referenced_issues,
+        )
+
+    def issue(self, number: int, updated_at: str) -> subject.issue_contract.Issue:
+        return subject.issue_contract.Issue(
+            number=number,
+            state="OPEN",
+            body="Issue body",
+            url=f"https://github.com/owner/repo/issues/{number}",
+            updated_at=updated_at,
         )
 
     def test_accepts_two_phase_review_on_current_head(self) -> None:
         self.assertEqual(self.errors(), [])
+
+    def test_rejects_final_evidence_before_referenced_issue_edit(self) -> None:
+        errors = self.errors(
+            referenced_issues=(self.issue(64, "2026-08-29T03:03:00Z"),)
+        )
+        self.assertIn("参照Issue更新後", " ".join(errors))
+
+    def test_accepts_final_evidence_after_referenced_issue_edit(self) -> None:
+        _, _, comments, reactions = successful_state()
+        reactions[2][0]["created_at"] = "2026-08-29T03:04:01Z"
+        self.assertEqual(
+            self.errors(
+                comments=comments,
+                reactions=reactions,
+                referenced_issues=(self.issue(64, "2026-08-29T03:04:00Z"),),
+            ),
+            [],
+        )
+
+    def test_uses_latest_referenced_issue_edit_for_final_evidence(self) -> None:
+        _, _, comments, reactions = successful_state()
+        reactions[2][0]["created_at"] = "2026-08-29T03:04:01Z"
+        errors = self.errors(
+            comments=comments,
+            reactions=reactions,
+            referenced_issues=(
+                self.issue(64, "2026-08-29T03:03:00Z"),
+                self.issue(65, "2026-08-29T03:05:00Z"),
+            ),
+        )
+        self.assertIn("参照Issue更新後", " ".join(errors))
+
+    def test_rejects_malformed_referenced_issue_timestamp(self) -> None:
+        errors = self.errors(
+            referenced_issues=(self.issue(64, "not-a-timestamp"),)
+        )
+        self.assertIn("snapshot", " ".join(errors))
+
+    def test_rejects_missing_referenced_issue_timestamp(self) -> None:
+        errors = self.errors(referenced_issues=(self.issue(64, ""),))
+        self.assertIn("snapshot", " ".join(errors))
+
+    def test_closing_contract_accepts_pr_72_style_body(self) -> None:
+        self.assertEqual(
+            subject.closing_reference_errors(
+                repository="owner/repo",
+                body="Closes #64",
+                referenced_issues=(self.issue(64, "2026-08-29T03:03:00Z"),),
+            ),
+            [],
+        )
+
+    def test_closing_contract_accepts_empty_sets_and_rejects_extra_closing_reference(self) -> None:
+        self.assertEqual(
+            subject.closing_reference_errors(
+                repository="owner/repo",
+                body="",
+                referenced_issues=(),
+            ),
+            [],
+        )
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="Fixes #64",
+            referenced_issues=(),
+        )
+        self.assertIn("余分=#64", " ".join(errors))
+
+    def test_closing_contract_rejects_missing_wrong_and_refs_only_references(self) -> None:
+        referenced_issues = (self.issue(64, "2026-08-29T03:03:00Z"),)
+        for body in ("", "Closes #65", "Refs #64"):
+            with self.subTest(body=body):
+                errors = subject.closing_reference_errors(
+                    repository="owner/repo",
+                    body=body,
+                    referenced_issues=referenced_issues,
+                )
+                self.assertIn("#64", " ".join(errors))
+
+    def test_closing_contract_rejects_extra_same_repo_closing_reference(self) -> None:
+        errors = subject.closing_reference_errors(
+            repository="owner/repo",
+            body="Closes #64\nFixes #65",
+            referenced_issues=(self.issue(64, "2026-08-29T03:03:00Z"),),
+        )
+        self.assertIn("余分=#65", " ".join(errors))
+
+    def test_closing_contract_accepts_exact_same_repo_issue_set(self) -> None:
+        self.assertEqual(
+            subject.closing_reference_errors(
+                repository="owner/repo",
+                body="Closes #64\nFixes https://github.com/owner/repo/issues/65",
+                referenced_issues=(
+                    self.issue(64, "2026-08-29T03:03:00Z"),
+                    self.issue(65, "2026-08-29T03:03:00Z"),
+                ),
+            ),
+            [],
+        )
+
+    def test_closing_contract_accepts_keyword_variants_and_same_repo_url(self) -> None:
+        referenced_issues = (
+            self.issue(64, "2026-08-29T03:03:00Z"),
+            self.issue(65, "2026-08-29T03:03:00Z"),
+            self.issue(66, "2026-08-29T03:03:00Z"),
+        )
+        self.assertEqual(
+            subject.closing_reference_errors(
+                repository="owner/repo",
+                body=(
+                    "fixed #64\n"
+                    "Resolve: https://github.com/owner/repo/issues/65\n"
+                    "CLOSED #66\n"
+                    "Fixes https://github.com/other/repo/issues/67"
+                ),
+                referenced_issues=referenced_issues,
+            ),
+            [],
+        )
+
+    def test_closing_target_capacity_allows_256_and_rejects_257(self) -> None:
+        issue = self.issue(64, "2026-08-29T03:03:00Z")
+
+        def pull_requests(count: int) -> list[dict[str, object]]:
+            return [
+                {"number": 1_000 + index, "isDraft": False, "body": "Closes #64"}
+                for index in range(count)
+            ]
+
+        self.assertEqual(
+            subject.closing_target_capacity_errors(
+                repository="owner/repo",
+                current_pull_request=72,
+                referenced_issues=(issue,),
+                open_pull_requests=pull_requests(255),
+            ),
+            [],
+        )
+        errors = subject.closing_target_capacity_errors(
+            repository="owner/repo",
+            current_pull_request=72,
+            referenced_issues=(issue,),
+            open_pull_requests=pull_requests(256),
+        )
+        self.assertIn("257", " ".join(errors))
+
+    def test_open_pull_requests_reads_all_pages(self) -> None:
+        def payload(nodes: list[dict[str, object]], has_next_page: bool, cursor: str | None) -> dict[str, object]:
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "nodes": nodes,
+                            "pageInfo": {
+                                "hasNextPage": has_next_page,
+                                "endCursor": cursor,
+                            },
+                        }
+                    }
+                }
+            }
+
+        first_page = payload(
+            [{"number": 71, "isDraft": False, "body": "Closes #64"}],
+            True,
+            "next-page",
+        )
+        second_page = payload(
+            [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+            False,
+            None,
+        )
+
+        def gh_json(*arguments: str) -> object:
+            if "cursor=next-page" in arguments:
+                return second_page
+            return first_page
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            self.assertEqual(
+                [item["number"] for item in subject._open_pull_requests("owner/repo")],
+                [71, 72],
+            )
+
+    def test_open_pull_requests_fails_closed_on_malformed_response(self) -> None:
+        malformed = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [{"number": 72, "isDraft": True, "body": None}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=malformed):
+            with self.assertRaisesRegex(TypeError, "body"):
+                subject._open_pull_requests("owner/repo")
+
+    def test_open_pull_requests_fails_closed_on_duplicate_numbers(self) -> None:
+        first_page = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                    }
+                }
+            }
+        }
+        duplicate_page = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", side_effect=[first_page, duplicate_page]):
+            with self.assertRaisesRegex(TypeError, "duplicate"):
+                subject._open_pull_requests("owner/repo")
+
+    def test_open_pull_requests_fails_closed_on_repeated_cursor(self) -> None:
+        first_page = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                    }
+                }
+            }
+        }
+        repeated_cursor_page = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": [{"number": 73, "isDraft": True, "body": "Closes #64"}],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                    }
+                }
+            }
+        }
+        with patch.object(
+            subject, "_gh_json", side_effect=[first_page, repeated_cursor_page]
+        ):
+            with self.assertRaisesRegex(TypeError, "endCursor"):
+                subject._open_pull_requests("owner/repo")
 
     def test_rejects_ready_pr_before_the_gate(self) -> None:
         pull_request, _, _, _ = successful_state()
@@ -225,6 +488,22 @@ class VerifyPrReadyTest(unittest.TestCase):
         comments[1] = marker(
             2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
         )
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
+    def test_rejects_final_bot_reaction_when_marker_edit_time_is_missing(self) -> None:
+        _, _, comments, reactions = successful_state()
+        comments[1].pop("updated_at")
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
+    def test_rejects_final_bot_reaction_when_marker_edit_precedes_creation(self) -> None:
+        _, _, comments, reactions = successful_state()
+        comments[1]["updated_at"] = "2026-08-29T03:01:00Z"
         self.assertIn(
             "final",
             " ".join(self.errors(comments=comments, reactions=reactions)),
@@ -524,7 +803,9 @@ class VerifyPrReadyTest(unittest.TestCase):
     def test_reads_issue_comments_past_the_first_api_page(self) -> None:
         pull_request = {
             "isDraft": True,
+            "baseRefOid": "c" * 40,
             "headRefOid": HEAD,
+            "body": "",
             "statusCheckRollup": [
                 {
                     "__typename": "CheckRun",
@@ -609,7 +890,9 @@ class VerifyPrReadyTest(unittest.TestCase):
                 }
             raise AssertionError(f"unexpected gh call: {arguments}")
 
-        with patch.object(subject, "_gh_json", side_effect=gh_json):
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
     def test_reads_reaction_past_the_first_api_page(self) -> None:
@@ -652,7 +935,9 @@ class VerifyPrReadyTest(unittest.TestCase):
                 }
             raise AssertionError(f"unexpected gh call: {arguments}")
 
-        with patch.object(subject, "_gh_json", side_effect=gh_json):
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
     def test_reads_review_past_the_first_graphql_page(self) -> None:
@@ -745,7 +1030,9 @@ class VerifyPrReadyTest(unittest.TestCase):
                 }
             raise AssertionError(f"unexpected gh call: {arguments}")
 
-        with patch.object(subject, "_gh_json", side_effect=gh_json):
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
     def test_fails_closed_when_review_thread_comments_are_truncated(self) -> None:
@@ -776,6 +1063,40 @@ class VerifyPrReadyTest(unittest.TestCase):
         with patch.object(subject, "_gh_json", return_value=payload):
             with self.assertRaisesRegex(ValueError, "thread comments"):
                 subject._review_threads("owner/repo", 72)
+
+    def test_fails_closed_when_review_thread_cursor_repeats(self) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            with self.assertRaisesRegex(TypeError, "endCursor"):
+                subject._review_threads("owner/repo", 72)
+
+    def test_fails_closed_when_review_cursor_repeats(self) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviews": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            with self.assertRaisesRegex(TypeError, "endCursor"):
+                subject._reviews("owner/repo", 72)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,11 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "hooks"))
+import verify_push_issue as issue_contract
 
 
 _MARKER_PATTERN = re.compile(
@@ -28,6 +32,7 @@ _SELF_CHECK_NAMES = frozenset(
 )
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
+_MAX_CLOSING_ISSUE_TARGETS = 256
 
 
 def _bot_login(value: object) -> str | None:
@@ -54,6 +59,36 @@ def _timestamp(value: object, field: str) -> datetime | None:
     return datetime.fromisoformat(normalized)
 
 
+def _review_completion_times(
+    reviews: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    not_before: object,
+    before: object | None = None,
+) -> list[datetime]:
+    not_before_time = _timestamp(not_before, "marker updated_at")
+    if not_before_time is None:
+        raise TypeError("marker updated_at must be an ISO-8601 timestamp")
+    before_time = _timestamp(before, "marker created_at")
+    completion_times: list[datetime] = []
+    for review in reviews:
+        if not (
+            _is_review_bot(_bot_login(review.get("author")), review_bot)
+            and review.get("state") in _VALID_REVIEW_STATES
+            and isinstance(review.get("commit"), Mapping)
+            and review["commit"].get("oid") == head
+        ):
+            continue
+        submitted_at = _timestamp(review.get("submittedAt"), "review submittedAt")
+        if (
+            submitted_at is not None
+            and submitted_at > not_before_time
+            and (before_time is None or submitted_at < before_time)
+        ):
+            completion_times.append(submitted_at)
+    return completion_times
+
+
 def _review_is_for(
     reviews: Sequence[Mapping[str, object]],
     review_bot: str,
@@ -61,20 +96,8 @@ def _review_is_for(
     not_before: object,
     before: object | None = None,
 ) -> bool:
-    not_before_time = _timestamp(not_before, "marker updated_at")
-    if not_before_time is None:
-        raise TypeError("marker updated_at must be an ISO-8601 timestamp")
-    before_time = _timestamp(before, "marker created_at")
-    return any(
-        _is_review_bot(_bot_login(review.get("author")), review_bot)
-        and review.get("state") in _VALID_REVIEW_STATES
-        and isinstance(review.get("commit"), Mapping)
-        and review["commit"].get("oid") == head
-        and (submitted_at := _timestamp(review.get("submittedAt"), "review submittedAt"))
-        is not None
-        and submitted_at > not_before_time
-        and (before_time is None or submitted_at < before_time)
-        for review in reviews
+    return bool(
+        _review_completion_times(reviews, review_bot, head, not_before, before)
     )
 
 
@@ -97,13 +120,13 @@ def _marker_updated_time(comment: Mapping[str, object]) -> datetime | None:
         return None
 
 
-def _bot_plus_one(
+def _bot_plus_one_time(
     comment: Mapping[str, object],
     reactions: Mapping[int, Sequence[Mapping[str, object]]],
     review_bot: str,
     not_before: object,
     before: object | None = None,
-) -> bool:
+) -> datetime | None:
     comment_id = comment["id"]
     if not isinstance(comment_id, int):
         raise TypeError("comment id must be an integer")
@@ -115,15 +138,15 @@ def _bot_plus_one(
     if edited_at is None:
         # An old reaction may predate an edited marker while still being newer
         # than its original creation time, so missing edit evidence is unsafe.
-        return False
+        return None
     try:
         edited_time = _timestamp(edited_at, "marker updated_at")
     except (TypeError, ValueError):
-        return False
+        return None
     if edited_time is None:
-        return False
+        return None
     if edited_time < not_before_time:
-        return False
+        return None
 
     def is_timely(reaction: Mapping[str, object]) -> bool:
         created_at = reaction.get("created_at")
@@ -139,12 +162,218 @@ def _bot_plus_one(
             and (before_time is None or reaction_time < before_time)
         )
 
-    return any(
-        reaction.get("content") == "+1"
-        and _is_review_bot(_bot_login(reaction.get("user")), review_bot)
-        and is_timely(reaction)
-        for reaction in reactions.get(comment_id, ())
+    valid_times: list[datetime] = []
+    for reaction in reactions.get(comment_id, ()):
+        if (
+            reaction.get("content") == "+1"
+            and _is_review_bot(_bot_login(reaction.get("user")), review_bot)
+            and is_timely(reaction)
+        ):
+            created_at = _timestamp(reaction.get("created_at"), "reaction created_at")
+            if created_at is not None:
+                valid_times.append(created_at)
+    return max(valid_times, default=None)
+
+
+def _bot_plus_one(
+    comment: Mapping[str, object],
+    reactions: Mapping[int, Sequence[Mapping[str, object]]],
+    review_bot: str,
+    not_before: object,
+    before: object | None = None,
+) -> bool:
+    return (
+        _bot_plus_one_time(comment, reactions, review_bot, not_before, before)
+        is not None
     )
+
+
+def _latest_issue_updated_time(
+    referenced_issues: Sequence[issue_contract.Issue],
+) -> datetime | None:
+    """Return the newest referenced Issue edit time, failing closed per item."""
+
+    if not referenced_issues:
+        return None
+    timestamps: list[datetime] = []
+    for issue in referenced_issues:
+        try:
+            updated_at = _timestamp(issue.updated_at, f"Issue #{issue.number} updated_at")
+        except (TypeError, ValueError):
+            return None
+        if updated_at is None:
+            return None
+        timestamps.append(updated_at)
+    return max(timestamps)
+
+
+def closing_reference_errors(
+    *,
+    repository: str,
+    body: object,
+    referenced_issues: Sequence[issue_contract.Issue],
+) -> list[str]:
+    """Require every Issue found in base..HEAD commits to close from the PR body."""
+
+    if not isinstance(body, str):
+        raise TypeError("pull request body must be a string")
+    referenced_numbers = {issue.number for issue in referenced_issues}
+    closing_numbers = issue_contract.closing_issue_numbers(body, repository)
+    missing = sorted(referenced_numbers - closing_numbers)
+    extra = sorted(closing_numbers - referenced_numbers)
+    if not missing and not extra:
+        return []
+    details: list[str] = []
+    if missing:
+        details.append(
+            "不足=" + ", ".join(f"#{number}" for number in missing)
+        )
+    if extra:
+        details.append(
+            "余分=" + ", ".join(f"#{number}" for number in extra)
+        )
+    return [
+        "PR本文のGitHub closing Issue集合がcommit範囲参照Issue集合と一致しません: "
+        + "; ".join(details)
+    ]
+
+
+def _open_pull_requests(repository: str) -> list[dict[str, object]]:
+    """Read every open PR body through GraphQL cursor pagination."""
+
+    owner, name = repository.split("/", maxsplit=1)
+    pull_requests: list[dict[str, object]] = []
+    seen_numbers: set[int] = set()
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    while True:
+        arguments = [
+            "api",
+            "graphql",
+            "-f",
+            "query="
+            "query($owner: String!, $name: String!, $cursor: String) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            "    pullRequests(first: 100, states: OPEN, after: $cursor) {\n"
+            "      nodes { number isDraft body }\n"
+            "      pageInfo { hasNextPage endCursor }\n"
+            "    }\n"
+            "  }\n"
+            "}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+        ]
+        if cursor is not None:
+            arguments.extend(("-F", f"cursor={cursor}"))
+        payload = _gh_json(*arguments)
+        if not isinstance(payload, Mapping):
+            raise TypeError("open pull requests response must be an object")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise TypeError("open pull requests data must be an object")
+        repository_data = data.get("repository")
+        if not isinstance(repository_data, Mapping):
+            raise TypeError("open pull requests repository must be an object")
+        connection = repository_data.get("pullRequests")
+        if not isinstance(connection, Mapping):
+            raise TypeError("open pull requests connection must be an object")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list):
+            raise TypeError("open pull requests nodes must be an array")
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                raise TypeError("open pull request must be an object")
+            number = node.get("number")
+            is_draft = node.get("isDraft")
+            body = node.get("body")
+            if type(number) is not int or number < 1:
+                raise TypeError("open pull request number must be a positive integer")
+            if number in seen_numbers:
+                raise TypeError("open pull requests contain a duplicate number")
+            if not isinstance(is_draft, bool):
+                raise TypeError("open pull request isDraft must be a boolean")
+            if not isinstance(body, str):
+                raise TypeError("open pull request body must be a string")
+            pull_requests.append(
+                {"number": number, "isDraft": is_draft, "body": body}
+            )
+            seen_numbers.add(number)
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, Mapping):
+            raise TypeError("open pull requests pageInfo must be an object")
+        has_next_page = page_info.get("hasNextPage")
+        if has_next_page is False:
+            return pull_requests
+        if has_next_page is not True:
+            raise TypeError("open pull requests hasNextPage must be a boolean")
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise TypeError("open pull requests endCursor must be a unique string")
+        seen_cursors.add(cursor)
+
+
+def closing_target_capacity_errors(
+    *,
+    repository: str,
+    current_pull_request: int,
+    referenced_issues: Sequence[issue_contract.Issue],
+    open_pull_requests: Sequence[Mapping[str, object]],
+) -> list[str]:
+    """Keep the normal closing-PR flow within GitHub's 256-target limit."""
+
+    errors: list[str] = []
+    for issue in referenced_issues:
+        non_draft_targets = 0
+        for pull_request in open_pull_requests:
+            number = pull_request.get("number")
+            is_draft = pull_request.get("isDraft")
+            body = pull_request.get("body")
+            if type(number) is not int or number < 1:
+                raise TypeError("open pull request number must be a positive integer")
+            if not isinstance(is_draft, bool):
+                raise TypeError("open pull request isDraft must be a boolean")
+            if not isinstance(body, str):
+                raise TypeError("open pull request body must be a string")
+            if number == current_pull_request or is_draft:
+                continue
+            if issue.number in issue_contract.closing_issue_numbers(body, repository):
+                non_draft_targets += 1
+        targets = non_draft_targets + 1
+        if targets > _MAX_CLOSING_ISSUE_TARGETS:
+            errors.append(
+                f"Issue #{issue.number}のclosing PR target数が{_MAX_CLOSING_ISSUE_TARGETS}を超えます: {targets}"
+            )
+    return errors
+
+
+def _final_review_evidence_is_fresh(
+    reviews: Sequence[Mapping[str, object]],
+    reactions: Mapping[int, Sequence[Mapping[str, object]]],
+    review_bot: str,
+    head: str,
+    comment: Mapping[str, object],
+    issue_updated_at: datetime | None,
+) -> bool:
+    """Require final completion evidence after both its marker and Issue edits."""
+
+    marker_time = _marker_updated_time(comment)
+    if marker_time is None:
+        return False
+    freshness_floor = max(
+        marker_time,
+        issue_updated_at or marker_time,
+    )
+    review_times = _review_completion_times(
+        reviews, review_bot, head, _marker_updated_at(comment)
+    )
+    if any(submitted_at > freshness_floor for submitted_at in review_times):
+        return True
+    reaction_time = _bot_plus_one_time(
+        comment, reactions, review_bot, comment["created_at"]
+    )
+    return reaction_time is not None and reaction_time > freshness_floor
 
 
 def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[tuple[str, str, Mapping[str, object]]]:
@@ -226,6 +455,7 @@ def readiness_errors(
     reactions: Mapping[int, Sequence[Mapping[str, object]]],
     review_bot: str,
     require_draft: bool,
+    referenced_issues: Sequence[issue_contract.Issue] = (),
 ) -> list[str]:
     """Return every unmet PR readiness condition without changing GitHub state."""
 
@@ -287,6 +517,10 @@ def readiness_errors(
             raise TypeError("review must be an object")
         typed_reviews.append(review)
 
+    issue_updated_at = _latest_issue_updated_time(referenced_issues)
+    if referenced_issues and issue_updated_at is None:
+        errors.append("参照Issue snapshotのupdated_atが不正です")
+
     markers = _review_markers(comments)
     initial_markers = [marker for marker in markers if marker[0] == "initial"]
     final_markers = [marker for marker in markers if marker[0] == "final"]
@@ -336,21 +570,17 @@ def readiness_errors(
     elif not current_final_markers:
         errors.append("final review marker が最新HEADを指していません")
     elif not any(
-        _review_is_for(
+        _final_review_evidence_is_fresh(
             typed_reviews,
-            review_bot,
-            head,
-            _marker_updated_at(comment),
-        )
-        or _bot_plus_one(
-            comment,
             reactions,
             review_bot,
-            comment["created_at"],
+            head,
+            comment,
+            issue_updated_at,
         )
         for _phase, _marker_head, comment in current_final_markers
     ):
-        errors.append("final review に review bot の完了記録がありません")
+        errors.append("final review に参照Issue更新後の review bot 完了記録がありません")
 
     return errors
 
@@ -398,6 +628,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
     owner, name = repository.split("/", maxsplit=1)
     threads: list[dict[str, object]] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         arguments = [
             "api",
@@ -415,6 +646,8 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
             arguments.extend(("-F", f"cursor={cursor}"))
         payload = _gh_json(*arguments)
         connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+        if not isinstance(connection, Mapping):
+            raise TypeError("reviewThreads must be an object")
         nodes = connection["nodes"]
         if not isinstance(nodes, list):
             raise TypeError("reviewThreads nodes must be an array")
@@ -438,11 +671,17 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
                 node = {**node, "comments": comment_nodes}
             threads.append(node)
         page_info = connection["pageInfo"]
-        if not page_info["hasNextPage"]:
+        if not isinstance(page_info, Mapping):
+            raise TypeError("reviewThreads pageInfo must be an object")
+        has_next_page = page_info.get("hasNextPage")
+        if has_next_page is False:
             return threads
-        cursor = page_info["endCursor"]
-        if not isinstance(cursor, str):
+        if has_next_page is not True:
+            raise TypeError("reviewThreads hasNextPage must be a boolean")
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise TypeError("reviewThreads endCursor must be a string")
+        seen_cursors.add(cursor)
 
 
 def _reviews(repository: str, pull_request: int) -> list[dict[str, object]]:
@@ -463,6 +702,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
     owner, name = repository.split("/", maxsplit=1)
     reviews: list[dict[str, object]] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         arguments = [
             "api",
@@ -480,6 +720,8 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
             arguments.extend(("-F", f"cursor={cursor}"))
         payload = _gh_json(*arguments)
         connection = payload["data"]["repository"]["pullRequest"]["reviews"]
+        if not isinstance(connection, Mapping):
+            raise TypeError("reviews must be an object")
         nodes = connection["nodes"]
         if not isinstance(nodes, list):
             raise TypeError("reviews nodes must be an array")
@@ -490,11 +732,15 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
         page_info = connection["pageInfo"]
         if not isinstance(page_info, Mapping):
             raise TypeError("reviews pageInfo must be an object")
-        if page_info.get("hasNextPage") is False:
+        has_next_page = page_info.get("hasNextPage")
+        if has_next_page is False:
             return reviews
+        if has_next_page is not True:
+            raise TypeError("reviews hasNextPage must be a boolean")
         cursor = page_info.get("endCursor")
-        if not isinstance(cursor, str) or not cursor:
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise TypeError("reviews endCursor must be a string")
+        seen_cursors.add(cursor)
 
 
 def _paginated_api_array(endpoint: str) -> list[dict[str, object]]:
@@ -553,8 +799,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--repo",
         repository,
         "--json",
-        "isDraft,headRefOid,statusCheckRollup,reviews,author",
+        "isDraft,baseRefOid,headRefOid,body,statusCheckRollup,reviews,author",
     )
+    if not isinstance(pull_request, dict):
+        raise TypeError("pull request response must be an object")
     current_reviews = pull_request.get("reviews")
     if not isinstance(current_reviews, list):
         raise TypeError("pull request reviews must be an array")
@@ -567,13 +815,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     threads = _review_threads(repository, arguments.pr)
     reactions = _comment_reactions(repository, comments)
-    errors = readiness_errors(
-        pull_request,
-        threads,
-        comments,
-        reactions,
-        review_bot="chatgpt-codex-connector",
-        require_draft=arguments.require_draft,
+    base = pull_request.get("baseRefOid")
+    head = pull_request.get("headRefOid")
+    if not isinstance(base, str) or not isinstance(head, str):
+        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    referenced_issues = issue_contract.referenced_issue_snapshot(
+        repository=repository,
+        base_sha=base,
+        head_sha=head,
+    )
+    errors = closing_reference_errors(
+        repository=repository,
+        body=pull_request.get("body"),
+        referenced_issues=referenced_issues,
+    )
+    if referenced_issues and not errors:
+        errors.extend(
+            closing_target_capacity_errors(
+                repository=repository,
+                current_pull_request=arguments.pr,
+                referenced_issues=referenced_issues,
+                open_pull_requests=_open_pull_requests(repository),
+            )
+        )
+    errors.extend(
+        readiness_errors(
+            pull_request,
+            threads,
+            comments,
+            reactions,
+            review_bot="chatgpt-codex-connector",
+            require_draft=arguments.require_draft,
+            referenced_issues=referenced_issues,
+        )
     )
     if errors:
         for error in errors:
