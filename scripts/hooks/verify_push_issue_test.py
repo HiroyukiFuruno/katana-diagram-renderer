@@ -80,6 +80,37 @@ class VerifyPushIssueTest(unittest.TestCase):
             ),
         )
 
+    def test_name_status_paths_keeps_normal_rename_and_copy_paths(self) -> None:
+        paths = subject.parse_name_status_paths(
+            "M\0src/main.rs\0"
+            "R100\0Cargo.lock\0renamed.txt\0"
+            "C075\0Cargo.toml\0fixtures/Cargo.toml\0"
+        )
+        self.assertEqual(
+            paths,
+            [
+                "src/main.rs",
+                "Cargo.lock",
+                "renamed.txt",
+                "Cargo.toml",
+                "fixtures/Cargo.toml",
+            ],
+        )
+
+    def test_name_status_paths_rejects_malformed_or_truncated_records(self) -> None:
+        for raw in (
+            "M\0src/main.rs",
+            "R100\0Cargo.lock\0",
+            "C\0Cargo.lock\0renamed.txt\0",
+            "R101\0Cargo.lock\0renamed.txt\0",
+            "M100\0Cargo.lock\0",
+            "Z\0unknown\0",
+            "A\0\0",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(subject.ContractViolation):
+                    subject.parse_name_status_paths(raw)
+
     def test_remote_name_with_distinct_fetch_and_push_url_uses_push_url(self) -> None:
         fetch_url = "https://github.com/example/fetch-only.git"
         push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
@@ -230,6 +261,13 @@ class VerifyPushIssueTest(unittest.TestCase):
     def test_lockfile_only_transitive_update_still_requires_dependency_evidence(self) -> None:
         with self.assertRaisesRegex(subject.ContractViolation, "依存更新証跡"):
             self.validate(changed_paths=["Cargo.lock"])
+
+    def test_renamed_lockfile_requires_dependency_evidence_for_its_old_path(self) -> None:
+        changed_paths = subject.parse_name_status_paths(
+            "R100\0Cargo.lock\0renamed.txt\0"
+        )
+        with self.assertRaisesRegex(subject.ContractViolation, "依存更新証跡"):
+            self.validate(changed_paths=changed_paths)
 
     def test_dependency_issue_requires_all_evidence_fields(self) -> None:
         body = """## 依存更新証跡

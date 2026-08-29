@@ -34,6 +34,7 @@ _SHORT_ISSUE_PATTERN = re.compile(r"(?<![\w/])#(?P<number>[1-9]\d*)\b")
 _ZERO_SHA = "0" * 40
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
+_NAME_STATUS_PATTERN = re.compile(r"^(?P<kind>[ACDMRTUXB])(?P<score>\d{1,3})?$")
 _PR_FILES_PAGE_SIZE = 100
 _PR_FILES_MAX_PAGES = 30
 _WORKFLOW_DIRECTORY_PREFIX = ".github/workflows/"
@@ -174,6 +175,43 @@ def dependency_contract_paths(paths: Sequence[str]) -> tuple[list[str], list[str
         if path.name in _LOCKFILE_NAMES:
             lockfiles.add(raw_path)
     return sorted(manifests), sorted(lockfiles)
+
+
+def parse_name_status_paths(raw: str) -> list[str]:
+    """Collect every changed path from `git diff --name-status -z` output."""
+    if not raw:
+        return []
+    if not raw.endswith("\0"):
+        raise ContractViolation("git diff --name-status -z outputが途中で切れています")
+    fields = raw.split("\0")[:-1]
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        match = _NAME_STATUS_PATTERN.fullmatch(status)
+        if match is None:
+            raise ContractViolation(f"git diff statusが不正です: {status!r}")
+        kind = match.group("kind")
+        score = match.group("score")
+        if kind in {"R", "C"}:
+            if score is None or int(score) > 100:
+                raise ContractViolation(
+                    f"git diff {kind} statusのrename/copy scoreが不正です"
+                )
+            required_paths = 2
+        else:
+            if score is not None:
+                raise ContractViolation(f"git diff {kind} statusに不要なscoreがあります")
+            required_paths = 1
+        if len(fields) - index < required_paths:
+            raise ContractViolation("git diff --name-status -z recordが途中で切れています")
+        record_paths = fields[index : index + required_paths]
+        index += required_paths
+        if any(not path for path in record_paths):
+            raise ContractViolation("git diff --name-status -z pathが空です")
+        paths.extend(record_paths)
+    return paths
 
 
 def dependency_evidence_errors(
@@ -760,10 +798,14 @@ def main() -> int:
             changed_output = _run_git(
                 repository,
                 "diff",
-                "--name-only",
+                "--name-status",
+                "-z",
+                "--find-renames",
+                "--find-copies",
+                "--find-copies-harder",
                 f"{default_ref}...{target_revision}",
             )
-            changed_paths = [path for path in changed_output.splitlines() if path]
+            changed_paths = parse_name_status_paths(changed_output)
             for message in commit_messages:
                 all_references.update(issue_numbers(message, repository_name))
 
