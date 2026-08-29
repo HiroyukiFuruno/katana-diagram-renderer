@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -14,6 +15,164 @@ import verify_push_issue as subject
 
 
 class VerifyPushIssueTest(unittest.TestCase):
+    def test_parse_push_updates_rejects_nonempty_malformed_lines(self) -> None:
+        with self.assertRaises(subject.ContractViolation):
+            subject.parse_push_updates("refs/heads/topic deadbeef\n")
+
+    def test_parse_push_updates_accepts_whitespace_only_input_as_empty(self) -> None:
+        self.assertEqual(subject.parse_push_updates(" \n\t\n"), ())
+
+    def test_parse_push_updates_rejects_non_forty_hex_sha(self) -> None:
+        with self.assertRaises(subject.ContractViolation):
+            subject.parse_push_updates(
+                f"refs/heads/topic {'0123456789abcdef0123456789abcdef0123456g'} "
+                f"refs/heads/topic {'0' * 40}\n"
+            )
+
+    def test_parse_push_updates_rejects_invalid_local_or_remote_refs(self) -> None:
+        for local_ref, remote_ref in (
+            ("topic", "refs/heads/topic"),
+            ("refs/heads/topic", "refs/heads/"),
+            ("refs/heads/topic space", "refs/heads/topic"),
+        ):
+            with self.subTest(local_ref=local_ref, remote_ref=remote_ref):
+                with self.assertRaises(subject.ContractViolation):
+                    subject.parse_push_updates(
+                        f"{local_ref} {'1' * 40} {remote_ref} {'2' * 40}\n"
+                    )
+
+    def test_parse_push_updates_accepts_delete_marker_and_skips_deleted_branch(self) -> None:
+        updates = subject.parse_push_updates(
+            f"(delete) {'0' * 40} refs/heads/obsolete {'1' * 40}\n"
+        )
+        self.assertEqual(
+            subject.pushed_branch_updates(updates, default_branch="master"),
+            (),
+        )
+
+    def test_parse_push_updates_accepts_revision_expression_as_local_ref(self) -> None:
+        local_sha = "1" * 40
+        remote_sha = "0" * 40
+        self.assertEqual(
+            subject.parse_push_updates(
+                f"HEAD~ {local_sha} refs/heads/topic {remote_sha}\n"
+            ),
+            (("HEAD~", local_sha, "refs/heads/topic", remote_sha),),
+        )
+
+    def test_parse_push_updates_accepts_object_id_and_revspec_local_refs(self) -> None:
+        local_sha = "1" * 40
+        remote_sha = "0" * 40
+        updates = subject.parse_push_updates(
+            "\n".join(
+                (
+                    f"{'a' * 40} {local_sha} refs/heads/topic {remote_sha}",
+                    f"feature~2 {local_sha} refs/heads/other {remote_sha}",
+                )
+            )
+            + "\n"
+        )
+        self.assertEqual(
+            updates,
+            (
+                ("a" * 40, local_sha, "refs/heads/topic", remote_sha),
+                ("feature~2", local_sha, "refs/heads/other", remote_sha),
+            ),
+        )
+
+    def test_remote_name_with_distinct_fetch_and_push_url_uses_push_url(self) -> None:
+        fetch_url = "https://github.com/example/fetch-only.git"
+        push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("remote", "get-url", "origin"):
+                return fetch_url
+            if arguments == ("remote", "get-url", "--push", "origin"):
+                return push_url
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        with patch.object(subject, "_run_git", side_effect=run_git):
+            self.assertEqual(
+                subject._remote_for_push(
+                    Path("/tmp/repository"),
+                    remote_name="origin",
+                    remote_url=push_url,
+                    fallback_branch=None,
+                ),
+                ("origin", push_url),
+            )
+
+    def test_push_url_reverse_resolves_to_configured_remote(self) -> None:
+        push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("remote",):
+                return "origin\n"
+            if arguments == ("remote", "get-url", "--push", "origin"):
+                return push_url
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        with patch.object(subject, "_run_git", side_effect=run_git):
+            self.assertEqual(
+                subject._remote_for_push(
+                    Path("/tmp/repository"),
+                    remote_name=push_url,
+                    remote_url=push_url,
+                    fallback_branch=None,
+                ),
+                ("origin", push_url),
+            )
+
+    def test_mismatched_remote_name_and_push_url_fails_closed(self) -> None:
+        fetch_url = "https://github.com/example/fetch-only.git"
+        other_push_url = "https://github.com/example/other.git"
+        requested_push_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("remote", "get-url", "origin"):
+                return fetch_url
+            if arguments == ("remote", "get-url", "--push", "origin"):
+                return other_push_url
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        with patch.object(subject, "_run_git", side_effect=run_git):
+            with self.assertRaises(subject.ContractViolation):
+                subject._remote_for_push(
+                    Path("/tmp/repository"),
+                    remote_name="origin",
+                    remote_url=requested_push_url,
+                    fallback_branch=None,
+                )
+
+    def test_python_39_compatibility_contract_is_present_and_help_starts(self) -> None:
+        source = Path(subject.__file__).read_text(encoding="utf-8")
+        self.assertIn("from __future__ import annotations", source)
+        python39 = Path("/usr/bin/python3")
+        if python39.exists():
+            result = subprocess.run(
+                [str(python39), str(Path(subject.__file__)), "--help"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pushed_branch_updates_keeps_multiple_branches_and_skips_delete_default_and_tag(
+        self,
+    ) -> None:
+        updates = subject.pushed_branch_updates(
+            (
+                ("refs/heads/feature-a", "a" * 40, "refs/heads/feature-a", "0" * 40),
+                ("refs/heads/feature-b", "b" * 40, "refs/heads/feature-b", "0" * 40),
+                ("refs/heads/master", "c" * 40, "refs/heads/master", "0" * 40),
+                ("refs/heads/deleted", "0" * 40, "refs/heads/deleted", "d" * 40),
+                ("refs/tags/v1", "e" * 40, "refs/tags/v1", "0" * 40),
+                ("refs/heads/feature-a", "a" * 40, "refs/heads/feature-a", "0" * 40),
+            ),
+            default_branch="master",
+        )
+        self.assertEqual(updates, (("feature-a", "a" * 40), ("feature-b", "b" * 40)))
+
     def issue(
         self,
         number: int = 64,
@@ -148,6 +307,76 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
             self.assertEqual(subject.branch_remote(repository, "feature/new"), "origin")
 
+    def test_cli_remote_option_uses_selected_remote_repository_and_default_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            binary_directory = root / "bin"
+            repository.mkdir()
+            binary_directory.mkdir()
+
+            def git(*arguments: str) -> str:
+                result = subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+
+            git("init", "--initial-branch=master")
+            git("config", "user.name", "Issue Contract Test")
+            git("config", "user.email", "issue@example.com")
+            (repository / "base.txt").write_text("base\n", encoding="utf-8")
+            git("add", "base.txt")
+            git("commit", "-m", "initial")
+            base_sha = git("rev-parse", "HEAD")
+            git(
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/wrong-repository.git",
+            )
+            git(
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+            )
+            git("update-ref", "refs/remotes/upstream/master", base_sha)
+            git("symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/master")
+            git("update-ref", "refs/remotes/origin/master", base_sha)
+            git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+            git("switch", "-c", "topic")
+            (repository / "topic.txt").write_text("topic\n", encoding="utf-8")
+            git("add", "topic.txt")
+            git("commit", "-m", "feat: contract", "-m", "Refs #64")
+            topic_sha = git("rev-parse", "HEAD")
+            fake_gh = binary_directory / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "test \"$5\" = \"HiroyukiFuruno/katana-render-runtime\" || exit 21\n"
+                "printf '%s\\n' "
+                "'{\"number\":64,\"state\":\"OPEN\",\"body\":\"Issue body\","
+                "\"url\":\"https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64\"}'\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            result = subprocess.run(
+                [sys.executable, str(Path(subject.__file__)), "--remote", "upstream"],
+                cwd=repository,
+                env=environment,
+                input=f"refs/heads/topic {topic_sha} refs/heads/topic {'0' * 40}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("issues=#64", result.stdout)
+
     def test_cli_validates_the_first_push_of_a_new_branch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -252,6 +481,349 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("issues=#64", result.stdout)
+
+    def test_cli_validates_the_pushed_topic_while_master_is_checked_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            commands = [
+                ["git", "init", "--initial-branch=master"],
+                ["git", "config", "user.name", "Issue Contract Test"],
+                ["git", "config", "user.email", "issue@example.com"],
+            ]
+            for command in commands:
+                subprocess.run(
+                    command,
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            (repository / "base.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "base.txt"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "initial"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+                ],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/master",
+                ],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "switch", "-c", "topic"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (repository / "topic.txt").write_text("topic\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "topic.txt"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "feat: missing Issue reference"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            topic_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "switch", "master"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            push_update = (
+                f"refs/heads/topic {topic_sha} refs/heads/topic {'0' * 40}\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(Path(subject.__file__))],
+                cwd=repository,
+                input=push_update,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Issue参照", result.stderr)
+
+    def test_cli_validates_push_update_from_detached_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            binary_directory = root / "bin"
+            repository.mkdir()
+            binary_directory.mkdir()
+
+            def git(*arguments: str) -> str:
+                result = subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+
+            git("init", "--initial-branch=master")
+            git("config", "user.name", "Issue Contract Test")
+            git("config", "user.email", "issue@example.com")
+            (repository / "base.txt").write_text("base\n", encoding="utf-8")
+            git("add", "base.txt")
+            git("commit", "-m", "initial")
+            base_sha = git("rev-parse", "HEAD")
+            git(
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+            )
+            git("update-ref", "refs/remotes/origin/master", base_sha)
+            git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+            git("switch", "-c", "topic")
+            (repository / "topic.txt").write_text("topic\n", encoding="utf-8")
+            git("add", "topic.txt")
+            git("commit", "-m", "feat: detached push", "-m", "Refs #64")
+            topic_sha = git("rev-parse", "HEAD")
+            git("switch", "--detach", base_sha)
+            fake_gh = binary_directory / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'{\"number\":64,\"state\":\"OPEN\",\"body\":\"Issue body\","
+                "\"url\":\"https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64\"}'\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            result = subprocess.run(
+                [sys.executable, str(Path(subject.__file__))],
+                cwd=repository,
+                env=environment,
+                input=f"refs/heads/topic {topic_sha} refs/heads/topic {'0' * 40}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("issues=#64", result.stdout)
+
+    def test_cli_accepts_remote_name_and_url_as_pre_push_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            binary_directory = root / "bin"
+            repository.mkdir()
+            binary_directory.mkdir()
+
+            def git(*arguments: str) -> str:
+                result = subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+
+            git("init", "--initial-branch=master")
+            git("config", "user.name", "Issue Contract Test")
+            git("config", "user.email", "issue@example.com")
+            (repository / "base.txt").write_text("base\n", encoding="utf-8")
+            git("add", "base.txt")
+            git("commit", "-m", "initial")
+            base_sha = git("rev-parse", "HEAD")
+            remote_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+            git("remote", "add", "origin", remote_url)
+            git("update-ref", "refs/remotes/origin/master", base_sha)
+            git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+            git("switch", "-c", "topic")
+            (repository / "topic.txt").write_text("topic\n", encoding="utf-8")
+            git("add", "topic.txt")
+            git("commit", "-m", "feat: url push", "-m", "Refs #64")
+            topic_sha = git("rev-parse", "HEAD")
+            fake_gh = binary_directory / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'{\"number\":64,\"state\":\"OPEN\",\"body\":\"Issue body\","
+                "\"url\":\"https://github.com/HiroyukiFuruno/katana-render-runtime/issues/64\"}'\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(subject.__file__)),
+                    "--remote",
+                    remote_url,
+                    "--remote-url",
+                    remote_url,
+                ],
+                cwd=repository,
+                env=environment,
+                input=f"refs/heads/topic {topic_sha} refs/heads/topic {'0' * 40}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("issues=#64", result.stdout)
+
+    def test_cli_skips_tag_only_push_while_topic_is_checked_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            commands = [
+                ["git", "init", "--initial-branch=master"],
+                ["git", "config", "user.name", "Issue Contract Test"],
+                ["git", "config", "user.email", "issue@example.com"],
+            ]
+            for command in commands:
+                subprocess.run(
+                    command,
+                    cwd=repository,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            (repository / "base.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "base.txt"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "initial"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+                ],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/master",
+                ],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "switch", "-c", "topic"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (repository / "topic.txt").write_text("topic\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "topic.txt"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "feat: missing Issue reference"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            topic_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            result = subprocess.run(
+                [sys.executable, str(Path(subject.__file__))],
+                cwd=repository,
+                input=(
+                    f"refs/tags/v0.0.0 {topic_sha} "
+                    f"refs/tags/v0.0.0 {'0' * 40}\n"
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Issue contract skipped", result.stdout)
 
 
 if __name__ == "__main__":

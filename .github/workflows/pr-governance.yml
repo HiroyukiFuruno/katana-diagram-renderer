@@ -1,0 +1,164 @@
+name: PR governance publisher
+
+on:
+  # Governance must execute the trusted base workflow and verifier.  Running a
+  # `pull_request` workflow would execute the PR merge ref, letting a PR edit
+  # the gate that is meant to decide whether that PR is mergeable.
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+  # `@codex review` is an issue comment, not a review-diff comment.  This
+  # event is also evaluated from the default branch, so no PR code is run.
+  issue_comment:
+    types:
+      - created
+      - edited
+      - deleted
+  # Do not add pull_request_review or pull_request_review_comment here.  Those
+  # events execute the PR merge-ref workflow; with a status-writing credential,
+  # a PR could alter that workflow and forge this trusted context.  Ready
+  # conversion and the marker issue_comment event re-evaluate current state.
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: pr-governance-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  pr-governance:
+    name: Publish trusted governance status
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event.issue.pull_request.url != ''
+    environment: pr-governance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve trusted base SHA
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+          head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          draft="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft')"
+          if [[ ! "${base_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${head_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            exit 1
+          fi
+          case "${draft}" in
+            true|false) ;;
+            *)
+              echo "Invalid draft state returned for pull request ${PR_NUMBER}." >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "base_sha=${base_sha}"
+            echo "head_sha=${head_sha}"
+            echo "draft=${draft}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Create scoped governance App token
+        id: governance-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-statuses: write
+
+      - name: Publish pending governance state
+        env:
+          GH_TOKEN: ${{ steps.governance-token.outputs.token }}
+          HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state=pending \
+            -f context='KRR / PR governance (trusted)' \
+            -f description='Trusted PR governance is running.' \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+
+      - name: Check out trusted base repository
+        id: checkout-base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pull-request.outputs.base_sha }}
+
+      - name: Verify PR readiness
+        id: verify
+        if: steps.pull-request.outputs.draft == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set +e
+          verified_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          head_exit=$?
+          if [[ "${head_exit}" -eq 0 ]]; then
+            python3 scripts/review/verify_pr_ready.py \
+              --pr "${PR_NUMBER}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --allow-ready
+            verification_exit=$?
+          else
+            verification_exit="${head_exit}"
+          fi
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          current_head_exit=$?
+          if [[ "${current_head_exit}" -ne 0 ]]; then
+            verification_exit="${current_head_exit}"
+            current_head="${verified_head}"
+          fi
+          {
+            echo "exit_code=${verification_exit}"
+            echo "verified_head=${verified_head}"
+            echo "current_head=${current_head}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Publish final governance state
+        if: always() && steps.pull-request.outcome == 'success' && steps.governance-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.governance-token.outputs.token }}
+          HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}
+          DRAFT: ${{ steps.pull-request.outputs.draft }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout-base.outcome }}
+          VERIFICATION_EXIT: ${{ steps.verify.outputs.exit_code || '1' }}
+          VERIFIED_HEAD: ${{ steps.verify.outputs.verified_head }}
+          CURRENT_HEAD: ${{ steps.verify.outputs.current_head }}
+        run: |
+          if [[ "${CHECKOUT_OUTCOME}" != success ]]; then
+            state=failure
+            description='Trusted base checkout failed.'
+            final_exit=1
+          elif [[ "${DRAFT}" == true ]]; then
+            state=pending
+            description='Draft PR governance remains pending.'
+            final_exit=0
+          elif [[ "${VERIFICATION_EXIT}" -ne 0 ]]; then
+            state=failure
+            description='Trusted PR governance failed.'
+            final_exit="${VERIFICATION_EXIT}"
+          elif [[ "${VERIFIED_HEAD}" != "${CURRENT_HEAD}" ]] || [[ "${CURRENT_HEAD}" != "${HEAD_SHA}" ]]; then
+            state=pending
+            description='PR head changed; trusted governance will rerun.'
+            final_exit=0
+          else
+            state=success
+            description='Trusted PR governance passed.'
+            final_exit=0
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="${state}" \
+            -f context='KRR / PR governance (trusted)' \
+            -f description="${description}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+          exit "${final_exit}"

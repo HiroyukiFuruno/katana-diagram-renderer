@@ -20,7 +20,8 @@ pre-push:
   parallel: false
   commands:
     dispatch:
-      run: bash scripts/hooks/pre-push.sh
+      run: bash scripts/hooks/pre-push.sh "{1}" "{2}"
+      use_stdin: true
 
 pre-pr:
   commands:

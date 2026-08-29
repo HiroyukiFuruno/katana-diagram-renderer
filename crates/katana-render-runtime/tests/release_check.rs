@@ -259,6 +259,337 @@ fn release_workflow_runs_safe_cleanup_after_crates_publish()
 }
 
 #[test]
+fn pull_requests_require_draft_review_completion_before_ready()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root()?;
+    assert_agent_pr_review_contract(root)?;
+    assert_primary_pr_skill_contracts(root)?;
+    assert_governed_skill_contracts(root)?;
+    assert_pr_ready_recipe_contract(root)?;
+    assert_governance_workflow_contract(root)?;
+    Ok(())
+}
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[derive(Debug)]
+enum RequiredTerm {
+    Exact(&'static str),
+    Alternatives(&'static [&'static str]),
+}
+
+impl RequiredTerm {
+    fn is_present(&self, text: &str) -> bool {
+        self.first_position_at_or_after(text, 0).is_some()
+    }
+
+    fn first_position_at_or_after(&self, text: &str, start: usize) -> Option<(usize, usize)> {
+        match self {
+            Self::Exact(term) => text[start..]
+                .find(term)
+                .map(|offset| (start + offset, term.len())),
+            Self::Alternatives(terms) => terms
+                .iter()
+                .filter_map(|term| {
+                    text[start..]
+                        .find(term)
+                        .map(|offset| (start + offset, term.len()))
+                })
+                .min_by_key(|(position, _)| *position),
+        }
+    }
+}
+
+struct SkillContract {
+    path: &'static str,
+    required_terms: &'static [RequiredTerm],
+    promotes_ready: bool,
+}
+
+const PRIMARY_SKILL_ORDER: &[RequiredTerm] = &[
+    RequiredTerm::Exact("gh pr create --draft"),
+    RequiredTerm::Exact("krr-review phase=initial"),
+    RequiredTerm::Exact("krr-review phase=final"),
+    RequiredTerm::Exact("pr-ready-check"),
+    RequiredTerm::Exact("gh pr ready"),
+];
+
+const READY_PROMOTION_ORDER: &[RequiredTerm] = &[
+    RequiredTerm::Exact("Draft"),
+    RequiredTerm::Exact("initial"),
+    RequiredTerm::Exact("final"),
+    RequiredTerm::Exact("pr-ready-check"),
+    RequiredTerm::Exact("gh pr ready"),
+];
+
+const SKILL_CONTRACTS: &[SkillContract] = &[
+    SkillContract {
+        path: ".codex/skills/commit_and_push/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("pr-ready-check"),
+        ],
+        promotes_ready: false,
+    },
+    SkillContract {
+        path: ".codex/skills/create_pull_request/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("initial"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("pr-ready-check"),
+            RequiredTerm::Exact("Ready"),
+        ],
+        promotes_ready: true,
+    },
+    SkillContract {
+        path: ".codex/skills/impl-release/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("initial"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("pr-ready-check"),
+            RequiredTerm::Exact("Ready"),
+        ],
+        promotes_ready: true,
+    },
+    SkillContract {
+        path: ".codex/skills/kdr-workflow-guide/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("initial"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("pr-ready-check"),
+            RequiredTerm::Exact("Ready"),
+        ],
+        promotes_ready: true,
+    },
+    SkillContract {
+        path: ".codex/skills/self-review/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("initial"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("pr-ready-check"),
+        ],
+        promotes_ready: false,
+    },
+    SkillContract {
+        path: ".codex/skills/gh-address-comments/SKILL.md",
+        required_terms: &[
+            RequiredTerm::Exact("Draft"),
+            RequiredTerm::Exact("subagent"),
+            RequiredTerm::Alternatives(&["reply", "返信"]),
+            RequiredTerm::Alternatives(&["resolve", "解決"]),
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("pr-ready-check"),
+        ],
+        promotes_ready: false,
+    },
+];
+
+fn assert_agent_pr_review_contract(root: &Path) -> TestResult {
+    let agents = std::fs::read_to_string(root.join("AGENTS.md"))?;
+    for required in [
+        "Draft",
+        "review thread",
+        "Ready",
+        "司令塔",
+        "空き枠",
+        "利用不可",
+    ] {
+        assert!(
+            agents.contains(required),
+            "AGENTS.md must require {required} in the PR review gate"
+        );
+    }
+    Ok(())
+}
+
+fn assert_primary_pr_skill_contracts(root: &Path) -> TestResult {
+    for path in [
+        ".codex/skills/create_pull_request/SKILL.md",
+        ".codex/skills/impl-release/SKILL.md",
+    ] {
+        let skill = std::fs::read_to_string(root.join(path))?;
+        assert_in_order(&skill, PRIMARY_SKILL_ORDER)?;
+        assert_unresolved_threads_are_required(&skill, path);
+    }
+    Ok(())
+}
+
+fn assert_unresolved_threads_are_required(skill: &str, path: &str) {
+    assert!(
+        ["未resolve", "未 resolve", "未解決"]
+            .iter()
+            .any(|term| skill.contains(term)),
+        "{path} must require resolved review threads"
+    );
+}
+
+fn assert_governed_skill_contracts(root: &Path) -> TestResult {
+    for contract in SKILL_CONTRACTS {
+        let skill = std::fs::read_to_string(root.join(contract.path))?;
+        assert_hyphen_case_frontmatter(&skill, contract.path)?;
+        assert_required_terms(&skill, contract)?;
+        assert_ready_promotion_boundary(&skill, contract)?;
+    }
+    Ok(())
+}
+
+fn assert_hyphen_case_frontmatter(skill: &str, path: &str) -> TestResult {
+    let name = frontmatter_name(skill).ok_or("skill frontmatter name is missing")?;
+    assert!(
+        name.chars()
+            .all(|character| character.is_ascii_lowercase() || character == '-'),
+        "skill frontmatter name must be hyphen-case: {path}"
+    );
+    Ok(())
+}
+
+fn assert_required_terms(skill: &str, contract: &SkillContract) -> TestResult {
+    for required in contract.required_terms {
+        assert!(
+            required.is_present(skill),
+            "{} must contain {required:?}",
+            contract.path
+        );
+    }
+    Ok(())
+}
+
+fn assert_ready_promotion_boundary(skill: &str, contract: &SkillContract) -> TestResult {
+    if contract.promotes_ready {
+        assert!(
+            skill.contains("gh pr ready"),
+            "{} must own Ready promotion",
+            contract.path
+        );
+        assert_in_order(skill, READY_PROMOTION_ORDER)?;
+    } else {
+        assert!(
+            !skill.contains("gh pr ready"),
+            "{} must not promote Ready",
+            contract.path
+        );
+        assert!(
+            skill.contains("Ready"),
+            "{} must describe the Ready boundary",
+            contract.path
+        );
+        assert_in_order(skill, contract.required_terms)?;
+    }
+    Ok(())
+}
+
+fn assert_pr_ready_recipe_contract(root: &Path) -> TestResult {
+    let justfile = std::fs::read_to_string(root.join("Justfile"))?;
+    let ready_check = recipe_body(&justfile, "pr-ready-check")?;
+    let automation = recipe_body(&justfile, "automation-contract-test")?;
+    assert!(ready_check.contains("scripts/review/verify_pr_ready.py"));
+    assert!(ready_check.contains("--require-draft"));
+    assert!(automation.contains("unittest discover -s scripts/review"));
+    Ok(())
+}
+
+fn assert_governance_workflow_contract(root: &Path) -> TestResult {
+    let governance = std::fs::read_to_string(root.join(".github/workflows/pr-governance.yml"))?;
+    assert_governance_trigger_contract(&governance);
+    assert_governance_source_contract(&governance);
+    assert_governance_status_contract(&governance);
+    assert_governance_access_contract(&governance);
+    Ok(())
+}
+
+fn assert_governance_trigger_contract(governance: &str) {
+    assert!(governance.contains("python3 scripts/review/verify_pr_ready.py"));
+    assert!(governance.contains("--allow-ready"));
+    assert!(governance.contains("pull_request_target:"));
+    assert!(governance.contains("issue_comment:"));
+    assert!(
+        !governance
+            .lines()
+            .any(|line| line.trim() == "statuses: write")
+    );
+}
+
+fn assert_governance_source_contract(governance: &str) {
+    assert!(governance.contains("ref: ${{ steps.pull-request.outputs.base_sha }}"));
+    assert!(!governance.contains("ref: ${{ github.event.pull_request.head.sha }}"));
+    assert!(!governance.contains("ref: refs/pull/"));
+    assert!(!governance.contains("github.event.pull_request.merge_commit_sha"));
+}
+
+fn assert_governance_status_contract(governance: &str) {
+    assert!(
+        governance
+            .contains("gh api --method POST \"repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}\"")
+    );
+    for state in ["state=pending", "state=failure", "state=success"] {
+        assert!(
+            governance.contains(state),
+            "trusted governance must publish {state}"
+        );
+    }
+    assert!(governance.contains("KRR / PR governance (trusted)"));
+    assert!(governance.contains("environment: pr-governance"));
+}
+
+fn assert_governance_access_contract(governance: &str) {
+    assert!(
+        governance
+            .contains("actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349")
+    );
+    for required in [
+        "KRR_GOVERNANCE_APP_ID",
+        "KRR_GOVERNANCE_APP_PRIVATE_KEY",
+        "outputs.token",
+        "GH_TOKEN: ${{ steps.",
+        "converted_to_draft",
+        "if: always()",
+    ] {
+        assert!(
+            governance.contains(required),
+            "trusted governance must contain {required}"
+        );
+    }
+}
+
+fn frontmatter_name(skill: &str) -> Option<&str> {
+    let frontmatter = skill.strip_prefix("---\n")?.split_once("\n---")?.0;
+    frontmatter
+        .lines()
+        .find_map(|line| line.strip_prefix("name:").map(str::trim))
+}
+
+fn assert_in_order(text: &str, terms: &[RequiredTerm]) -> TestResult {
+    let mut previous = 0;
+    for required in terms {
+        let (position, length) = required
+            .first_position_at_or_after(text, previous)
+            .ok_or_else(|| format!("required term is missing: {required:?}"))?;
+        previous = position + length;
+    }
+    Ok(())
+}
+
+#[test]
 fn html_platform_prerequisite_and_fallback_policy_is_contractually_documented()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
@@ -392,17 +723,27 @@ fn workspace_root() -> Result<&'static Path, Box<dyn std::error::Error>> {
 }
 
 fn recipe_body<'a>(justfile: &'a str, recipe: &str) -> Result<&'a str, Box<dyn std::error::Error>> {
-    let header = format!("{recipe}:");
-    let line_header = format!("\n{header}");
-    let start = if justfile.starts_with(&header) {
-        0
-    } else {
-        justfile
-            .find(&line_header)
-            .map(|index| index + 1)
-            .ok_or_else(|| format!("{recipe} recipe is missing"))?
-    };
-    let body = &justfile[start + header.len()..];
+    let mut start = None;
+    let mut offset = 0;
+    for line in justfile.split_inclusive('\n') {
+        let header = line.trim_end_matches(['\r', '\n']);
+        let Some((name, _)) = header.split_once(':') else {
+            offset += line.len();
+            continue;
+        };
+        let name = name.trim();
+        let is_recipe = name == recipe
+            || name
+                .strip_prefix(recipe)
+                .is_some_and(|parameters| parameters.starts_with(char::is_whitespace));
+        if is_recipe {
+            start = Some((offset, name.len()));
+            break;
+        }
+        offset += line.len();
+    }
+    let (start, header_len) = start.ok_or_else(|| format!("{recipe} recipe is missing"))?;
+    let body = &justfile[start + header_len + 1..];
     Ok(body.split("\n\n").next().unwrap_or(body))
 }
 

@@ -174,6 +174,7 @@ runtime-package-asset-check:
 automation-contract-test:
     python3 -m unittest discover -s scripts/hooks -p '*_test.py'
     python3 -m unittest discover -s scripts/release -p 'cleanup_release_state_test.py'
+    python3 -m unittest discover -s scripts/review -p '*_test.py'
 
 # Run the local quality gate
 check: fmt-check lint runtime-bundle-check runtime-asset-script-test automation-contract-test unit-test ast-lint dependency-leak biome typecheck runtime-asset-check runtime-package-asset-check runtime-bundle-package-check html-runtime-package-check plantuml-runtime-package-check
@@ -211,6 +212,10 @@ release-openspec-archive:
 
 # Verify release branch readiness before merging
 release-check: release-openspec-archive check coverage release-verify
+
+# Verify pull request readiness before merging
+pr-ready-check PR:
+    python3 scripts/review/verify_pr_ready.py --pr "{{PR}}" --require-draft
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:

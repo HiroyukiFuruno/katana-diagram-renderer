@@ -73,6 +73,22 @@ OpenSpec change 中なら確認します。
 - ユーザーフィードバックは `[/]` として追跡されている。
 - 仕様変更が出た場合、artifact が更新されている。
 
+## 7. PR レビュー接続条件
+
+Self-review の PASS は、外部 cloud review の完了、Ready 化、または merge 準備完了の代替ではありません。Self-review は Draft PR 作成へ進む前提条件としてのみ扱います。
+
+Draft PR 作成後は、必ず次の順序で後続工程へ接続します。cloud review の依頼コメントには、対象 HEAD を追跡できるよう `krr-review phase=initial head=<HEAD_SHA>`（初回）または `krr-review phase=final head=<HEAD_SHA>`（最終）の marker を記録します。
+
+1. Draft PR の対象 HEAD SHA を固定し、`krr-review phase=initial head=<HEAD_SHA>` marker とともに初回 cloud review を依頼する。
+2. 指摘を取得・分類し、分離可能な指摘の修正を subagent へ委譲する。
+3. 各指摘の修正を確認し、review thread へ reply して resolve する。
+4. 指摘がなかった場合や修正による push がなかった場合も省略せず、最新 HEAD SHA に対して `krr-review phase=final head=<HEAD_SHA>` marker 付きで最終 cloud review を依頼する。最終 review は必ず依頼時点の最新 HEAD を対象にする。
+5. `pr-ready-check` で review 完了、未 resolve thread 0、CI / DoD PASS を機械確認する。
+
+最終 cloud review で新規指摘が出た場合は、指摘を subagent へ修正委譲し、修正確認、push、review thread への reply、resolve を行ったうえで、更新後の最新 HEAD SHA に `krr-review phase=final head=<HEAD_SHA>` marker を付けて最終 review を再依頼します。新規指摘がなくなるまでこの手順を反復します。
+
+CI green だけでレビュー完了、Ready 化、または merge 準備完了とは扱いません。
+
 ## 報告形式
 
 ```markdown

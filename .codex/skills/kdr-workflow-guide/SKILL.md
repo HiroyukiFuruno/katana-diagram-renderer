@@ -21,6 +21,11 @@ KDR は Mermaid、Draw.io、ZenUML などの図表描画ランタイムと `kdr`
 4. `/openspec-archive-change`
    - 実装、検証、PR 統合が終わった変更だけ archive へ移す。
 
+OpenSpec の archive は PR が実際に merge された後だけ行います。PR 作成前や
+Draft / Ready の段階では archive へ移しません。リリース作業では
+`/impl-release` の Draft PR、cloud review、`pr-ready-check`、merge 後 archive
+という順序と整合させます。
+
 ## 2. 日常的な実装変更
 
 小さい修正でも、検証なしに進めません。
@@ -65,7 +70,17 @@ KDR の品質ゲートは、描画ランタイム、runtime asset、CLI、crate 
 ## 5. PR 作成
 
 PR を作る前に `/self-review` と必要な品質ゲートを終えます。
-PR 作成は `/create_pull_request` を使い、ベースブランチは現在のブランチ名と作業文脈から決めます。
+PR 作成は `/create_pull_request` に委譲し、Ready PR を直接作成しません。次の状態遷移を厳守します。
+
+1. Draft PR を作成し、`isDraft=true` を機械確認する。
+2. Draft のまま初回 `@codex review`（cloud review）を、コメント本文に `krr-review phase=initial head=<HEAD_SHA>` marker を付けて依頼し、review / thread / コメントを取得・分類する。
+3. 修正が必要な指摘は、対象ファイルまたは責務ごとに重複なく subagent へ並列委譲する。
+4. 各指摘を修正・検証し、該当 thread へ対応内容を reply してから resolve する。
+5. 指摘の有無や修正 push の有無にかかわらず、最新 HEAD に対する最終 cloud review を、コメント本文に `krr-review phase=final head=<HEAD_SHA>` marker を付けて必ず依頼し、結果を取得する。最終 review で新規指摘が出た場合は、対象ごとに subagent で修正・検証し、push、該当 thread への reply / resolve を行った後、更新後の最新 HEAD に `krr-review phase=final head=<HEAD_SHA>` marker を付けて再度 review する。このサイクルを未 resolve thread 0 かつ新規指摘なしになるまで反復する。
+6. 最新 HEAD の review 完了、未 resolve thread 0、CI / DoD PASS を確認し、`just PR=<pr> pr-ready-check` を実行する。
+7. `pr-ready-check` 成功後だけ `gh pr ready` で Ready 化し、ユーザーへ merge 承認を求める。承認前に merge しない。
+
+CI green だけでは review 完了、Ready 化、または merge の条件を満たしません。self-review、lint、テスト、coverage、OpenSpec / DoD、最新 HEAD の cloud review、未 resolve thread 0 を個別に確認します。
 
 ## 6. 持ち込まないもの
 

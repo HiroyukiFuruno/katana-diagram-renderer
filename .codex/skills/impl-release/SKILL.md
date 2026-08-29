@@ -57,29 +57,42 @@ git push -u origin release/vX.Y.Z
 
 `git push --no-verify` は使いません。
 
-## Phase 4: PR 作成と cloud review
+## Phase 4: Draft PR 作成と cloud review
 
-`release/vX.Y.Z` から `master` へ取り込み依頼（Pull Request）を作成します。
-PR 作成前に、対象 version 以前の完了済み OpenSpec change を archive へ移動し、`lefthook run pre-pr` を通します。
+`release/vX.Y.Z` から `master` へ Draft の Pull Request を作成します。対象 version 以前の完了済み OpenSpec change は PR 前に archive へ移動せず、merge 後に移動します。
 
 ```bash
 lefthook run pre-pr
-pr_url="$(gh pr create --base master --head release/vX.Y.Z --title "Prepare vX.Y.Z release" --body-file <pr-body-file>)"
-gh pr comment "${pr_url}" --body '@codex review'
+pr_url="$(gh pr create --draft --base master --head release/vX.Y.Z --title "Prepare vX.Y.Z release" --body-file <pr-body-file>)"
+gh pr view "${pr_url}" --json isDraft --jq '.isDraft'
+head_sha="$(git rev-parse HEAD)"
+review_body="<!-- krr-review phase=initial head=${head_sha} -->"$'\n@codex review'
+gh pr comment "${pr_url}" --body "${review_body}"
 ```
 
-PR 作成後は必ず `@codex review` をコメントします。
+`gh pr view` の結果が `true` であることを確認してから、Draft PR 上で明示的に初回 `@codex review` を依頼します。
+初回 review コメントには、依頼直前の `git rev-parse HEAD` で取得した SHA を `<!-- krr-review phase=initial head=${head_sha} -->` marker として含め、その直後に `@codex review` を置きます。
 レビュー（review）はローカルの自己レビューではなく cloud review を正とし、指摘は GitHub 上の review comment から取得して対応します。
 
 ## Phase 5: PR gate
 
-cloud review は最低2回実施します。
+Draft 上の cloud review は最低2回、かつ最新 HEAD に対して実施します。
 
 1. 初回 review: PR 作成直後に `@codex review` を投稿する。
-2. 最終 review: 初回指摘への対応後、または初回で指摘が無かった場合でも、merge 前にもう一度 `@codex review` を投稿する。
+2. 最終 review: 指摘修正を push した後（指摘がなく修正 push がない場合も merge 前）、同じ PR の最新 HEAD に対してもう一度 `@codex review` を投稿する。
 
-2回目以降で指摘が出た場合は対応し、指摘対応後にさらに1回 `@codex review` を投稿します。
-完了条件は「最低2回実施」かつ「最後の cloud review で未対応の指摘がないこと」です。
+指摘修正は、指摘対象ファイルと責務を分離して subagent へ移譲します。各 review thread について、修正内容を thread へ reply し、確認後に resolve します。2回目以降で指摘が出た場合も、修正 push 後に最新 HEAD への review を追加し、各 thread の reply / resolve を完了します。
+完了条件は「最低2回実施」「最新 HEAD が review 済み」「未 resolve thread が 0」です。
+
+指摘修正を push した後（指摘がなく修正 push がない場合も merge 前）は、依頼直前の最新 HEAD を marker に固定して最終 review を依頼します。
+
+```bash
+head_sha="$(git rev-parse HEAD)"
+review_body="<!-- krr-review phase=final head=${head_sha} -->"$'\n@codex review'
+gh pr comment "${pr_url}" --body "${review_body}"
+```
+
+最終 review コメントには `<!-- krr-review phase=final head=${head_sha} -->` marker を含め、その直後に `@codex review` を置きます。以後、別の push を行った場合は旧 HEAD の最終 review を無効として扱い、再度 marker を取得して最終 review を依頼します。
 
 次を確認します。
 
@@ -87,22 +100,36 @@ cloud review は最低2回実施します。
 - `Test and Build (ubuntu-latest)`
 - `Test and Build (windows-latest)`
 - `preflight`
-- 最後の cloud review の指摘が未対応でないこと
+- `just VERSION=vX.Y.Z release-target-check`
+- OpenSpec の tasks / DoD
+- cloud review の未 resolve thread が 0 であること
 
 ```bash
 gh pr checks --watch "${pr_url}"
+just VERSION=vX.Y.Z release-target-check
 ```
 
-cloud review の指摘がある場合は修正し、通常の commit / push で更新します。
-再レビューは任意ではなく、最後の修正 push 後に必ず同じ PR へ `@codex review` をコメントします。
+CI green だけでは Ready または merge の条件を満たしません。DoD、release-target gate、最新 HEAD review、未 resolve 0 をすべて確認します。
 
-## Phase 6: merge と自動リリース
+## Phase 6: Ready 化と merge 承認
 
-すべての gate が通ったらユーザーに merge 承認を求めます。
-承認後だけ merge します。
+上記の全 gate が通った後、次の専用チェックを実行します。
+
+```bash
+just PR=<number> pr-ready-check && gh pr ready "${pr_url}"
+```
+
+`pr-ready-check` が成功するまで `gh pr ready` は実行しません。Ready 化後に、ユーザーへ merge 承認を求めます。承認後だけ merge します。
+
+`pr-ready-check` の前に、GitHub の review thread を全ページ取得して未 resolve が 0 件であることを確認します。未 resolve thread が 1 件でも残っている場合は Ready 化せず、対象 subagent に修正・reply・resolve を戻します。
+
+## Phase 7: merge と自動リリース
+
+承認後だけ merge します。merge 後に、対象 version 以前の完了済み OpenSpec change を archive へ移動します。
 
 ```bash
 gh pr merge --merge --delete-branch "${pr_url}"
+# merge 後に OpenSpec change を archive へ移動
 ```
 
 merge 後、Release workflow と crates.io 公開結果を確認します。
@@ -114,7 +141,14 @@ gh run list --workflow Release --limit 5
 ## 完了条件
 
 - [ ] `release/vX.Y.Z` の PR が作成されている
-- [ ] PR に `@codex review` コメントが最低2回投稿されている
+- [ ] Draft PR が確認され、初回 `@codex review` が投稿されている
+- [ ] 指摘ごとに subagent で修正し、thread reply / resolve が完了している
+- [ ] 最新 HEAD への `@codex review` を含め、最低2回 review 済みである
+- [ ] 未 resolve thread が 0 件である
 - [ ] `Test and Build (...)` と `preflight` が通っている
-- [ ] 最後の cloud review の指摘が解消されている
+- [ ] OpenSpec の tasks / DoD と `release-target-check` が通っている
+- [ ] `just PR=<number> pr-ready-check` が通った後に `gh pr ready` を実行している
+- [ ] Ready 化前に全 review thread を確認し、未 resolve thread が 0 件である
+- [ ] Ready 化後にユーザーの merge 承認を得ている
+- [ ] merge 後に OpenSpec change を archive している
 - [ ] merge 後に Release workflow が起動している
