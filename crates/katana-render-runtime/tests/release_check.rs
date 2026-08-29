@@ -834,7 +834,19 @@ fn assert_governance_sensor_contract(sensor: &str) {
 }
 
 fn assert_governance_source_contract(governance: &str) {
-    assert!(governance.contains("ref: ${{ steps.pull-request.outputs.base_sha }}"));
+    for required in [
+        "Resolve PR state and trusted default-branch SHA",
+        "default_branch=\"$(gh api \"repos/${GITHUB_REPOSITORY}\" --jq '.default_branch')\"",
+        "trusted_base_sha=\"$(gh api \"repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}\" --jq '.object.sha')\"",
+        "echo \"trusted_base_sha=${trusted_base_sha}\"",
+        "ref: ${{ steps.pull-request.outputs.trusted_base_sha }}",
+    ] {
+        assert!(
+            governance.contains(required),
+            "trusted source contract must contain {required}"
+        );
+    }
+    assert!(!governance.contains("ref: ${{ steps.pull-request.outputs.base_sha }}"));
     assert!(!governance.contains("ref: ${{ github.event.pull_request.head.sha }}"));
     assert!(!governance.contains("ref: refs/pull/"));
     assert!(!governance.contains("github.event.pull_request.merge_commit_sha"));

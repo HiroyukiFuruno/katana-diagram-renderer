@@ -751,15 +751,24 @@ class VerifyPushIssueTest(unittest.TestCase):
                     pr_number=72,
                 )
 
-    def test_trusted_workflow_invokes_pr_range_mode_after_base_checkout(self) -> None:
+    def test_trusted_workflow_invokes_pr_range_mode_after_default_branch_checkout(self) -> None:
         workflow = (
             Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
         ).read_text(encoding="utf-8")
-        checkout = "- name: Check out trusted base repository"
+        checkout = "- name: Check out trusted default-branch repository"
         verifier = "python3 scripts/hooks/verify_push_issue.py"
         self.assertIn("workflow_run:", workflow)
         self.assertNotIn("pull_request_target:", workflow)
-        self.assertIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
+        self.assertIn(
+            "default_branch=\"$(gh api \"repos/${GITHUB_REPOSITORY}\" --jq '.default_branch')\"",
+            workflow,
+        )
+        self.assertIn(
+            "trusted_base_sha=\"$(gh api \"repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}\" --jq '.object.sha')\"",
+            workflow,
+        )
+        self.assertIn("ref: ${{ steps.pull-request.outputs.trusted_base_sha }}", workflow)
+        self.assertNotIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
         self.assertIn(checkout, workflow)
         self.assertIn(verifier, workflow)
         self.assertIn("--pr-base-sha \"${verified_base}\"", workflow)

@@ -350,7 +350,7 @@ jobs:
               output.write(f"issue_action={issue_action}\n")
           PY
 
-      - name: Resolve trusted base SHA
+      - name: Resolve PR state and trusted default-branch SHA
         id: pull-request
         env:
           GH_TOKEN: ${{ github.token }}
@@ -359,7 +359,13 @@ jobs:
           base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
           head_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
           draft="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft')"
-          if [[ ! "${base_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${head_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}" --jq '.object.sha')"
+          if [[ ! "${base_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${head_sha}" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${trusted_base_sha}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            exit 1
+          fi
+          if [[ -z "${default_branch}" ]]; then
+            echo 'Repository default branch is invalid.' >&2
             exit 1
           fi
           case "${draft}" in
@@ -373,6 +379,7 @@ jobs:
             echo "base_sha=${base_sha}"
             echo "head_sha=${head_sha}"
             echo "draft=${draft}"
+            echo "trusted_base_sha=${trusted_base_sha}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Create scoped governance App token
@@ -481,11 +488,11 @@ jobs:
               output.write(f"tripped={'true' if tripped else 'false'}\n")
           PY
 
-      - name: Check out trusted base repository
+      - name: Check out trusted default-branch repository
         id: checkout-base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.pull-request.outputs.base_sha }}
+          ref: ${{ steps.pull-request.outputs.trusted_base_sha }}
 
       - name: Verify PR readiness
         id: verify

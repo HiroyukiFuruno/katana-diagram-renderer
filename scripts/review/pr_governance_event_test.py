@@ -266,7 +266,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
 
     def test_old_sensor_run_rechecks_the_current_pr_state(self) -> None:
         event_resolution = "- name: Resolve PR targets from a trusted event"
-        current_pr = "- name: Resolve trusted base SHA"
+        current_pr = "- name: Resolve PR state and trusted default-branch SHA"
         pending_status = "- name: Publish pending governance state"
         self.assertLess(self.publisher.index(event_resolution), self.publisher.index(current_pr))
         self.assertLess(self.publisher.index(current_pr), self.publisher.index(pending_status))
@@ -274,6 +274,32 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertIn("HEAD_SHA: ${{ steps.pull-request.outputs.head_sha }}", self.publisher)
         self.assertIn("SOURCE_RUN_ID: ${{ steps.event.outputs.source_run_id }}", self.publisher)
         self.assertIn("現在のbase/head/draft", self.documentation)
+
+    def test_publisher_checks_out_only_the_api_resolved_default_branch_sha(self) -> None:
+        resolver_start = self.publisher.index(
+            "      - name: Resolve PR state and trusted default-branch SHA"
+        )
+        resolver_end = self.publisher.index(
+            "\n      - name: Create scoped governance App token", resolver_start
+        )
+        resolver = self.publisher[resolver_start:resolver_end]
+        checkout_start = self.publisher.index(
+            "      - name: Check out trusted default-branch repository"
+        )
+        checkout_end = self.publisher.index("\n      - name: Verify PR readiness", checkout_start)
+        checkout = self.publisher[checkout_start:checkout_end]
+
+        self.assertIn(
+            'default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq \'.default_branch\')"',
+            resolver,
+        )
+        self.assertIn(
+            'trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}" --jq \'.object.sha\')"',
+            resolver,
+        )
+        self.assertIn('echo "trusted_base_sha=${trusted_base_sha}"', resolver)
+        self.assertIn("ref: ${{ steps.pull-request.outputs.trusted_base_sha }}", checkout)
+        self.assertNotIn("ref: ${{ steps.pull-request.outputs.base_sha }}", checkout)
 
     def test_all_events_for_one_pr_share_a_concurrency_group(self) -> None:
         workflow, jobs = self.publisher.split("\njobs:\n", maxsplit=1)
@@ -713,7 +739,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
 
     def test_publisher_binds_pending_and_final_statuses_to_the_sensor_run(self) -> None:
         pending_start = self.publisher.index("- name: Publish pending governance state")
-        checkout_start = self.publisher.index("- name: Check out trusted base repository")
+        checkout_start = self.publisher.index(
+            "- name: Check out trusted default-branch repository"
+        )
         pending = self.publisher[pending_start:checkout_start]
         final_start = self.publisher.index("- name: Publish final governance state")
         final = self.publisher[final_start:]
@@ -779,7 +807,7 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             self.assertIn("PR 外の専用 GitHub App", skill)
             self.assertIn("KRR / PR governance bootstrap", skill)
             self.assertIn("固定 HEAD SHA", skill)
-            self.assertIn("Issue OPEN", skill)
+            self.assertIn("参照Issueが OPEN", skill)
             self.assertIn("依存更新証跡", skill)
             self.assertIn("PR range の Issue contract", skill)
             self.assertIn("未 resolve thread 0", skill)
@@ -788,6 +816,22 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
             self.assertIn("KRR / PR governance (trusted)", skill)
             self.assertIn("KRR / PR governance review latch", skill)
             self.assertIn('just pr-ready-check "<number>"', skill)
+
+    def test_commit_and_push_skill_is_synchronized_with_canonical_governance_flow(self) -> None:
+        canonical = (self.repository / ".codex/skills/commit_and_push/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        repository_skill = (self.repository / ".agents/skills/commit_and_push/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for skill in (canonical, repository_skill):
+            self.assertIn("最新 push 後に `head_sha=$(git rev-parse HEAD)`", skill)
+            self.assertIn("phase=final head=${head_sha}", skill)
+            self.assertIn("未 resolve 数が 0", skill)
+            self.assertIn('just pr-ready-check "<number>"', skill)
+            self.assertIn("参照Issueが OPEN", skill)
+            self.assertIn("依存更新証跡", skill)
+            self.assertIn("PR range の Issue contract", skill)
 
 
 if __name__ == "__main__":
