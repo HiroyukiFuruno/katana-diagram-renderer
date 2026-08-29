@@ -52,6 +52,7 @@ def successful_state() -> tuple[
             {
                 "author": {"login": BOT},
                 "commit": {"oid": INITIAL_HEAD},
+                "state": "COMMENTED",
                 "submittedAt": "2026-08-29T03:01:30Z",
             }
         ],
@@ -201,6 +202,25 @@ class VerifyPrReadyTest(unittest.TestCase):
         reactions[2][0]["created_at"] = "2026-08-29T03:04:30Z"
         self.assertEqual(self.errors(comments=comments, reactions=reactions), [])
 
+    def test_rejects_edited_marker_with_same_second_bot_reaction(self) -> None:
+        _, _, comments, reactions = successful_state()
+        comments[1] = marker(
+            2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
+        )
+        reactions[2][0]["created_at"] = "2026-08-29T03:04:00Z"
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
+    def test_rejects_invalid_bot_reaction_timestamp(self) -> None:
+        _, _, comments, reactions = successful_state()
+        reactions[2][0]["created_at"] = "not-a-timestamp"
+        self.assertIn(
+            "final",
+            " ".join(self.errors(comments=comments, reactions=reactions)),
+        )
+
     def test_rejects_review_completed_before_its_marker(self) -> None:
         pull_request, _, _, _ = successful_state()
         reviews = pull_request["reviews"]
@@ -209,6 +229,49 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn(
             "initial",
             " ".join(self.errors(pull_request=pull_request)),
+        )
+
+    def test_rejects_dismissed_review_as_final_evidence(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[0]["state"] = "DISMISSED"
+        reviews.append(
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "DISMISSED",
+                "submittedAt": "2026-08-29T03:03:30Z",
+            }
+        )
+        reactions[2] = []
+        errors = self.errors(
+            pull_request=pull_request,
+            comments=comments,
+            reactions=reactions,
+        )
+        self.assertIn("initial", " ".join(errors))
+        self.assertIn("final", " ".join(errors))
+
+    def test_accepts_approved_review_as_valid_evidence(self) -> None:
+        pull_request, _, comments, reactions = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews.append(
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "APPROVED",
+                "submittedAt": "2026-08-29T03:03:30Z",
+            }
+        )
+        self.assertEqual(
+            [],
+            self.errors(
+                pull_request=pull_request,
+                comments=comments,
+                reactions=reactions,
+            ),
         )
 
     def test_rejects_marker_without_the_codex_review_trigger(self) -> None:
@@ -233,6 +296,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             {
                 "author": {"login": BOT},
                 "commit": {"oid": HEAD},
+                "state": "COMMENTED",
                 "submittedAt": "2026-08-29T03:03:00Z",
             }
         ]
@@ -360,11 +424,13 @@ class VerifyPrReadyTest(unittest.TestCase):
                 {
                     "author": {"login": BOT},
                     "commit": {"oid": INITIAL_HEAD},
+                    "state": "COMMENTED",
                     "submittedAt": "2026-08-29T03:01:30Z",
                 },
                 {
                     "author": {"login": BOT},
                     "commit": {"oid": HEAD},
+                    "state": "COMMENTED",
                     "submittedAt": "2026-08-29T03:03:30Z",
                 },
             ],
@@ -507,6 +573,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                             {
                                 "author": {"login": "reviewer"},
                                 "commit": {"oid": INITIAL_HEAD},
+                                "state": "COMMENTED",
                                 "submittedAt": "2026-08-29T03:00:00Z",
                             }
                             for _ in range(100)
@@ -535,11 +602,13 @@ class VerifyPrReadyTest(unittest.TestCase):
                                             {
                                                 "author": {"login": BOT},
                                                 "commit": {"oid": INITIAL_HEAD},
+                                                "state": "COMMENTED",
                                                 "submittedAt": "2026-08-29T03:01:30Z",
                                             },
                                             {
                                                 "author": {"login": BOT},
                                                 "commit": {"oid": HEAD},
+                                                "state": "COMMENTED",
                                                 "submittedAt": "2026-08-29T03:03:30Z",
                                             },
                                         ],

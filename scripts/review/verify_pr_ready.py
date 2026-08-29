@@ -18,6 +18,7 @@ _MARKER_PATTERN = re.compile(
     r"head=(?P<head>[0-9a-fA-F]{40})\s*-->"
 )
 _SUCCESSFUL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+_VALID_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
 _SELF_CHECK_NAMES = frozenset({"PR governance", "KRR / PR governance (trusted)"})
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
@@ -60,6 +61,7 @@ def _review_is_for(
     before_time = _timestamp(before, "marker created_at")
     return any(
         _is_review_bot(_bot_login(review.get("author")), review_bot)
+        and review.get("state") in _VALID_REVIEW_STATES
         and isinstance(review.get("commit"), Mapping)
         and review["commit"].get("oid") == head
         and (submitted_at := _timestamp(review.get("submittedAt"), "review submittedAt"))
@@ -89,7 +91,10 @@ def _bot_plus_one(
         # An old reaction may predate an edited marker while still being newer
         # than its original creation time, so missing edit evidence is unsafe.
         return False
-    edited_time = _timestamp(edited_at, "marker updated_at")
+    try:
+        edited_time = _timestamp(edited_at, "marker updated_at")
+    except (TypeError, ValueError):
+        return False
     if edited_time is None:
         return False
     if edited_time < not_before_time:
@@ -99,10 +104,13 @@ def _bot_plus_one(
         created_at = reaction.get("created_at")
         if created_at is None:
             return False
-        reaction_time = _timestamp(created_at, "reaction created_at")
+        try:
+            reaction_time = _timestamp(created_at, "reaction created_at")
+        except (TypeError, ValueError):
+            return False
         return (
             reaction_time is not None
-            and reaction_time >= edited_time
+            and reaction_time > edited_time
             and (before_time is None or reaction_time < before_time)
         )
 
@@ -405,7 +413,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviews(first: 100, after: $cursor) {
-        nodes { author { login } commit { oid } submittedAt }
+        nodes { author { login } commit { oid } state submittedAt }
         pageInfo { hasNextPage endCursor }
       }
     }

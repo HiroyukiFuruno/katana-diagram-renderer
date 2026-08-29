@@ -510,7 +510,10 @@ fn assert_pr_ready_recipe_contract(root: &Path) -> TestResult {
 
 fn assert_governance_workflow_contract(root: &Path) -> TestResult {
     let governance = std::fs::read_to_string(root.join(".github/workflows/pr-governance.yml"))?;
+    let review_sensor =
+        std::fs::read_to_string(root.join(".github/workflows/pr-governance-review-events.yml"))?;
     assert_governance_trigger_contract(&governance);
+    assert_governance_sensor_contract(&review_sensor);
     assert_governance_source_contract(&governance);
     assert_governance_status_contract(&governance);
     assert_governance_access_contract(&governance);
@@ -520,13 +523,33 @@ fn assert_governance_workflow_contract(root: &Path) -> TestResult {
 fn assert_governance_trigger_contract(governance: &str) {
     assert!(governance.contains("python3 scripts/review/verify_pr_ready.py"));
     assert!(governance.contains("--allow-ready"));
-    assert!(governance.contains("pull_request_target:"));
     assert!(governance.contains("issue_comment:"));
+    assert!(governance.contains("workflow_run:"));
+    assert!(governance.contains("PR governance review sensor"));
+    assert!(!governance.contains("pull_request_target:"));
     assert!(
         !governance
             .lines()
             .any(|line| line.trim() == "statuses: write")
     );
+}
+
+fn assert_governance_sensor_contract(sensor: &str) {
+    for trigger in [
+        "pull_request:",
+        "pull_request_review:",
+        "pull_request_review_comment:",
+        "converted_to_draft",
+    ] {
+        assert!(
+            sensor.contains(trigger),
+            "review sensor must contain {trigger}"
+        );
+    }
+    assert!(!sensor.contains("pull_request_target:"));
+    assert!(sensor.contains("KRR / PR governance review latch"));
+    assert!(sensor.contains("actions: read"));
+    assert!(sensor.contains("statuses: read"));
 }
 
 fn assert_governance_source_contract(governance: &str) {
@@ -561,7 +584,6 @@ fn assert_governance_access_contract(governance: &str) {
         "KRR_GOVERNANCE_APP_PRIVATE_KEY",
         "outputs.token",
         "GH_TOKEN: ${{ steps.",
-        "converted_to_draft",
         "if: always()",
     ] {
         assert!(

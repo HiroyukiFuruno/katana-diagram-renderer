@@ -355,6 +355,117 @@ class VerifyPushIssueTest(unittest.TestCase):
                     issue_loader=lambda number: self.issue(number),
                 )
 
+    def test_pr_range_rejects_changes_to_any_workflow(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+        }
+        files = [[{"filename": ".github/workflows/forge-latch.yml"}]]
+
+        def gh_json(*arguments: str) -> object:
+            if len(arguments) == 1:
+                return compare
+            return files
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            with self.assertRaisesRegex(subject.ContractViolation, "GitHub Actions workflow"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_rejects_renaming_any_workflow(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+        }
+        files = [
+            [
+                {
+                    "filename": ".github/workflows/retired.yml",
+                    "previous_filename": ".github/workflows/forge-latch.yml",
+                }
+            ]
+        ]
+
+        def gh_json(*arguments: str) -> object:
+            if len(arguments) == 1:
+                return compare
+            return files
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            with self.assertRaisesRegex(subject.ContractViolation, "GitHub Actions workflow"):
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                )
+
+    def test_pr_range_rejects_modified_and_deleted_workflows(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+        }
+        cases = {
+            "modified": {"filename": ".github/workflows/existing.yml", "status": "modified"},
+            "deleted": {"filename": ".github/workflows/retired.yml", "status": "removed"},
+        }
+
+        for action, changed_file in cases.items():
+            with self.subTest(action=action):
+                def gh_json(*arguments: str) -> object:
+                    if len(arguments) == 1:
+                        return compare
+                    return [[changed_file]]
+
+                with patch.object(subject, "_gh_json", side_effect=gh_json):
+                    with self.assertRaisesRegex(
+                        subject.ContractViolation,
+                        "GitHub Actions workflow",
+                    ):
+                        subject.validate_pr_range(
+                            repository="HiroyukiFuruno/katana-render-runtime",
+                            pr_number=72,
+                            base_sha=base_sha,
+                            head_sha=head_sha,
+                            branch="fix/issue-contract",
+                            issue_loader=lambda number: self.issue(number),
+                        )
+
     def test_pr_range_fails_when_any_base_to_head_commit_lacks_an_issue(self) -> None:
         base_sha = "a" * 40
         head_sha = "b" * 40
@@ -471,7 +582,8 @@ class VerifyPushIssueTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         checkout = "- name: Check out trusted base repository"
         verifier = "python3 scripts/hooks/verify_push_issue.py"
-        self.assertIn("pull_request_target:", workflow)
+        self.assertIn("workflow_run:", workflow)
+        self.assertNotIn("pull_request_target:", workflow)
         self.assertIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
         self.assertIn(checkout, workflow)
         self.assertIn(verifier, workflow)

@@ -36,6 +36,7 @@ _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
 _PR_FILES_PAGE_SIZE = 100
 _PR_FILES_MAX_PAGES = 30
+_WORKFLOW_DIRECTORY_PREFIX = ".github/workflows/"
 _MANIFEST_NAMES = {
     "Cargo.toml",
     "package.json",
@@ -367,7 +368,25 @@ def _pr_changed_paths(*, repository: str, pr_number: int) -> list[str]:
             if not isinstance(filename, str) or not filename:
                 raise ContractViolation("GitHub PR files entryのfilenameが不正です")
             paths.append(filename)
+            previous_filename = changed_file.get("previous_filename")
+            if previous_filename is not None:
+                if not isinstance(previous_filename, str) or not previous_filename:
+                    raise ContractViolation(
+                        "GitHub PR files entryのprevious_filenameが不正です"
+                    )
+                paths.append(previous_filename)
     return paths
+
+
+def _trusted_workflow_path_errors(changed_paths: Sequence[str]) -> list[str]:
+    """Reject every PR workflow change that could forge an Actions latch."""
+    return sorted(
+        {
+            path
+            for path in changed_paths
+            if path.startswith(_WORKFLOW_DIRECTORY_PREFIX)
+        }
+    )
 
 
 def validate_pr_range(
@@ -394,6 +413,12 @@ def validate_pr_range(
         head_sha=head_sha,
     )
     changed_paths = _pr_changed_paths(repository=repository, pr_number=pr_number)
+    protected_workflows = _trusted_workflow_path_errors(changed_paths)
+    if protected_workflows:
+        raise ContractViolation(
+            "GitHub Actions workflowはPRから変更できません: "
+            + ", ".join(protected_workflows)
+        )
     validate_contract(
         branch=branch,
         default_branch=None,
