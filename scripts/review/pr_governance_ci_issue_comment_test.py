@@ -248,7 +248,7 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected_exit, f"{latest}, {name}: {result.stderr}")
 
-    def test_preflight_invalidates_every_normal_target_before_matrix_work(self) -> None:
+    def test_preflight_invalidates_each_normal_matrix_target(self) -> None:
         program = self.publisher_program("Publish preflight pending state to current trusted pull request heads")
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
@@ -272,18 +272,25 @@ class PrGovernanceCiIssueCommentTest(unittest.TestCase):
             base_environment = os.environ | {
                 "PATH": f"{directory}:{os.environ['PATH']}", "FAKE_GH_LOG": str(log),
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com",
-                "GITHUB_RUN_ID": "999", "PREFLIGHT_TARGETS": '["1","2"]',
+                "GITHUB_RUN_ID": "999",
             }
-            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=base_environment, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            for number in ("1", "2"):
+                result = subprocess.run(
+                    [sys.executable, "-c", program],
+                    capture_output=True,
+                    text=True,
+                    env=base_environment | {"PR_NUMBER": number},
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
             successful_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(sum("/statuses/" in " ".join(call) for call in successful_calls), 2)
-            failed_environment = base_environment | {"FAIL_SECOND": "1"}
+            failed_environment = base_environment | {"FAIL_SECOND": "1", "PR_NUMBER": "2"}
             log.unlink()
             result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=failed_environment, check=False)
             self.assertNotEqual(result.returncode, 0)
             failed_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(sum("/statuses/" in " ".join(call) for call in failed_calls), 4)
+            self.assertEqual(sum("/statuses/" in " ".join(call) for call in failed_calls), 3)
 
     def test_pr_workflow_blob_must_match_the_default_branch_without_checkout(self) -> None:
         resolver = self.resolver()

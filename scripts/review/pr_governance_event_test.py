@@ -317,6 +317,9 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
     def test_all_events_for_one_pr_share_a_concurrency_group(self) -> None:
         workflow, jobs = self.publisher.split("\njobs:\n", maxsplit=1)
         self.assertNotIn("\nconcurrency:", workflow)
+        preflight_start = jobs.index("  preflight-governance:\n")
+        overflow_start = jobs.index("  invalidate-overflow:\n", preflight_start)
+        preflight = jobs[preflight_start:overflow_start]
         publisher = jobs[jobs.index("  pr-governance:\n"):]
         group_start = publisher.index("      group: pr-governance-")
         group_end = publisher.index("\n", group_start)
@@ -325,6 +328,20 @@ class PrGovernanceReviewEventTest(unittest.TestCase):
         self.assertNotIn("bound-", group)
         self.assertNotIn("issue-comment-", group)
         self.assertIn("cancel-in-progress: true", jobs)
+        self.assertIn("needs: resolve-targets", preflight)
+        self.assertIn("matrix: ${{ fromJSON(needs.resolve-targets.outputs.matrix) }}", preflight)
+        preflight_group_start = preflight.index("      group: pr-governance-")
+        preflight_group_end = preflight.index("\n", preflight_group_start)
+        self.assertEqual(
+            preflight[preflight_group_start:preflight_group_end], group
+        )
+        self.assertIn("cancel-in-progress: true", preflight)
+        self.assertIn("needs: [resolve-targets, preflight-governance]", publisher)
+        self.assertIn("preflight_generation_run_id", preflight)
+        final_fence = publisher.index("id: final-governance-fence")
+        final_publish = publisher.index("- name: Publish final governance state")
+        self.assertLess(final_fence, final_publish)
+        self.assertIn("marker_status_id > int(pending_status_id)", publisher)
         sensor_group_start = self.sensor.index("  group: pr-governance-review-latch-")
         sensor_group_end = self.sensor.index("\n", sensor_group_start)
         sensor_group = self.sensor[sensor_group_start:sensor_group_end]

@@ -602,6 +602,33 @@ def _repository_name(repository: str | None) -> str:
     return payload["nameWithOwner"]
 
 
+def _verify_pr_boundary_unchanged(
+    repository: str,
+    pull_request: int,
+    initial_base: str,
+    initial_head: str,
+) -> None:
+    """Fail closed if the PR boundary moved while readiness was evaluated."""
+
+    payload = _gh_json(
+        "pr",
+        "view",
+        str(pull_request),
+        "--repo",
+        repository,
+        "--json",
+        "baseRefOid,headRefOid",
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("pull request boundary response must be an object")
+    current_base = payload.get("baseRefOid")
+    current_head = payload.get("headRefOid")
+    if not isinstance(current_base, str) or not isinstance(current_head, str):
+        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    if (current_base, current_head) != (initial_base, initial_head):
+        raise ValueError("pull request base/head changed during readiness check")
+
+
 def _review_threads(repository: str, pull_request: int) -> list[dict[str, object]]:
     query = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -853,6 +880,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
+    _verify_pr_boundary_unchanged(repository, arguments.pr, base, head)
     print(f"PR #{arguments.pr} is ready")
     return 0
 

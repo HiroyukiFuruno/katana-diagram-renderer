@@ -1098,6 +1098,92 @@ class VerifyPrReadyTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "endCursor"):
                 subject._reviews("owner/repo", 72)
 
+    def test_rejects_boundary_changed_during_readiness_check(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["headRefOid"] = "d" * 40
+
+        snapshot_count = 0
+
+        def two_snapshots(*arguments: str) -> object:
+            nonlocal snapshot_count
+            self.assertEqual(arguments[:2], ("pr", "view"))
+            snapshot_count += 1
+            return pull_request if snapshot_count == 1 else changed_pull_request
+
+        with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
+            with self.assertRaisesRegex(ValueError, "base/head changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["baseRefOid"] = "e" * 40
+
+        snapshot_count = 0
+
+        def two_snapshots(*arguments: str) -> object:
+            nonlocal snapshot_count
+            self.assertEqual(arguments[:2], ("pr", "view"))
+            snapshot_count += 1
+            return pull_request if snapshot_count == 1 else changed_pull_request
+
+        with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
+            with self.assertRaisesRegex(ValueError, "base/head changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_fails_closed_when_final_boundary_response_is_not_an_object(self) -> None:
+        with patch.object(subject, "_gh_json", return_value=[]):
+            with self.assertRaisesRegex(TypeError, "boundary response"):
+                subject._verify_pr_boundary_unchanged(
+                    "owner/repo", 72, "c" * 40, "a" * 40
+                )
+
+    def test_accepts_unchanged_boundary_after_readiness_check(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        pull_request.update({"baseRefOid": "c" * 40, "body": ""})
+
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ):
+            self.assertEqual(
+                subject.main(["--pr", "72", "--repository", "owner/repo"]), 0
+            )
+
+    def test_does_not_fetch_final_boundary_when_readiness_has_errors(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        pull_request.update({"baseRefOid": "c" * 40, "body": "", "isDraft": False})
+
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ), patch.object(subject, "_verify_pr_boundary_unchanged") as verify_boundary:
+            self.assertEqual(
+                subject.main(["--pr", "72", "--repository", "owner/repo"]), 1
+            )
+            verify_boundary.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
