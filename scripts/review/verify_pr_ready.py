@@ -46,6 +46,20 @@ _ReviewMarker = tuple[str, str, str, Mapping[str, object]]
 _RequiredStatusChecks = tuple[tuple[str, ...], tuple[tuple[str, int | None], ...]]
 
 
+def _safe_branch_name(value: object) -> bool:
+    """writerと同じfail-closedなGit ref component境界を検証する。"""
+
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z0-9._/-]+", value) is not None
+        and value not in {".", ".."}
+        and not value.startswith("/")
+        and not value.endswith("/")
+        and "//" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+    )
+
+
 def _bot_login(value: object) -> str | None:
     if not isinstance(value, Mapping):
         return None
@@ -239,6 +253,7 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
     pull_requests: list[dict[str, object]] = []
     seen_numbers: set[int] = set()
     governed_heads: set[str] = set()
+    snapshot_default_branch: str | None = None
     seen_cursors: set[str] = set()
     cursor: str | None = None
     while True:
@@ -274,8 +289,12 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             raise TypeError("open pull requests repository must be an object")
         default_ref = repository_data.get("defaultBranchRef")
         default_branch = default_ref.get("name") if isinstance(default_ref, Mapping) else None
-        if not isinstance(default_branch, str) or not default_branch:
+        if not _safe_branch_name(default_branch):
             raise TypeError("open pull requests default branch is invalid")
+        if snapshot_default_branch is None:
+            snapshot_default_branch = default_branch
+        elif default_branch != snapshot_default_branch:
+            raise TypeError("open pull requests default branch changed during pagination")
         connection = repository_data.get("pullRequests")
         if not isinstance(connection, Mapping):
             raise TypeError("open pull requests connection must be an object")
@@ -299,21 +318,29 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
                 raise TypeError("open pull request isDraft must be a boolean")
             if not isinstance(body, str):
                 raise TypeError("open pull request body must be a string")
+            if not _safe_branch_name(base_ref):
+                raise TypeError("open pull request baseRefName is invalid")
+            if not isinstance(head, str) or _SHA.fullmatch(head) is None:
+                raise TypeError("open pull request headRefOid is invalid")
+            if not isinstance(head_repository, Mapping):
+                raise TypeError("open pull request headRepository is invalid")
+            head_repository_name = head_repository.get("nameWithOwner")
+            if not isinstance(head_repository_name, str) or not head_repository_name:
+                raise TypeError("open pull request headRepository name is invalid")
+            seen_numbers.add(number)
             # Only same-repository PRs targeting the default branch are
             # governed.  Two such PRs sharing a head would share one Check
             # Run namespace, so readiness must stop before a stale success
             # can satisfy either PR.
-            if base_ref == default_branch and isinstance(head_repository, Mapping) and head_repository.get("nameWithOwner") == repository:
-                if not isinstance(head, str) or _SHA.fullmatch(head) is None:
-                    raise TypeError("governed open pull request head is invalid")
-                normalized_head = head.lower()
-                if normalized_head in governed_heads:
-                    raise TypeError("open pull requests have duplicate governed head SHA")
-                governed_heads.add(normalized_head)
+            if base_ref != default_branch or head_repository_name != repository:
+                continue
+            normalized_head = head.lower()
+            if normalized_head in governed_heads:
+                raise TypeError("open pull requests have duplicate governed head SHA")
+            governed_heads.add(normalized_head)
             pull_requests.append(
                 {"number": number, "isDraft": is_draft, "body": body, "head_sha": head}
             )
-            seen_numbers.add(number)
         page_info = connection.get("pageInfo")
         if not isinstance(page_info, Mapping):
             raise TypeError("open pull requests pageInfo must be an object")
@@ -522,7 +549,7 @@ def _required_status_check_snapshot(
 ) -> _RequiredStatusChecks:
     """Read one strict, internally consistent required-check configuration."""
 
-    if not isinstance(base_branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch) is None:
+    if not _safe_branch_name(base_branch):
         raise TypeError("baseRefName must be a safe branch name")
     protection = _gh_json(
         "api",

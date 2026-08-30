@@ -389,6 +389,158 @@ class VerifyPrReadyTest(unittest.TestCase):
                 self.assertIn("open PRは自身だけ", " ".join(errors))
                 self.assertIn("#72, #1000", " ".join(errors))
 
+    def test_open_closer_snapshot_excludes_fork_and_nondefault_base_pull_requests(self) -> None:
+        def node(number: int, *, base: str, head_repository: str) -> dict[str, object]:
+            return {
+                "number": number, "isDraft": True, "body": "Closes #64",
+                "baseRefName": base, "headRefOid": f"{number:040x}",
+                "headRepository": {"nameWithOwner": head_repository},
+            }
+
+        payload = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [
+                            node(72, base="master", head_repository="owner/repo"),
+                            node(73, base="master", head_repository="fork/repo"),
+                            node(74, base="release/v0.4", head_repository="owner/repo"),
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            snapshot = subject._open_pull_requests("owner/repo")
+        self.assertEqual([item["number"] for item in snapshot], [72])
+        self.assertEqual(
+            subject._open_pull_request_closers(
+                repository="owner/repo", issue_number=64, open_pull_requests=snapshot,
+            ),
+            {72},
+        )
+
+    def test_open_closer_snapshot_rejects_missing_or_invalid_governance_metadata(self) -> None:
+        def response(node: dict[str, object]) -> dict[str, object]:
+            return {
+                "data": {
+                    "repository": {
+                        "defaultBranchRef": {"name": "master"},
+                        "pullRequests": {
+                            "nodes": [node],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+
+        valid = {
+            "number": 72, "isDraft": True, "body": "Closes #64",
+            "baseRefName": "master", "headRefOid": "a" * 40,
+            "headRepository": {"nameWithOwner": "owner/repo"},
+        }
+        variants = {
+            "base": {**valid, "baseRefName": None},
+            "base-unsafe": {**valid, "baseRefName": "master\n"},
+            "head": {**valid, "headRefOid": "not-a-sha"},
+            "repository": {**valid, "headRepository": None},
+            "repository-name": {**valid, "headRepository": {"nameWithOwner": ""}},
+        }
+        for name, node in variants.items():
+            with self.subTest(name=name), patch.object(subject, "_gh_json", return_value=response(node)):
+                with self.assertRaises(TypeError):
+                    subject._open_pull_requests("owner/repo")
+
+    def test_open_closer_snapshot_rejects_duplicate_ungoverned_pull_request_numbers(self) -> None:
+        node = {
+            "number": 73, "isDraft": True, "body": "Closes #64",
+            "baseRefName": "master", "headRefOid": "a" * 40,
+            "headRepository": {"nameWithOwner": "fork/repo"},
+        }
+        payload = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [node, dict(node)],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            with self.assertRaisesRegex(TypeError, "duplicate"):
+                subject._open_pull_requests("owner/repo")
+
+    def test_open_closer_snapshot_rejects_default_branch_drift_between_pages(self) -> None:
+        def page(
+            *, default_branch: str, number: int, has_next_page: bool, cursor: str | None
+        ) -> dict[str, object]:
+            return {
+                "data": {
+                    "repository": {
+                        "defaultBranchRef": {"name": default_branch},
+                        "pullRequests": {
+                            "nodes": [{
+                                "number": number, "isDraft": True, "body": "Closes #64",
+                                "baseRefName": default_branch, "headRefOid": f"{number:040x}",
+                                "headRepository": {"nameWithOwner": "owner/repo"},
+                            }],
+                            "pageInfo": {"hasNextPage": has_next_page, "endCursor": cursor},
+                        },
+                    }
+                }
+            }
+
+        with patch.object(
+            subject, "_gh_json", side_effect=[
+                page(default_branch="master", number=72, has_next_page=True, cursor="next"),
+                page(default_branch="release/v0.4", number=73, has_next_page=False, cursor=None),
+            ]
+        ):
+            with self.assertRaisesRegex(TypeError, "default branch changed"):
+                subject._open_pull_requests("owner/repo")
+
+    def test_open_closer_snapshot_uses_strict_git_ref_names_for_default_and_base(self) -> None:
+        def response(default_branch: str, base_branch: str) -> dict[str, object]:
+            return {
+                "data": {
+                    "repository": {
+                        "defaultBranchRef": {"name": default_branch},
+                        "pullRequests": {
+                            "nodes": [{
+                                "number": 72, "isDraft": True, "body": "Closes #64",
+                                "baseRefName": base_branch, "headRefOid": "a" * 40,
+                                "headRepository": {"nameWithOwner": "owner/repo"},
+                            }],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        },
+                    }
+                }
+            }
+
+        invalid = (".", "..", "feature//x", "/x", "x/")
+        for value in invalid:
+            with self.subTest(field="defaultBranchRef.name", value=value), patch.object(
+                subject, "_gh_json", return_value=response(value, value)
+            ):
+                with self.assertRaises(TypeError):
+                    subject._open_pull_requests("owner/repo")
+            with self.subTest(field="baseRefName", value=value), patch.object(
+                subject, "_gh_json", return_value=response("master", value)
+            ):
+                with self.assertRaises(TypeError):
+                    subject._open_pull_requests("owner/repo")
+
+        valid = "feature/x.y-z_1"
+        with patch.object(subject, "_gh_json", return_value=response(valid, valid)):
+            self.assertEqual(
+                [item["number"] for item in subject._open_pull_requests("owner/repo")],
+                [72],
+            )
+
     def test_open_pull_requests_reads_all_pages(self) -> None:
         def payload(nodes: list[dict[str, object]], has_next_page: bool, cursor: str | None) -> dict[str, object]:
             return {
@@ -406,16 +558,15 @@ class VerifyPrReadyTest(unittest.TestCase):
                 }
             }
 
-        first_page = payload(
-            [{"number": 71, "isDraft": False, "body": "Closes #64"}],
-            True,
-            "next-page",
-        )
-        second_page = payload(
-            [{"number": 72, "isDraft": True, "body": "Closes #64"}],
-            False,
-            None,
-        )
+        def node(number: int, draft: bool) -> dict[str, object]:
+            return {
+                "number": number, "isDraft": draft, "body": "Closes #64",
+                "baseRefName": "master", "headRefOid": f"{number:040x}",
+                "headRepository": {"nameWithOwner": "owner/repo"},
+            }
+
+        first_page = payload([node(71, False)], True, "next-page")
+        second_page = payload([node(72, True)], False, None)
 
         def gh_json(*arguments: str) -> object:
             if "cursor=next-page" in arguments:
@@ -445,12 +596,17 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject._open_pull_requests("owner/repo")
 
     def test_open_pull_requests_fails_closed_on_duplicate_numbers(self) -> None:
+        node = {
+            "number": 72, "isDraft": True, "body": "Closes #64",
+            "baseRefName": "master", "headRefOid": "a" * 40,
+            "headRepository": {"nameWithOwner": "owner/repo"},
+        }
         first_page = {
             "data": {
                 "repository": {
                     "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
-                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "nodes": [node],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
                     }
                 }
@@ -461,7 +617,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 "repository": {
                     "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
-                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "nodes": [node],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
                     }
                 }
@@ -472,12 +628,22 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject._open_pull_requests("owner/repo")
 
     def test_open_pull_requests_fails_closed_on_repeated_cursor(self) -> None:
+        first_node = {
+            "number": 72, "isDraft": True, "body": "Closes #64",
+            "baseRefName": "master", "headRefOid": "a" * 40,
+            "headRepository": {"nameWithOwner": "owner/repo"},
+        }
+        second_node = {
+            "number": 73, "isDraft": True, "body": "Closes #64",
+            "baseRefName": "master", "headRefOid": "b" * 40,
+            "headRepository": {"nameWithOwner": "owner/repo"},
+        }
         first_page = {
             "data": {
                 "repository": {
                     "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
-                        "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
+                        "nodes": [first_node],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
                     }
                 }
@@ -488,7 +654,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 "repository": {
                     "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
-                        "nodes": [{"number": 73, "isDraft": True, "body": "Closes #64"}],
+                        "nodes": [second_node],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
                     }
                 }
