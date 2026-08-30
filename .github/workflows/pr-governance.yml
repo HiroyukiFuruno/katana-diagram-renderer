@@ -514,12 +514,11 @@ jobs:
           PY
 
       - name: Create periodic affected-head barrier marker write token
-        # The first priority event can be the first attempt to add this
-        # context.  Seed its fixed-App Check Run before the context-only
-        # branch-protection mutation, or GitHub cannot bind the context to the
-        # trusted App identity.
+        # 初回priorityでは、context-onlyのbranch protection変更より前に
+        # 固定AppのmarkerをseedしてGitHubへApp identityを束縛する。
         if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
         id: barrier-marker-write
+        continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
           app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
@@ -529,8 +528,9 @@ jobs:
           permission-checks: write
 
       - name: Create periodic affected-head barrier marker read token
-        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
         id: barrier-marker-read
+        continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
           app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
@@ -540,7 +540,9 @@ jobs:
           permission-checks: read
 
       - name: Publish periodic static affected-head barrier App marker
-        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
+        id: barrier-marker-publish
+        continue-on-error: true
         env:
           CHECK_WRITE_TOKEN: ${{ steps.barrier-marker-write.outputs.token }}
           CHECK_READ_TOKEN: ${{ steps.barrier-marker-read.outputs.token }}
@@ -568,8 +570,11 @@ jobs:
           PY
 
       - name: Create affected-head barrier branch-protection token
-        if: steps.barrier-source.outcome == 'success'
+        # marker障害をdeferしても、このtoken生成とactivationの後でpriority
+        # pending化へ進める。実際の成功条件はchunk後の明示fenceで判定する。
+        if: always() && steps.barrier-source.outcome == 'success'
         id: barrier-protection-activate
+        continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
           app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
@@ -580,7 +585,8 @@ jobs:
 
       - name: Activate complete affected-head merge barrier
         id: affected-barrier
-        if: steps.barrier-source.outcome == 'success'
+        if: always() && steps.barrier-source.outcome == 'success'
+        continue-on-error: true
         env:
           ADMIN_TOKEN: ${{ steps.barrier-protection-activate.outputs.token }}
           DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
@@ -632,7 +638,7 @@ jobs:
           PY
 
       - name: Create first priority invalidator write token
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
         id: pre-invalidator-write-1
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -643,7 +649,7 @@ jobs:
           permission-checks: write
 
       - name: Create first priority invalidator read token
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
         id: pre-invalidator-read-1
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -656,7 +662,7 @@ jobs:
 
       - name: Pre-invalidate priority event heads (first TTL-safe chunk)
         id: preinvalidate-1
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_1 == 'true'
         env:
           GH_TOKEN: ${{ steps.pre-invalidator-read-1.outputs.token }}
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
@@ -728,7 +734,7 @@ jobs:
           PY
 
       - name: Create second priority invalidator write token
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
         id: pre-invalidator-write-2
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -739,7 +745,7 @@ jobs:
           permission-checks: write
 
       - name: Create second priority invalidator read token
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
         id: pre-invalidator-read-2
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -752,7 +758,7 @@ jobs:
 
       - name: Pre-invalidate priority event heads (second TTL-safe chunk)
         id: preinvalidate-2
-        if: steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
+        if: always() && steps.barrier-source.outcome == 'success' && steps.current-targets.outputs.has_preinvalidate_chunk_2 == 'true'
         env:
           GH_TOKEN: ${{ steps.pre-invalidator-read-2.outputs.token }}
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
@@ -808,6 +814,42 @@ jobs:
               if type(identifier) is not int or identifier<1: raise SystemExit("Priority invalidation manifest is incomplete.")
               manifest.append([number,identifier])
           with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("check_manifest="+json.dumps(manifest,separators=(",",":"))+"\n")
+          PY
+
+      - name: Fail closed after deferred priority barrier setup
+        # setup失敗はcontinue-on-errorでここまでdeferする。priority対象を
+        # pendingへ置換した後、marker/App束縛/barrierが完全成功した場合だけ
+        # writerへhand-offする。
+        if: always() && steps.current-targets.outputs.has_preinvalidate_targets == 'true'
+        env:
+          MARKER_WRITE_OUTCOME: ${{ steps.barrier-marker-write.outcome }}
+          MARKER_READ_OUTCOME: ${{ steps.barrier-marker-read.outcome }}
+          MARKER_PUBLISH_OUTCOME: ${{ steps.barrier-marker-publish.outcome }}
+          BARRIER_TOKEN_OUTCOME: ${{ steps.barrier-protection-activate.outcome }}
+          BARRIER_ACTIVATE_OUTCOME: ${{ steps.affected-barrier.outcome }}
+          BARRIER_ACTIVE: ${{ steps.affected-barrier.outputs.active }}
+          PREINVALIDATE_CHUNK_1_REQUIRED: ${{ steps.current-targets.outputs.has_preinvalidate_chunk_1 }}
+          PREINVALIDATE_CHUNK_1_OUTCOME: ${{ steps.preinvalidate-1.outcome }}
+          PREINVALIDATE_CHUNK_2_REQUIRED: ${{ steps.current-targets.outputs.has_preinvalidate_chunk_2 }}
+          PREINVALIDATE_CHUNK_2_OUTCOME: ${{ steps.preinvalidate-2.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+
+          required = (
+              "MARKER_WRITE_OUTCOME",
+              "MARKER_READ_OUTCOME",
+              "MARKER_PUBLISH_OUTCOME",
+              "BARRIER_TOKEN_OUTCOME",
+              "BARRIER_ACTIVATE_OUTCOME",
+          )
+          if any(os.environ.get(name) != "success" for name in required):
+              raise SystemExit("Priority barrier setup did not complete successfully.")
+          if os.environ.get("BARRIER_ACTIVE") != "true":
+              raise SystemExit("Priority affected-head barrier is not active.")
+          for index in ("1", "2"):
+              if os.environ.get(f"PREINVALIDATE_CHUNK_{index}_REQUIRED") == "true" and os.environ.get(f"PREINVALIDATE_CHUNK_{index}_OUTCOME") != "success":
+                  raise SystemExit("Priority invalidation did not complete successfully.")
           PY
 
       - name: Create dispatcher App token after priority preinvalidation

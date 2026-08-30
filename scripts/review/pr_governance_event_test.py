@@ -1478,6 +1478,246 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertNotIn("steps.current-targets.outputs.has_preinvalidate_targets == 'false'", condition.group("value"))
         self.assertLess(self.workflow.index("Publish periodic static affected-head barrier App marker"), self.workflow.index("Activate complete affected-head merge barrier"))
 
+    def test_steady_priority_preinvalidates_before_fallible_marker_failure(self) -> None:
+        """Setup failures defer the abort until both priority chunks are pending."""
+        def step(name: str) -> str:
+            match = re.search(
+                rf"^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - name: |\Z)",
+                self.workflow, re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, name); assert match is not None
+            return match.group("body")
+
+        def program(name: str) -> str:
+            match = re.search(rf"- name: {re.escape(name)}.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+            self.assertIsNotNone(match, name); assert match is not None
+            return self._workflow_program(match)
+
+        marker_name = "Publish periodic static affected-head barrier App marker"
+        activate_name = "Activate complete affected-head merge barrier"
+        pre_names = (
+            "Pre-invalidate priority event heads (first TTL-safe chunk)",
+            "Pre-invalidate priority event heads (second TTL-safe chunk)",
+        )
+        marker_position = self.workflow.index(f"- name: {marker_name}")
+        activate_position = self.workflow.index(f"- name: {activate_name}")
+        pre_positions = [self.workflow.index(f"- name: {name}") for name in pre_names]
+        drain_position = self.workflow.index("- name: Drain authoritative writer before the next governance hand-off")
+        self.assertLess(marker_position, activate_position)
+        self.assertLess(activate_position, pre_positions[0])
+        self.assertLess(pre_positions[0], pre_positions[1])
+        self.assertLess(pre_positions[1], drain_position)
+
+        # Setup failures must be observed but not stop either pending fence.
+        for name in (
+            "Create periodic affected-head barrier marker write token",
+            "Create periodic affected-head barrier marker read token",
+            marker_name,
+            "Create affected-head barrier branch-protection token",
+            activate_name,
+        ):
+            self.assertIn("continue-on-error: true", step(name), name)
+        fence_matches = list(re.finditer(
+            r"^      - name: (?P<name>[^\n]*(?:fail|abort|fence)[^\n]*)\n(?P<body>.*?)(?=^      - name: |\Z)",
+            self.workflow, re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        ))
+        fences = [match for match in fence_matches if match.start() > pre_positions[1] and match.start() < drain_position]
+        self.assertEqual(len(fences), 1, "one explicit setup fence must abort before drain")
+        fence = fences[0].group("body")
+        self.assertRegex(fence, r"exit 1|SystemExit")
+        self.assertRegex(fence, r"barrier-(?:marker|protection)|affected-barrier")
+        self.assertIn("has_preinvalidate_targets", step(marker_name))
+
+        marker = program(marker_name)
+        preinvalidate = [program(name) for name in pre_names]
+        heads = {72: "a" * 40, 73: "b" * 40}
+        events: list[str] = []
+        failure_mode = "post"
+        state: dict[str, object] = {"trusted": {}, "ids": {}, "next_id": 901}
+
+        def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            environment = kwargs.get("env")
+            self.assertIsInstance(environment, dict)
+            token = environment.get("GH_TOKEN")  # type: ignore[union-attr]
+            endpoints = [value for value in arguments if isinstance(value, str) and value.startswith("repos/")]
+            self.assertEqual(len(endpoints), 1, arguments)
+            endpoint = endpoints[0]
+            if endpoint == "repos/owner/repository/check-runs":
+                method = arguments[arguments.index("--method") + 1]
+                self.assertEqual(method, "POST")
+                fields = {field.split("=", 1)[0]: field.split("=", 1)[1] for field in arguments if isinstance(field, str) and "=" in field}
+                if token == "marker-write":
+                    events.append("marker-post")
+                    if failure_mode == "post":
+                        return response({}, 1)
+                    return response({"id": 501, "name": "KRR / PR governance affected-head barrier", "head_sha": "c" * 40, "external_id": f"krr-governance-affected-head-barrier/v1/{'c' * 40}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4766933}})
+                self.assertIn(token, {"write-1", "write-2"})
+                self.assertEqual(fields.get("status"), "in_progress")
+                head = fields["head_sha"]
+                number = 72 if head == heads[72] else 73
+                events.append(f"pending-post-{number}")
+                identifier = state["next_id"]  # type: ignore[assignment]
+                state["next_id"] = identifier + 1  # type: ignore[operator]
+                state["trusted"][head] = {"id": identifier, "status": "in_progress", "conclusion": None}  # type: ignore[index]
+                state["ids"][identifier] = head  # type: ignore[index]
+                return response({"id": identifier, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": fields["external_id"], "status": "in_progress", "conclusion": None, "details_url": fields["details_url"], "app": {"id": 4766933}})
+            if endpoint == "repos/owner/repository/check-runs/501":
+                self.assertEqual(token, "marker-read")
+                events.append("marker-read")
+                return response({}, 1) if failure_mode == "readback" else response({"id": 501, "name": "KRR / PR governance affected-head barrier", "head_sha": "c" * 40, "external_id": f"krr-governance-affected-head-barrier/v1/{'c' * 40}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4766933}})
+            if endpoint.startswith("repos/owner/repository/check-runs/"):
+                self.assertIn(token, {"read-1", "read-2"})
+                identifier = int(endpoint.rsplit("/", 1)[1]); head = state["ids"][identifier]  # type: ignore[index]
+                events.append("pending-read")
+                current = state["trusted"][head]  # type: ignore[index]
+                return response({"id": identifier, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": f"krr-governance/v1/{head}/dispatcher-99", "status": current["status"], "conclusion": current["conclusion"], "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4766933}})
+            if endpoint.startswith("repos/owner/repository/pulls/"):
+                self.assertIn(token, {"read-1", "read-2"})
+                number = int(endpoint.rsplit("/", 1)[1]); head = heads[number]
+                return response({"number": number, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}})
+            raise AssertionError(arguments)
+
+        def execute(source: str, environment: dict[str, str]) -> bool:
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                try:
+                    exec(source, {"__name__": "__main__"})
+                except SystemExit:
+                    return False
+                return True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            common = {"GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "PATH": os.environ["PATH"], "CHECK_APP_ID": "4766933", "DEFAULT_BRANCH": "master", "DISPATCHER_RUN_ID": "99", "GITHUB_OUTPUT": str(Path(temporary) / "output")}
+            for failure_mode in ("token", "post", "readback"):
+                with self.subTest(failure_mode=failure_mode):
+                    events.clear(); state["trusted"] = {}; state["ids"] = {}; state["next_id"] = 901
+                    marker_environment = common | {"CHECK_WRITE_TOKEN": "" if failure_mode == "token" else "marker-write", "CHECK_READ_TOKEN": "marker-read", "DEFAULT_HEAD": "c" * 40}
+                    marker_failed = not execute(marker, marker_environment)
+                    self.assertTrue(marker_failed)
+                    pre_environments = (
+                        common | {"GH_TOKEN": "read-1", "CHECK_WRITE_TOKEN": "write-1", "TARGETS": "[72]", "TARGET_SNAPSHOTS": json.dumps([[72, heads[72], False, "master", "owner/repository", "owner/repository"]], separators=(",", ":"))},
+                        common | {"GH_TOKEN": "read-2", "CHECK_WRITE_TOKEN": "write-2", "TARGETS": "[73]", "TARGET_SNAPSHOTS": json.dumps([[73, heads[73], False, "master", "owner/repository", "owner/repository"]], separators=(",", ":"))},
+                    )
+                    self.assertTrue(execute(preinvalidate[0], pre_environments[0]))
+                    self.assertTrue(execute(preinvalidate[1], pre_environments[1]))
+                    self.assertTrue(marker_failed)
+                    self.assertEqual({state["trusted"][head]["status"] for head in heads.values()}, {"in_progress"})  # type: ignore[index]
+                    self.assertEqual({state["trusted"][head]["conclusion"] for head in heads.values()}, {None})  # type: ignore[index]
+                    self.assertEqual([event for event in events if event.startswith("pending-post-")], ["pending-post-72", "pending-post-73"])
+                    if failure_mode == "readback":
+                        self.assertIn("marker-read", events)
+
+    def test_first_priority_chunk_failure_still_runs_second_chunk_and_fails_fence(self) -> None:
+        """The second invalidation chunk is an always-run fail-closed continuation."""
+        def step(name: str) -> str:
+            match = re.search(
+                rf"^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - name: |\Z)",
+                self.workflow, re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, name); assert match is not None
+            return match.group("body")
+
+        def program(name: str) -> str:
+            match = re.search(rf"- name: {re.escape(name)}.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+            self.assertIsNotNone(match, name); assert match is not None
+            return self._workflow_program(match)
+
+        first_name = "Pre-invalidate priority event heads (first TTL-safe chunk)"
+        second_name = "Pre-invalidate priority event heads (second TTL-safe chunk)"
+        fence = step("Fail closed after deferred priority barrier setup")
+        for name in (
+            "Create first priority invalidator write token",
+            "Create first priority invalidator read token",
+            first_name,
+            "Create second priority invalidator write token",
+            "Create second priority invalidator read token",
+            second_name,
+        ):
+            self.assertIn("if: always()", step(name), name)
+        self.assertIn("if: always()", fence)
+        self.assertIn("PREINVALIDATE_CHUNK_1_OUTCOME", fence)
+        self.assertIn("PREINVALIDATE_CHUNK_2_OUTCOME", fence)
+        self.assertLess(self.workflow.index(f"- name: {first_name}"), self.workflow.index(f"- name: {second_name}"))
+        self.assertLess(self.workflow.index(f"- name: {second_name}"), self.workflow.index("- name: Fail closed after deferred priority barrier setup"))
+
+        first_program = program(first_name)
+        second_program = program(second_name)
+        heads = {72: "a" * 40, 73: "b" * 40}
+        events: list[str] = []
+        state: dict[str, object] = {"next_id": 901, "ids": {}, "pending": {}}
+
+        def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            environment = kwargs.get("env")
+            self.assertIsInstance(environment, dict)
+            token = environment.get("GH_TOKEN")  # type: ignore[union-attr]
+            endpoints = [value for value in arguments if isinstance(value, str) and value.startswith("repos/")]
+            self.assertEqual(len(endpoints), 1, arguments)
+            endpoint = endpoints[0]
+            if endpoint == "repos/owner/repository/check-runs":
+                self.assertEqual(arguments[arguments.index("--method") + 1], "POST")
+                fields = {field.split("=", 1)[0]: field.split("=", 1)[1] for field in arguments if isinstance(field, str) and "=" in field}
+                self.assertIn(token, {"write-1", "write-2"})
+                head = fields["head_sha"]
+                number = 72 if head == heads[72] else 73
+                events.append(f"post-{number}")
+                if token == "write-1":
+                    return response({}, 1)
+                identifier = state["next_id"]  # type: ignore[assignment]
+                state["next_id"] = identifier + 1  # type: ignore[operator]
+                state["ids"][identifier] = head  # type: ignore[index]
+                state["pending"][head] = True  # type: ignore[index]
+                return response({"id": identifier, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": fields["external_id"], "status": "in_progress", "conclusion": None, "details_url": fields["details_url"], "app": {"id": 4766933}})
+            if endpoint.startswith("repos/owner/repository/check-runs/"):
+                self.assertEqual(token, "read-2")
+                identifier = int(endpoint.rsplit("/", 1)[1]); head = state["ids"][identifier]  # type: ignore[index]
+                return response({"id": identifier, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": f"krr-governance/v1/{head}/dispatcher-99", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4766933}})
+            if endpoint == "repos/owner/repository/pulls/73":
+                self.assertEqual(token, "read-2")
+                return response({"number": 73, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": heads[73], "repo": {"full_name": "owner/repository"}}})
+            if endpoint == "repos/owner/repository/pulls/72":
+                self.assertEqual(token, "read-1")
+                return response({"number": 72, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": heads[72], "repo": {"full_name": "owner/repository"}}})
+            raise AssertionError(arguments)
+
+        def execute(source: str, environment: dict[str, str]) -> bool:
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                try:
+                    exec(source, {"__name__": "__main__"})
+                except SystemExit:
+                    return False
+                return True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            common = {"GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "PATH": os.environ["PATH"], "CHECK_APP_ID": "4766933", "DEFAULT_BRANCH": "master", "DISPATCHER_RUN_ID": "99", "GITHUB_OUTPUT": str(Path(temporary) / "output")}
+            first_environment = common | {"GH_TOKEN": "read-1", "CHECK_WRITE_TOKEN": "write-1", "TARGETS": "[72]", "TARGET_SNAPSHOTS": json.dumps([[72, heads[72], False, "master", "owner/repository", "owner/repository"]], separators=(",", ":"))}
+            second_environment = common | {"GH_TOKEN": "read-2", "CHECK_WRITE_TOKEN": "write-2", "TARGETS": "[73]", "TARGET_SNAPSHOTS": json.dumps([[73, heads[73], False, "master", "owner/repository", "owner/repository"]], separators=(",", ":"))}
+            self.assertFalse(execute(first_program, first_environment))
+            self.assertTrue(execute(second_program, second_environment))
+            self.assertEqual(events, ["post-72", "post-73"])
+            self.assertEqual(set(state["pending"]), {heads[73]})  # type: ignore[arg-type]
+
+            fence_environment = common | {
+                "MARKER_WRITE_OUTCOME": "success", "MARKER_READ_OUTCOME": "success", "MARKER_PUBLISH_OUTCOME": "success",
+                "BARRIER_TOKEN_OUTCOME": "success", "BARRIER_ACTIVATE_OUTCOME": "success", "BARRIER_ACTIVE": "true",
+                "PREINVALIDATE_CHUNK_1_REQUIRED": "true", "PREINVALIDATE_CHUNK_1_OUTCOME": "failure",
+                "PREINVALIDATE_CHUNK_2_REQUIRED": "true", "PREINVALIDATE_CHUNK_2_OUTCOME": "success",
+            }
+            fence_program = program("Fail closed after deferred priority barrier setup")
+            success_environment = fence_environment | {"PREINVALIDATE_CHUNK_1_OUTCOME": "success"}
+            self.assertTrue(execute(fence_program, success_environment))
+            for failed_outcome in (
+                "MARKER_WRITE_OUTCOME", "MARKER_READ_OUTCOME", "MARKER_PUBLISH_OUTCOME", "BARRIER_TOKEN_OUTCOME",
+                "BARRIER_ACTIVATE_OUTCOME", "PREINVALIDATE_CHUNK_1_OUTCOME", "PREINVALIDATE_CHUNK_2_OUTCOME",
+            ):
+                with self.subTest(failed_outcome=failed_outcome):
+                    self.assertFalse(execute(fence_program, success_environment | {failed_outcome: "failure"}))
+            self.assertFalse(execute(fence_program, success_environment | {"BARRIER_ACTIVE": "false"}))
+
     def test_old_writer_generation_cannot_terminalize_current_manifest_check(self) -> None:
         """旧dispatcherのfingerprintはcurrent manifest IDのPATCH前に停止する。"""
         head = "a" * 40
