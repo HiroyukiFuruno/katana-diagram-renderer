@@ -89,6 +89,9 @@ jobs:
               fail("Sensor source run ID is invalid.")
           if positive_number.fullmatch(app_id) is None:
               fail("KRR_GOVERNANCE_APP_ID is not configured.")
+          generation_pattern = re.compile(
+              rf"^krr-governance/v1/{re.escape(head_sha.lower())}/(?:writer|dispatcher)-[1-9][0-9]*$"
+          )
 
           try:
               interval = int(os.environ["POLL_INTERVAL_SECONDS"])
@@ -107,7 +110,12 @@ jobs:
               app = check.get("app")
               if not isinstance(app, dict) or str(app.get("id")) != app_id:
                   return False
-              if check.get("head_sha") != head_sha or check.get("external_id") != f"krr-governance/v1/{head_sha.lower()}":
+              external_id = check.get("external_id")
+              if (
+                  check.get("head_sha") != head_sha
+                  or not isinstance(external_id, str)
+                  or generation_pattern.fullmatch(external_id) is None
+              ):
                   return False
               try:
                   source_values = parse_qs(
