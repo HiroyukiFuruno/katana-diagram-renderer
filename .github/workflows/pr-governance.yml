@@ -514,7 +514,11 @@ jobs:
           PY
 
       - name: Create periodic affected-head barrier marker write token
-        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        # The first priority event can be the first attempt to add this
+        # context.  Seed its fixed-App Check Run before the context-only
+        # branch-protection mutation, or GitHub cannot bind the context to the
+        # trusted App identity.
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
         id: barrier-marker-write
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -525,7 +529,7 @@ jobs:
           permission-checks: write
 
       - name: Create periodic affected-head barrier marker read token
-        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
         id: barrier-marker-read
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -536,7 +540,7 @@ jobs:
           permission-checks: read
 
       - name: Publish periodic static affected-head barrier App marker
-        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'
         env:
           CHECK_WRITE_TOKEN: ${{ steps.barrier-marker-write.outputs.token }}
           CHECK_READ_TOKEN: ${{ steps.barrier-marker-read.outputs.token }}

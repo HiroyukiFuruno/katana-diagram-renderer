@@ -1303,10 +1303,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("required_status_checks/contexts", activate)
         self.assertIn("required_status_checks/contexts", release)
         self.assertNotIn("actions/checkout", self.workflow)
-        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'"
+        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'"
         self.assertEqual(self.workflow.count(marker_condition), 3)
         marker_steps = self.workflow[self.workflow.index("Create periodic affected-head barrier marker write token"):self.workflow.index("Create affected-head barrier branch-protection token")]
-        self.assertNotIn("has_preinvalidate_targets", marker_steps)
+        self.assertIn("has_preinvalidate_targets", marker_steps)
         baseline = {
             "required_status_checks": {"strict": True, "contexts": ["CI / test"], "checks": [{"context": "CI / test", "app_id": None}]},
             "enforce_admins": {"enabled": True}, "required_conversation_resolution": {"enabled": True},
@@ -1440,6 +1440,43 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
             pulls[:] = []
             self.assertEqual(execute(release, release_env("[]", "[]", "[]")), 0, "a later schedule recovers a static barrier even after all PRs close")
+
+    def test_fresh_priority_event_publishes_app_barrier_before_context_only_binding(self) -> None:
+        """The first priority generation must seed the App marker before adding its context."""
+        marker_match = re.search(
+            r"^      - name: Publish periodic static affected-head barrier App marker\n(?P<body>.*?)(?=^      - name: )",
+            self.workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(marker_match); assert marker_match is not None
+        marker_step = marker_match.group("body")
+        condition = re.search(r"^        if: (?P<value>.+)$", marker_step, re.MULTILINE)
+        self.assertIsNotNone(condition); assert condition is not None
+
+        # A fresh issue/review/CI event may be the first event after bootstrap;
+        # schedule-only marker publication leaves context-only activation
+        # unbound to the App marker on that first priority path.
+        self.assertIn("steps.current-targets.outputs.has_preinvalidate_targets == 'true'", condition.group("value"))
+        self.assertIn("steps.barrier-source.outcome == 'success'", condition.group("value"))
+        self.assertIn("context=\"KRR / PR governance affected-head barrier\"", marker_step)
+        self.assertIn("app_id=4_766_933", marker_step)
+        self.assertIn("posted[\"app\"].get(\"id\")!=app_id", marker_step)
+
+        activate_match = re.search(
+            r"^      - name: Activate complete affected-head merge barrier\n(?P<body>.*?)(?=^      - name: )",
+            self.workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(activate_match); assert activate_match is not None
+        activate_step = activate_match.group("body")
+        self.assertIn("required_status_checks/contexts", activate_step)
+        self.assertIn('mutate("POST")', activate_step)
+        self.assertIn('if matches==[(context,app_id)]', activate_step)
+
+        # Zero-target reconciliation must not manufacture a fresh marker or
+        # mutate branch protection; priority is the only additional trigger.
+        self.assertNotIn("steps.current-targets.outputs.has_preinvalidate_targets == 'false'", condition.group("value"))
+        self.assertLess(self.workflow.index("Publish periodic static affected-head barrier App marker"), self.workflow.index("Activate complete affected-head merge barrier"))
 
     def test_old_writer_generation_cannot_terminalize_current_manifest_check(self) -> None:
         """旧dispatcherのfingerprintはcurrent manifest IDのPATCH前に停止する。"""
