@@ -12,6 +12,7 @@ on:
     # reconciliation run reads every open PR page without emitting a second
     # synchronous pending status for every unchanged PR.
     - cron: '17 */6 * * *'
+  workflow_dispatch:
   workflow_run:
     workflows: [PR governance review sensor, CI, release-preflight]
     types: [requested, in_progress, completed]
@@ -197,7 +198,7 @@ jobs:
               return {number for number, body in bodies.items() if text in set(closing.findall(body))}
           source_number_value: int | None = None
           priority_event = False
-          if event_name == "schedule":
+          if event_name in {"schedule", "workflow_dispatch"}:
               affected = numbers
           elif event_name == "workflow_run":
               source_number = source.get("number")
@@ -265,7 +266,9 @@ jobs:
               )
           priority_targets = ordered_targets if priority_event else []
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("reconcile=" + ("true" if affected else "false") + "\n")
+              # 後続の優先イベントが静的必須contextを固定Appへ束縛できるよう、
+              # open PRがない場合も既定branchのmarkerを定期更新する。
+              output.write("reconcile=" + ("true" if affected or event_name in {"schedule", "workflow_dispatch"} else "false") + "\n")
               output.write("event_targets=" + json.dumps(ordered_targets, separators=(",", ":")) + "\n")
               output.write("priority_targets=" + json.dumps(priority_targets, separators=(",", ":")) + "\n")
           PY
@@ -480,6 +483,148 @@ jobs:
               output.write("priority_target_snapshots=" + json.dumps([[number, *priority_identity_snapshots[number]] for number in priority_targets], separators=(",", ":")) + "\n")
               output.write("writer_head=" + writer_head + "\n")
               output.write("default_branch=" + branch + "\n")
+          PY
+
+      - name: Verify default-branch governance source before barrier credentials
+        id: barrier-source
+        if: github.run_attempt == 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
+          DEFAULT_HEAD: ${{ steps.current-targets.outputs.writer_head }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("DEFAULT_HEAD", ""); workflow_ref=os.environ.get("WORKFLOW_REF", ""); workflow_sha=os.environ.get("WORKFLOW_SHA", "")
+          if not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or workflow_ref!=f"{repository}/.github/workflows/pr-governance.yml@refs/heads/{branch}" or workflow_sha.lower()!=head.lower(): raise SystemExit("Governance barrier workflow source is not the trusted default branch.")
+          source_env={"GH_TOKEN":os.environ["GH_TOKEN"],"PATH":os.environ["PATH"]}
+          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env)
+          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env)
+          if repository_result.returncode!=0 or reference_result.returncode!=0: raise SystemExit("Unable to bind governance barrier default branch source.")
+          try: current_branch=json.loads(repository_result.stdout).get("default_branch"); current_head=json.loads(reference_result.stdout).get("object",{}).get("sha")
+          except json.JSONDecodeError as error: raise SystemExit("Governance barrier default branch source is not JSON.") from error
+          if current_branch!=branch or not isinstance(current_head,str) or current_head.lower()!=head.lower(): raise SystemExit("Governance barrier default branch source changed.")
+          result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={head}"],capture_output=True,text=True,check=False,env=source_env)
+          if result.returncode!=0: raise SystemExit("Unable to bind governance barrier workflow blob.")
+          try: payload=json.loads(result.stdout); blob=payload.get("sha") if isinstance(payload,dict) else None
+          except json.JSONDecodeError as error: raise SystemExit("Governance barrier workflow blob is not JSON.") from error
+          if not isinstance(blob,str) or re.fullmatch(r"[0-9a-fA-F]{40}",blob) is None: raise SystemExit("Governance barrier workflow blob is invalid.")
+          PY
+
+      - name: Create periodic affected-head barrier marker write token
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        id: barrier-marker-write
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+
+      - name: Create periodic affected-head barrier marker read token
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        id: barrier-marker-read
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: read
+
+      - name: Publish periodic static affected-head barrier App marker
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'
+        env:
+          CHECK_WRITE_TOKEN: ${{ steps.barrier-marker-write.outputs.token }}
+          CHECK_READ_TOKEN: ${{ steps.barrier-marker-read.outputs.token }}
+          DEFAULT_HEAD: ${{ steps.current-targets.outputs.writer_head }}
+          DISPATCHER_RUN_ID: ${{ github.run_id }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from urllib.parse import urlencode
+          repository=os.environ["GITHUB_REPOSITORY"]; head=os.environ.get("DEFAULT_HEAD", ""); dispatcher=os.environ.get("DISPATCHER_RUN_ID", ""); configured_app=os.environ.get("CHECK_APP_ID", ""); context="KRR / PR governance affected-head barrier"; app_id=4_766_933
+          write_token=os.environ.get("CHECK_WRITE_TOKEN", ""); read_token=os.environ.get("CHECK_READ_TOKEN", "")
+          if configured_app!=str(app_id) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or re.fullmatch(r"[1-9][0-9]*",dispatcher) is None or not write_token or not read_token or write_token==read_token: raise SystemExit("Affected-head barrier marker identity is invalid.")
+          write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}; read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; external=f"krr-governance-affected-head-barrier/v1/{head.lower()}/scheduler-{dispatcher}"; details=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}?"+urlencode({"barrier_marker":"periodic"})
+          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+          if created.returncode!=0: raise SystemExit("Unable to publish affected-head barrier marker.")
+          try: posted=json.loads(created.stdout); identifier=posted.get("id") if isinstance(posted,dict) else None
+          except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier marker is not JSON.") from error
+          if type(identifier) is not int or identifier<1 or posted.get("name")!=context or posted.get("head_sha")!=head or posted.get("external_id")!=external or posted.get("status")!="completed" or posted.get("conclusion")!="success" or posted.get("details_url")!=details or not isinstance(posted.get("app"),dict) or posted["app"].get("id")!=app_id: raise SystemExit("Affected-head barrier marker is invalid.")
+          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+          if reread.returncode!=0: raise SystemExit("Unable to re-read affected-head barrier marker.")
+          try: marker=json.loads(reread.stdout)
+          except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier marker re-read is not JSON.") from error
+          if not isinstance(marker,dict) or marker.get("id")!=identifier or marker.get("name")!=context or marker.get("head_sha")!=head or marker.get("external_id")!=external or marker.get("status")!="completed" or marker.get("conclusion")!="success" or marker.get("details_url")!=details or not isinstance(marker.get("app"),dict) or marker["app"].get("id")!=app_id: raise SystemExit("Affected-head barrier marker re-read is invalid.")
+          PY
+
+      - name: Create affected-head barrier branch-protection token
+        if: steps.barrier-source.outcome == 'success'
+        id: barrier-protection-activate
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: write
+
+      - name: Activate complete affected-head merge barrier
+        id: affected-barrier
+        if: steps.barrier-source.outcome == 'success'
+        env:
+          ADMIN_TOKEN: ${{ steps.barrier-protection-activate.outputs.token }}
+          DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          PRIORITY: ${{ steps.current-targets.outputs.has_preinvalidate_targets }}
+        run: |
+          python3 - <<'PY'
+          import copy, json, os, re, subprocess
+
+          repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); configured_app=os.environ.get("CHECK_APP_ID", ""); priority=os.environ.get("PRIORITY", "")
+          app_id=4_766_933; context="KRR / PR governance affected-head barrier"
+          if configured_app!=str(app_id) or re.fullmatch(r"[A-Za-z0-9._/-]+",branch) is None or priority not in {"true","false"}: raise SystemExit("Affected-head barrier identity is invalid.")
+          token=os.environ.get("ADMIN_TOKEN", "")
+          if not token: raise SystemExit("Affected-head barrier token is invalid.")
+          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          def request(arguments):
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0: raise SystemExit("Affected-head barrier API request failed.")
+              try: return json.loads(result.stdout)
+              except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier API response is not JSON.") from error
+          def canonical(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)
+          def records(protection):
+              required=protection.get("required_status_checks") if isinstance(protection,dict) else None; checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
+              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              result=[]
+              for item in checks:
+                  if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int): raise SystemExit("Affected-head barrier branch protection is invalid.")
+                  result.append((item["context"],item["app_id"]))
+              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              return result
+          def mutate(method):
+              result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0: return None
+              try: value=json.loads(result.stdout)
+              except json.JSONDecodeError: return None
+              return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) and context in value else None
+          before=request([protection_endpoint]); before_records=records(before); matches=[record for record in before_records if record[0]==context]
+          if matches==[(context,app_id)]: active=True
+          elif matches: raise SystemExit("Affected-head barrier has an unexpected App source.")
+          elif priority=="false": active=False
+          else:
+              response=mutate("POST"); after=request([protection_endpoint]); after_records=records(after)
+              if not any(record[0]==context for record in after_records):
+                  response=mutate("POST"); after=request([protection_endpoint]); after_records=records(after)
+              expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[*expected_required["checks"],{"context":context,"app_id":app_id}]; expected_required["contexts"]=[*expected_required["contexts"],context]
+              if response is None or after_records.count((context,app_id))!=1 or canonical(after)!=canonical(expected): raise SystemExit("Affected-head barrier atomic activation failed; manual recovery is required.")
+              active=True
+          with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("active="+("true" if active else "false")+"\n")
           PY
 
       - name: Create first priority invalidator write token
@@ -1185,6 +1330,161 @@ jobs:
               output.write("carry_target_numbers="+json.dumps(carry_targets,separators=(",",":"))+"\n")
           PY
 
+      - name: Create fresh affected-head barrier read token
+        if: steps.affected-barrier.outputs.active == 'true'
+        id: barrier-read-release
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Create fresh affected-head barrier branch-protection token
+        if: steps.affected-barrier.outputs.active == 'true'
+        id: barrier-protection-release
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: write
+
+      - name: Release complete affected-head merge barrier only after full pending coverage
+        if: steps.affected-barrier.outputs.active == 'true'
+        env:
+          READ_TOKEN: ${{ steps.barrier-read-release.outputs.token }}
+          ADMIN_TOKEN: ${{ steps.barrier-protection-release.outputs.token }}
+          DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
+          DEFAULT_HEAD: ${{ steps.current-targets.outputs.writer_head }}
+          DISPATCHER_RUN_ID: ${{ github.run_id }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          TARGETS: ${{ steps.current-targets.outputs.targets }}
+          TARGET_SNAPSHOTS: ${{ steps.current-targets.outputs.target_snapshots }}
+          PRE_MANIFEST_1: ${{ steps.preinvalidate-1.outputs.check_manifest || '[]' }}
+          PRE_MANIFEST_2: ${{ steps.preinvalidate-2.outputs.check_manifest || '[]' }}
+          TAIL_MANIFEST_1: ${{ steps.invalidate-all-1.outputs.check_manifest || '[]' }}
+          TAIL_MANIFEST_2: ${{ steps.invalidate-all-2.outputs.check_manifest || '[]' }}
+          DUPLICATE_GOVERNED_HEADS: ${{ steps.current-targets.outputs.duplicate_governed_heads }}
+        run: |
+          python3 - <<'PY'
+          import copy, json, os, re, subprocess
+          from datetime import datetime
+          from urllib.parse import parse_qs, urlparse
+
+          repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("DEFAULT_HEAD", ""); dispatcher=os.environ.get("DISPATCHER_RUN_ID", ""); configured_app=os.environ.get("CHECK_APP_ID", ""); workflow_ref=os.environ.get("WORKFLOW_REF", ""); workflow_sha=os.environ.get("WORKFLOW_SHA", "")
+          app_id=4_766_933; context="KRR / PR governance affected-head barrier"; writer_path=".github/workflows/pr-governance.yml"
+          if configured_app!=str(app_id) or re.fullmatch(r"[A-Za-z0-9._/-]+",branch) is None or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or re.fullmatch(r"[1-9][0-9]*",dispatcher) is None or workflow_ref!=f"{repository}/{writer_path}@refs/heads/{branch}" or workflow_sha.lower()!=head.lower(): raise SystemExit("Affected-head barrier release identity is invalid.")
+          read_token=os.environ.get("READ_TOKEN", ""); admin_token=os.environ.get("ADMIN_TOKEN", "")
+          if not read_token or not admin_token or read_token==admin_token: raise SystemExit("Affected-head barrier release token boundary is invalid.")
+          read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; admin_env={"GH_TOKEN":admin_token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          def request(arguments, *, env, body=None):
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],input=body,capture_output=True,text=True,check=False,env=env)
+              if result.returncode!=0: raise SystemExit("Affected-head barrier release API request failed.")
+              try: return json.loads(result.stdout)
+              except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier release API response is not JSON.") from error
+          def canonical(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)
+          def records(protection):
+              required=protection.get("required_status_checks") if isinstance(protection,dict) else None
+              checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
+              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              result=[]
+              for item in checks:
+                  if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int): raise SystemExit("Affected-head barrier branch protection is invalid.")
+                  result.append((item["context"],item["app_id"]))
+              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              return required,result
+          def mutate(method):
+              result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0: return None
+              try: value=json.loads(result.stdout)
+              except json.JSONDecodeError: return None
+              return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) else None
+          def path_matches(value):
+              if value==writer_path: return True
+              if not isinstance(value,str) or not value.startswith(writer_path+"@"): return False
+              ref=value[len(writer_path)+1:]
+              return re.fullmatch(r"[A-Za-z0-9._/-]+",ref) is not None and ref not in {".",".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"",".",".."} for part in ref.split("/"))
+          def parse_time(value):
+              if not isinstance(value,str): raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              try: return datetime.fromisoformat(value.replace("Z","+00:00"))
+              except ValueError as error: raise SystemExit("Affected-head barrier dispatcher generation is invalid.") from error
+          values=[]
+          for name in ("TARGETS","TARGET_SNAPSHOTS","PRE_MANIFEST_1","PRE_MANIFEST_2","TAIL_MANIFEST_1","TAIL_MANIFEST_2","DUPLICATE_GOVERNED_HEADS"):
+              raw=os.environ.get(name, "")
+              try: value=json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier manifest is invalid.") from error
+              if json.dumps(value,separators=(",",":"))!=raw: raise SystemExit("Affected-head barrier manifest is invalid.")
+              values.append(value)
+          targets,snapshots,pre_1,pre_2,tail_1,tail_2,duplicates=values
+          if not isinstance(targets,list) or any(type(number) is not int or number<1 for number in targets) or len(set(targets))!=len(targets) or not isinstance(snapshots,list) or len(snapshots)!=len(targets) or any(not isinstance(entry,list) or len(entry)!=3 or entry[0]!=number or not isinstance(entry[1],str) or re.fullmatch(r"[0-9a-fA-F]{40}",entry[1]) is None or type(entry[2]) is not bool for entry,number in zip(snapshots,targets,strict=True)) or not all(isinstance(manifest,list) for manifest in (pre_1,pre_2,tail_1,tail_2)) or not isinstance(duplicates,list) or duplicates:
+              raise SystemExit("Affected-head barrier manifest is invalid.")
+          expected_snapshots={number:(entry[1].lower(),entry[2]) for entry,number in zip(snapshots,targets,strict=True)}
+          manifest=[*pre_1,*pre_2,*tail_1,*tail_2]
+          if any(not isinstance(entry,list) or len(entry)!=2 or type(entry[0]) is not int or entry[0]<1 or type(entry[1]) is not int or entry[1]<1 for entry in manifest) or len(manifest)!=len(targets) or {entry[0] for entry in manifest}!=set(targets) or len({entry[0] for entry in manifest})!=len(manifest) or len({entry[1] for entry in manifest})!=len(manifest): raise SystemExit("Affected-head barrier pending coverage is incomplete.")
+          # staleな全件snapshotでbarrierを解除しないよう、保護設定の更新直前に
+          # 新しいread-only App tokenで最終snapshotを再取得する。
+          repo=request([f"repos/{repository}"],env=read_env); reference=request([f"repos/{repository}/git/ref/heads/{branch}"],env=read_env); blob=request([f"repos/{repository}/contents/{writer_path}?ref={head}"],env=read_env)
+          ref_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None
+          blob_sha=blob.get("sha") if isinstance(blob,dict) else None
+          if not isinstance(repo,dict) or repo.get("default_branch")!=branch or not isinstance(ref_head,str) or ref_head.lower()!=head.lower() or not isinstance(blob_sha,str) or re.fullmatch(r"[0-9a-fA-F]{40}",blob_sha) is None: raise SystemExit("Affected-head barrier source changed before release.")
+          pages=request(["--paginate","--slurp",f"repos/{repository}/pulls?state=open&per_page=100"],env=read_env)
+          if not isinstance(pages,list) or not all(isinstance(page,list) for page in pages): raise SystemExit("Affected-head barrier current pull request response is invalid.")
+          fresh={}; governed_heads={}
+          for page in pages:
+              for pull in page:
+                  number=pull.get("number") if isinstance(pull,dict) else None; base=pull.get("base") if isinstance(pull,dict) else None; pull_head=pull.get("head") if isinstance(pull,dict) else None; base_repo=base.get("repo") if isinstance(base,dict) else None; head_repo=pull_head.get("repo") if isinstance(pull_head,dict) else None
+                  if type(number) is not int or number<1 or number in fresh or not isinstance(base_repo,dict) or not isinstance(head_repo,dict) or pull.get("state")!="open": raise SystemExit("Affected-head barrier current pull request response is invalid.")
+                  if base_repo.get("full_name")!=repository or head_repo.get("full_name")!=repository or base.get("ref")!=branch: continue
+                  pull_sha=pull_head.get("sha"); draft=pull.get("draft")
+                  if not isinstance(pull_sha,str) or re.fullmatch(r"[0-9a-fA-F]{40}",pull_sha) is None or type(draft) is not bool: raise SystemExit("Affected-head barrier current pull request response is invalid.")
+                  fresh[number]=(pull_sha.lower(),draft); governed_heads.setdefault(pull_sha.lower(),[]).append(number)
+          fresh_duplicates=sorted(name for name,members in governed_heads.items() if len(members)>1)
+          if fresh!=expected_snapshots or fresh_duplicates!=duplicates: raise SystemExit("Affected-head barrier current pull request snapshot changed before release.")
+          source=request([f"repos/{repository}/actions/runs/{dispatcher}"],env=read_env); listed=request(["--paginate","--slurp",f"repos/{repository}/actions/workflows/pr-governance.yml/runs?per_page=100"],env=read_env)
+          if not isinstance(listed,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in listed): raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+          def generation(run):
+              run_repo=run.get("repository") if isinstance(run,dict) else None
+              if not isinstance(run,dict) or type(run.get("id")) is not int or run["id"]<1 or run.get("name")!="PR governance dispatcher" or not path_matches(run.get("path")) or run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or not isinstance(run_repo,dict) or run_repo.get("full_name")!=repository or run.get("head_branch")!=branch or not isinstance(run.get("head_sha"),str) or run["head_sha"].lower()!=head.lower() or type(run.get("run_attempt")) is not int or run["run_attempt"]!=1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              return parse_time(run.get("created_at")),run["id"]
+          current_generation=generation(source)
+          if source.get("status") not in {"requested","queued","in_progress"}: raise SystemExit("Affected-head barrier dispatcher generation is not active.")
+          observed=[]
+          for page in listed:
+              for run in page["workflow_runs"]:
+                  if not isinstance(run,dict): raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+                  if run.get("head_branch")==branch and isinstance(run.get("head_sha"),str) and run["head_sha"].lower()==head.lower(): observed.append((generation(run),run.get("id")))
+          if sum(identifier==int(dispatcher) for _generation,identifier in observed)!=1 or any(candidate>current_generation for candidate,_identifier in observed): raise SystemExit("Affected-head barrier newer dispatcher generation prevents release.")
+          details_base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}"
+          details_parts=urlparse(details_base)
+          for number,identifier in manifest:
+              check=request([f"repos/{repository}/check-runs/{identifier}"],env=read_env); expected_head=fresh[number][0]
+              check_app=check.get("app") if isinstance(check,dict) else None; details=check.get("details_url") if isinstance(check,dict) else None
+              if not isinstance(check,dict) or check.get("id")!=identifier or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=expected_head or check.get("external_id")!=f"krr-governance/v1/{expected_head}/dispatcher-{dispatcher}" or check.get("status")!="in_progress" or check.get("conclusion") is not None or not isinstance(check_app,dict) or check_app.get("id")!=app_id or not isinstance(details,str): raise SystemExit("Affected-head barrier pending Check Run is invalid.")
+              parts=urlparse(details); query=parse_qs(parts.query,keep_blank_values=True)
+              if parts.scheme!=details_parts.scheme or parts.netloc!=details_parts.netloc or parts.path!=details_parts.path or parts.params or parts.fragment or query.keys()!={"dispatcher_run_id","carry_pending"} or query["dispatcher_run_id"]!=[dispatcher] or query["carry_pending"] not in (["0"],["1"]): raise SystemExit("Affected-head barrier pending Check Run is invalid.")
+          before=request([protection_endpoint],env=admin_env); _required,before_records=records(before)
+          if before_records.count((context,app_id))!=1 or any(name==context and owner!=app_id for name,owner in before_records): raise SystemExit("Affected-head barrier branch protection drifted before release.")
+          expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[{"context":name,"app_id":owner} for name,owner in before_records if name!=context]; expected_required["contexts"]=[name for name,_ in before_records if name!=context]
+          response=mutate("DELETE"); after=request([protection_endpoint],env=admin_env); _after_required,after_records=records(after)
+          if response is None:
+              # DELETEの適用有無が不明な場合はbarrierを復元してから停止し、
+              # 通信失敗によるmerge gapを作らない。
+              if not any(name==context for name,_owner in after_records):
+                  for _ in range(2):
+                      restored=mutate("POST"); repaired=request([protection_endpoint],env=admin_env); _repaired_required,repaired_records=records(repaired)
+                      if restored is not None and repaired_records.count((context,app_id))==1: raise SystemExit("Affected-head barrier DELETE was uncertain and was restored.")
+              raise SystemExit("Affected-head barrier atomic release failed; manual recovery is required.")
+          if context in response or any(name==context for name,_owner in after_records) or canonical(after)!=canonical(expected): raise SystemExit("Affected-head barrier branch protection drifted during release.")
+          PY
+
       - name: Create fresh all-writer dispatcher token
         if: steps.current-targets.outputs.has_targets == 'true'
         id: all-dispatcher-token
@@ -1361,7 +1661,7 @@ jobs:
               raise SystemExit("Trusted default branch advanced before terminal dispatch.")
           source_run = get(f"repos/{repository}/actions/runs/{dispatcher_run_id}")
           source_repository = source_run.get("repository") if isinstance(source_run, dict) else None
-          if not isinstance(source_run, dict) or source_run.get("id") != int(dispatcher_run_id) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or not isinstance(source_repository, dict) or source_repository.get("full_name") != repository or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or source_run.get("status") not in {"requested", "queued", "in_progress"}:
+          if not isinstance(source_run, dict) or source_run.get("id") != int(dispatcher_run_id) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or not isinstance(source_repository, dict) or source_repository.get("full_name") != repository or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or source_run.get("status") not in {"requested", "queued", "in_progress"}:
               raise SystemExit("Governance dispatcher source identity changed before terminal dispatch.")
           listed = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"], capture_output=True, text=True, check=False)
           if listed.returncode != 0:
@@ -1600,7 +1900,7 @@ jobs:
           source_run = get(f"repos/{repository}/actions/runs/{source}")
           ref_head = ref.get("object", {}).get("sha") if isinstance(ref, dict) and isinstance(ref.get("object"), dict) else None
           source_repo = source_run.get("repository") if isinstance(source_run, dict) else None
-          if not isinstance(repo, dict) or repo.get("default_branch") != branch or ref_head != writer_head or not isinstance(source_run, dict) or source_run.get("id") != int(source) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or source_run.get("status") not in {"requested", "queued", "in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or not isinstance(source_repo, dict) or source_repo.get("full_name") != repository:
+          if not isinstance(repo, dict) or repo.get("default_branch") != branch or ref_head != writer_head or not isinstance(source_run, dict) or source_run.get("id") != int(source) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or source_run.get("status") not in {"requested", "queued", "in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or not isinstance(source_repo, dict) or source_repo.get("full_name") != repository:
               raise SystemExit("Governance terminal segment source changed.")
           writer_path = ".github/workflows/pr-governance-status-writer.yml"
           bot_login = os.environ.get("APP_BOT_LOGIN", "")
@@ -1752,7 +2052,7 @@ jobs:
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
           repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None
-          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
+          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
           writer_path=".github/workflows/pr-governance-status-writer.yml"; bot=os.environ.get("APP_BOT_LOGIN", "")
           if re.fullmatch(r"[A-Za-z0-9-]+\[bot\]",bot) is None: raise SystemExit("Governance terminal writer actor is invalid.")
           for segment,previous_id in enumerate(completed,start=1):
@@ -1890,7 +2190,7 @@ jobs:
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
           repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None
-          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
+          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
           writer_path=".github/workflows/pr-governance-status-writer.yml"; bot=os.environ.get("APP_BOT_LOGIN", "")
           if re.fullmatch(r"[A-Za-z0-9-]+\[bot\]",bot) is None: raise SystemExit("Governance terminal writer actor is invalid.")
           for segment,previous_id in enumerate(completed,start=1):

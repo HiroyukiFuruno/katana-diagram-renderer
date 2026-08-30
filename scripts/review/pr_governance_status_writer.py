@@ -1141,7 +1141,11 @@ def final_evidence_for_pr(head: str, initial: EvidenceSnapshot) -> EvidenceSnaps
     total_count = page.get("total_count")
     if (
         not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
-        or type(total_count) is not int or total_count != len(runs) or total_count >= 100
+        # APIの件数と一致する100件pageは完全とみなし、多ければ次pageが必要、
+        # 少なければ不正な証跡として拒否する。
+        or type(total_count) is not int
+        or total_count < len(runs)
+        or total_count > len(runs)
         or any(run.get("head_sha") != head for run in runs)
     ):
         raise GovernanceError("Final workflow-run evidence is incomplete or mismatched.")

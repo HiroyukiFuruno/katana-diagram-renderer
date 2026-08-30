@@ -21,9 +21,9 @@ import verify_push_issue as issue_contract
 
 
 _MARKER_PATTERN = re.compile(
-    r"<!--\s*krr-review\s+phase=(?P<phase>initial|final)\s+"
-    r"head=(?P<head>[0-9a-fA-F]{40})\s+"
-    r"body-sha256=(?P<body_sha256>[0-9a-f]{64})\s*-->"
+    r"(?m)^<!-- krr-review phase=(?P<phase>initial|final) "
+    r"head=(?P<head>[0-9a-f]{40}) "
+    r"body-sha256=(?P<body_sha256>[0-9a-f]{64}) -->$"
 )
 _SUCCESSFUL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _VALID_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
@@ -1501,9 +1501,8 @@ def _governance_check_error(
         for item in matches:
             identifier = item.get("id")
             external = item.get("external_id")
-            details = item.get("details_url")
             created_at = item.get("created_at")
-            if type(identifier) is not int or identifier < 1 or not isinstance(external, str) or external_pattern.fullmatch(external) is None or not isinstance(details, str) or not isinstance(created_at, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", created_at):
+            if type(identifier) is not int or identifier < 1 or not isinstance(external, str) or external_pattern.fullmatch(external) is None or not isinstance(created_at, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", created_at):
                 return "trusted Check Run immutable generation is invalid"
             try:
                 created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
@@ -1511,10 +1510,6 @@ def _governance_check_error(
                 return "trusted Check Run immutable generation is invalid"
             if external in generations:
                 return "trusted Check Run immutable generation is ambiguous"
-            query = parse_qs(urlparse(details).query, keep_blank_values=True)
-            source = query.get("source_run_id", [])
-            if len(source) != 1 or re.fullmatch(r"[1-9][0-9]*", source[0]) is None:
-                return "trusted Check Run details_url lacks exact source_run_id evidence"
             generations[external] = (item, created)
         if not generations:
             return "trusted Check Run immutable generation is missing"

@@ -1285,6 +1285,186 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 result, _, _, _ = execute({72: first, 73: second}, snapshots)
                 self.assertEqual(result, 1)
 
+    def test_static_barrier_is_atomic_and_requires_fresh_complete_recovery(self) -> None:
+        """Execute the trusted YAML programs against atomic context API state transitions."""
+        def program(name: str) -> str:
+            match = re.search(rf"- name: {re.escape(name)}.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+            self.assertIsNotNone(match, name); assert match is not None
+            return self._workflow_program(match)
+
+        source = program("Verify default-branch governance source before barrier credentials")
+        activate = program("Activate complete affected-head merge barrier")
+        release = program("Release complete affected-head merge barrier only after full pending coverage")
+        marker = program("Publish periodic static affected-head barrier App marker")
+        barrier = "KRR / PR governance affected-head barrier"; head, other = "a" * 40, "b" * 40
+        self.assertLess(self.workflow.index("Activate complete affected-head merge barrier"), self.workflow.index("Pre-invalidate priority event heads"))
+        self.assertLess(self.workflow.index("Release complete affected-head merge barrier only after full pending coverage"), self.workflow.index("Dispatch one repository-wide governance arbiter segment"))
+        self.assertNotIn("required_status_checks\",\"--input\",\"-\"", self.workflow)
+        self.assertIn("required_status_checks/contexts", activate)
+        self.assertIn("required_status_checks/contexts", release)
+        self.assertNotIn("actions/checkout", self.workflow)
+        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && steps.barrier-source.outcome == 'success'"
+        self.assertEqual(self.workflow.count(marker_condition), 3)
+        marker_steps = self.workflow[self.workflow.index("Create periodic affected-head barrier marker write token"):self.workflow.index("Create affected-head barrier branch-protection token")]
+        self.assertNotIn("has_preinvalidate_targets", marker_steps)
+        baseline = {
+            "required_status_checks": {"strict": True, "contexts": ["CI / test"], "checks": [{"context": "CI / test", "app_id": None}]},
+            "enforce_admins": {"enabled": True}, "required_conversation_resolution": {"enabled": True},
+        }
+        state: dict[str, object] = {
+            "protection": json.loads(json.dumps(baseline)), "mutations": [], "uncertain_delete": False,
+            "pulls": [
+                {"number": 72, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}},
+                {"number": 73, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": other, "repo": {"full_name": "owner/repository"}}},
+            ],
+        }
+        run = {"id": 99, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@master", "event": "issue_comment", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": head, "run_attempt": 1, "status": "in_progress", "created_at": "2026-08-30T00:00:00Z"}
+        state["runs"] = [run]
+        state["manifest_checks"] = {
+            801: {"id": 801, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": f"krr-governance/v1/{head}/dispatcher-99", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4_766_933}},
+            802: {"id": 802, "name": "KRR / PR governance (trusted check)", "head_sha": other, "external_id": f"krr-governance/v1/{other}/dispatcher-99", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4_766_933}},
+        }
+        state["late_event_without_run_list"] = None
+        state["late_event_observed_at_release"] = False
+
+        def completed(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        def route(arguments: list[str]) -> str:
+            values = [value for value in arguments if isinstance(value, str) and value.startswith("repos/")]
+            self.assertEqual(len(values), 1, arguments)
+            return values[0]
+
+        def protection_records() -> list[dict[str, object]]:
+            protection = state["protection"]; self.assertIsInstance(protection, dict)
+            required = protection["required_status_checks"]; self.assertIsInstance(required, dict)
+            checks = required["checks"]; self.assertIsInstance(checks, list)
+            return checks
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(arguments[:4], ["gh", "api", "--hostname", "github.com"])
+            endpoint = route(arguments); environment = kwargs.get("env"); self.assertIsInstance(environment, dict)
+            token = environment.get("GH_TOKEN")  # type: ignore[union-attr]
+            if endpoint == "repos/owner/repository":
+                self.assertIn(token, {"source", "read"}); return completed({"default_branch": "master"})
+            if endpoint == "repos/owner/repository/git/ref/heads/master":
+                self.assertIn(token, {"source", "read"}); return completed({"object": {"sha": head}})
+            if endpoint.endswith("/contents/.github/workflows/pr-governance.yml?ref=" + head):
+                self.assertIn(token, {"source", "read"}); return completed({"sha": "c" * 40})
+            if endpoint == "repos/owner/repository/branches/master/protection":
+                self.assertEqual(token, "admin"); return completed(state["protection"])
+            if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks/contexts":
+                self.assertEqual(token, "admin"); method = arguments[arguments.index("--method") + 1]
+                self.assertIn(method, {"POST", "DELETE"}); self.assertEqual(json.loads(str(kwargs["input"])), {"contexts": [barrier]})
+                records = protection_records(); required = state["protection"]["required_status_checks"]  # type: ignore[index]
+                self.assertIsInstance(required, dict); mutations = state["mutations"]; self.assertIsInstance(mutations, list); mutations.append(method)
+                if method == "POST" and not any(item["context"] == barrier for item in records):
+                    records.append({"context": barrier, "app_id": 4_766_933}); required["contexts"].append(barrier)
+                if method == "DELETE":
+                    records[:] = [item for item in records if item["context"] != barrier]; required["contexts"][:] = [name for name in required["contexts"] if name != barrier]
+                    late_event = state["late_event_without_run_list"]
+                    if late_event is not None:
+                        runs = state["runs"]; checks = state["manifest_checks"]
+                        self.assertIsInstance(late_event, dict); self.assertIsInstance(runs, list); self.assertIsInstance(checks, dict)
+                        self.assertNotIn(late_event["id"], [item["id"] for item in runs])
+                        self.assertNotIn(barrier, required["contexts"])
+                        self.assertTrue(all(item["status"] == "in_progress" and item["conclusion"] is None for item in checks.values()))
+                        state["late_event_observed_at_release"] = True
+                    if state["uncertain_delete"]: return completed([], 1)
+                return completed(required["contexts"])
+            if endpoint == "repos/owner/repository/pulls?state=open&per_page=100":
+                self.assertEqual(token, "read"); return completed([state["pulls"]])
+            if endpoint == "repos/owner/repository/actions/runs/99":
+                self.assertEqual(token, "read"); return completed(run)
+            if endpoint == "repos/owner/repository/actions/workflows/pr-governance.yml/runs?per_page=100":
+                self.assertEqual(token, "read"); return completed([{"workflow_runs": state["runs"]}])
+            if endpoint == "repos/owner/repository/check-runs":
+                self.assertEqual(token, "marker-write"); return completed({"id": 501, "name": barrier, "head_sha": head, "external_id": f"krr-governance-affected-head-barrier/v1/{head}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4_766_933}})
+            if endpoint == "repos/owner/repository/check-runs/501":
+                self.assertEqual(token, "marker-read"); return completed({"id": 501, "name": barrier, "head_sha": head, "external_id": f"krr-governance-affected-head-barrier/v1/{head}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4_766_933}})
+            if endpoint in {"repos/owner/repository/check-runs/801", "repos/owner/repository/check-runs/802"}:
+                self.assertEqual(token, "read"); identifier = int(endpoint.rsplit("/", 1)[1]); checks = state["manifest_checks"]
+                self.assertIsInstance(checks, dict); return completed(checks[identifier])
+            raise AssertionError(arguments)
+
+        def execute(code: str, environment: dict[str, str]) -> int:
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                try:
+                    exec(code, {"__name__": "__main__"}); return 0
+                except SystemExit:
+                    return 1
+
+        def outputs(path: Path) -> dict[str, str]:
+            return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); output = directory / "output"
+            common = {"GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "PATH": os.environ["PATH"], "DEFAULT_BRANCH": "master", "DEFAULT_HEAD": head, "DISPATCHER_RUN_ID": "99", "CHECK_APP_ID": "4766933", "WORKFLOW_REF": "owner/repository/.github/workflows/pr-governance.yml@refs/heads/master", "WORKFLOW_SHA": head}
+            self.assertEqual(execute(source, common | {"GH_TOKEN": "source"}), 0)
+            self.assertEqual(execute(marker, common | {"CHECK_WRITE_TOKEN": "marker-write", "CHECK_READ_TOKEN": "marker-read"}), 0)
+            activate_env = common | {"ADMIN_TOKEN": "admin", "GITHUB_OUTPUT": str(output)}
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "false"}), 0)
+            self.assertEqual(outputs(output)["active"], "false"); self.assertEqual(state["mutations"], [])
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+            self.assertEqual(state["mutations"], ["POST"])
+            old_success = {"CI / test"}
+            self.assertNotEqual({item["context"] for item in protection_records()}, old_success, "atomic POST blocks old success before paced writes")
+            recovery = directory / "recovery"
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "false", "GITHUB_OUTPUT": str(recovery)}), 0)
+            self.assertEqual(outputs(recovery)["active"], "true")
+
+            def release_env(targets: str, snapshots: str, manifest_1: str, manifest_2: str = "[]") -> dict[str, str]:
+                return common | {"READ_TOKEN": "read", "ADMIN_TOKEN": "admin", "TARGETS": targets, "TARGET_SNAPSHOTS": snapshots, "PRE_MANIFEST_1": manifest_1, "PRE_MANIFEST_2": manifest_2, "TAIL_MANIFEST_1": "[]", "TAIL_MANIFEST_2": "[]", "DUPLICATE_GOVERNED_HEADS": "[]"}
+
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]")), 1)
+            self.assertEqual(state["mutations"], ["POST"])
+            pulls = state["pulls"]; self.assertIsInstance(pulls, list); pulls[0] = {**pulls[0], "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}}}
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+            self.assertEqual(state["mutations"], ["POST"]); pulls[0] = {**pulls[0], "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}
+            runs = state["runs"]; self.assertIsInstance(runs, list); runs.append({**run, "id": 100, "created_at": "2026-08-30T00:00:01Z"})
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+            self.assertEqual(state["mutations"], ["POST"]); runs.pop()
+            state["uncertain_delete"] = True
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST"]); state["uncertain_delete"] = False
+            runs.insert(0, {**run, "id": 98, "status": "completed", "created_at": "2026-08-29T23:59:59Z"})
+            state["late_event_without_run_list"] = {**run, "id": 100, "created_at": "2026-08-30T00:00:02Z"}
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
+            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE"]); runs.pop(0)
+            self.assertTrue(state["late_event_observed_at_release"])
+            manifest_checks = state["manifest_checks"]; self.assertIsInstance(manifest_checks, dict)
+            self.assertTrue(all(item["status"] == "in_progress" and item["conclusion"] is None for item in manifest_checks.values()))
+            state["late_event_without_run_list"] = None
+            self.assertEqual({item["context"] for item in protection_records()}, old_success)
+
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+            pulls[:] = []
+            self.assertEqual(execute(release, release_env("[]", "[]", "[]")), 0, "a later schedule recovers a static barrier even after all PRs close")
+
+    def test_old_writer_generation_cannot_terminalize_current_manifest_check(self) -> None:
+        """旧dispatcherのfingerprintはcurrent manifest IDのPATCH前に停止する。"""
+        head = "a" * 40
+        module_name = "krr_status_writer_barrier_old_generation"
+        spec = importlib.util.spec_from_file_location(module_name, ROOT / "scripts/review/pr_governance_status_writer.py")
+        self.assertIsNotNone(spec); assert spec is not None and spec.loader is not None
+        writer = importlib.util.module_from_spec(spec); sys.modules[module_name] = writer
+        try:
+            spec.loader.exec_module(writer)
+            old_external = f"krr-governance/v1/{head}/dispatcher-98"
+            current_external = f"krr-governance/v1/{head}/dispatcher-99"
+            old = {"id": 700, "name": writer.CHECK_NAME, "head_sha": head, "external_id": old_external, "updated_at": "2026-08-30T00:00:00Z", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/98?dispatcher_run_id=98&carry_pending=0", "app": {"id": 4_766_933}}
+            current = {"id": 801, "name": writer.CHECK_NAME, "head_sha": head, "external_id": current_external, "updated_at": "2026-08-30T00:00:01Z", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4_766_933}}
+            with patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "4766933", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_DISPATCHER_RUN_ID": "98"}, clear=False):
+                old_fingerprint = writer.check_fingerprint(old)
+            with patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "4766933", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_DISPATCHER_RUN_ID": "99"}, clear=False), \
+                 patch.object(writer, "check_run", return_value=current), patch.object(writer, "command") as command:
+                with self.assertRaises(writer.NoPostGovernanceError):
+                    writer.write_check(head, state="failure", description="old writer", details_url=current["details_url"], existing=current, expected_fingerprint=old_fingerprint)
+            self.assertNotEqual(old_fingerprint[-1], current_external)
+            command.assert_not_called()
+        finally:
+            sys.modules.pop(module_name, None)
+
     def test_invalidator_preempts_priority_dispatchers_and_paces_every_check_write(self) -> None:
         dispatcher_group = "group: pr-governance-dispatcher-${{ github.repository_id }}"
         self.assertEqual(self.workflow.count(dispatcher_group), 1)

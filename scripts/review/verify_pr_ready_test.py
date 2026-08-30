@@ -175,6 +175,29 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn("initial review marker がありません", errors)
         self.assertIn("final review marker がありません", errors)
 
+    def test_review_marker_requires_canonical_spacing_order_and_lowercase_hex(self) -> None:
+        canonical = marker(1, "initial", INITIAL_HEAD)
+        body = canonical["body"]
+        assert isinstance(body, str)
+        malformed = {
+            "opening-space": body.replace("<!-- krr-review", "<!--\tkrr-review"),
+            "field-space": body.replace("phase=initial head=", "phase=initial  head="),
+            "closing-space": body.replace(" -->", "  -->"),
+            "uppercase-head": body.replace(f"head={INITIAL_HEAD}", f"head={INITIAL_HEAD.upper()}"),
+            "prefix": body.replace("<!--", "prefix<!--"),
+            "suffix": body.replace(" -->", " -->suffix"),
+            "line-break": body.replace(" head=", "\nhead="),
+            "attribute-order": body.replace(
+                f"phase=initial head={INITIAL_HEAD} body-sha256={BODY_SHA256}",
+                f"phase=initial body-sha256={BODY_SHA256} head={INITIAL_HEAD}",
+            ),
+        }
+        self.assertEqual(subject._review_markers([canonical]), [("initial", INITIAL_HEAD, BODY_SHA256, canonical)])
+        for name, value in malformed.items():
+            with self.subTest(name=name):
+                rejected = {**canonical, "body": value}
+                self.assertEqual(subject._review_markers([rejected]), [])
+
     def test_rejects_final_evidence_before_referenced_issue_edit(self) -> None:
         pull_request, _, _ = successful_state()
         reviews = pull_request["reviews"]
@@ -2235,6 +2258,20 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                     "https://github.com/owner/repo/actions/runs/123"
                     f"?source_run_id={self.source_run_id}&pr_body_sha256={'0' * 64}"
                 ),
+            }
+        )
+        self.assertIsNone(
+            self._gate(pages=[{"check_runs": [historical, self._run()]}])
+        )
+
+    def test_accepts_authoritative_generation_when_history_lacks_its_source_evidence(self) -> None:
+        historical = self._run()
+        historical.update(
+            {
+                "id": 100,
+                "created_at": "2026-08-29T23:59:59Z",
+                "external_id": f"krr-governance/v1/{self.head}/writer-100",
+                "details_url": None,
             }
         )
         self.assertIsNone(

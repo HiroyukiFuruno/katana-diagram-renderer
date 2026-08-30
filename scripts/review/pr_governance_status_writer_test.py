@@ -1891,13 +1891,25 @@ class StatusWriterUnitTest(unittest.TestCase):
         older = [{"id": number, "head_sha": "a" * 40} for number in range(1, 101)]
         initial = WRITER.EvidenceSnapshot({}, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45}, {})
         for page in (
-            {"total_count": 100, "workflow_runs": older},
+            {"total_count": 101, "workflow_runs": older},
             {"total_count": 98, "workflow_runs": older[:99]},
             {"total_count": 1, "workflow_runs": [{"id": 1, "head_sha": "b" * 40}]},
         ):
             with self.subTest(page=page), self.identity(), patch.object(WRITER, "api_json", return_value=page):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.final_evidence_for_pr("a" * 40, initial)
+
+    def test_final_evidence_accepts_exactly_one_complete_page_of_100_runs(self) -> None:
+        runs = [{"id": number, "head_sha": "a" * 40} for number in range(1, 101)]
+        page = {"total_count": 100, "workflow_runs": runs}
+        initial = WRITER.EvidenceSnapshot(
+            {},
+            {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45},
+            {},
+        )
+        with self.identity(), patch.object(WRITER, "api_json", return_value=page):
+            evidence = WRITER.final_evidence_for_pr("a" * 40, initial)
+        self.assertEqual(len(evidence.workflow_runs[".github/workflows/test-and-build.yml"]), 0)
 
     def test_final_evidence_partitions_only_trusted_sensor_and_ci_workflows(self) -> None:
         sensor = self.generation(700)
