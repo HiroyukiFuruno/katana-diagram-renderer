@@ -143,74 +143,6 @@ def _marker_updated_time(comment: Mapping[str, object]) -> datetime | None:
         return None
 
 
-def _bot_plus_one_time(
-    comment: Mapping[str, object],
-    reactions: Mapping[int, Sequence[Mapping[str, object]]],
-    review_bot: str,
-    not_before: object,
-    before: object | None = None,
-) -> datetime | None:
-    comment_id = comment["id"]
-    if not isinstance(comment_id, int):
-        raise TypeError("comment id must be an integer")
-    not_before_time = _timestamp(not_before, "marker created_at")
-    if not_before_time is None:
-        raise TypeError("marker created_at must be an ISO-8601 timestamp")
-    before_time = _timestamp(before, "marker created_at")
-    edited_at = comment.get("updated_at") or comment.get("updatedAt")
-    if edited_at is None:
-        # An old reaction may predate an edited marker while still being newer
-        # than its original creation time, so missing edit evidence is unsafe.
-        return None
-    try:
-        edited_time = _timestamp(edited_at, "marker updated_at")
-    except (TypeError, ValueError):
-        return None
-    if edited_time is None:
-        return None
-    if edited_time < not_before_time:
-        return None
-
-    def is_timely(reaction: Mapping[str, object]) -> bool:
-        created_at = reaction.get("created_at")
-        if created_at is None:
-            return False
-        try:
-            reaction_time = _timestamp(created_at, "reaction created_at")
-        except (TypeError, ValueError):
-            return False
-        return (
-            reaction_time is not None
-            and reaction_time > edited_time
-            and (before_time is None or reaction_time < before_time)
-        )
-
-    valid_times: list[datetime] = []
-    for reaction in reactions.get(comment_id, ()):
-        if (
-            reaction.get("content") == "+1"
-            and _is_review_bot(_bot_login(reaction.get("user")), review_bot)
-            and is_timely(reaction)
-        ):
-            created_at = _timestamp(reaction.get("created_at"), "reaction created_at")
-            if created_at is not None:
-                valid_times.append(created_at)
-    return max(valid_times, default=None)
-
-
-def _bot_plus_one(
-    comment: Mapping[str, object],
-    reactions: Mapping[int, Sequence[Mapping[str, object]]],
-    review_bot: str,
-    not_before: object,
-    before: object | None = None,
-) -> bool:
-    return (
-        _bot_plus_one_time(comment, reactions, review_bot, not_before, before)
-        is not None
-    )
-
-
 def _latest_issue_updated_time(
     referenced_issues: Sequence[issue_contract.Issue],
 ) -> datetime | None:
@@ -480,16 +412,25 @@ def _required_timestamp_text(value: object, field: str) -> str:
 
 def _final_review_evidence_is_fresh(
     reviews: Sequence[Mapping[str, object]],
-    reactions: Mapping[int, Sequence[Mapping[str, object]]],
     review_bot: str,
     head: str,
     comment: Mapping[str, object],
     issue_updated_at: datetime | None,
 ) -> bool:
-    """Require final completion evidence after both its marker and Issue edits."""
+    """Require a submitted bot review after the final marker and Issue edits.
+
+    Reactions are mutable and therefore cannot serve as durable final-review
+    evidence for a required context.
+    """
 
     marker_time = _marker_updated_time(comment)
     if marker_time is None:
+        return False
+    try:
+        marker_created_at = _timestamp(comment.get("created_at"), "marker created_at")
+    except (TypeError, ValueError):
+        return False
+    if marker_created_at is None or marker_time < marker_created_at:
         return False
     freshness_floor = max(
         marker_time,
@@ -498,12 +439,7 @@ def _final_review_evidence_is_fresh(
     review_times = _review_completion_times(
         reviews, review_bot, head, _marker_updated_at(comment)
     )
-    if any(submitted_at > freshness_floor for submitted_at in review_times):
-        return True
-    reaction_time = _bot_plus_one_time(
-        comment, reactions, review_bot, comment["created_at"]
-    )
-    return reaction_time is not None and reaction_time > freshness_floor
+    return any(submitted_at > freshness_floor for submitted_at in review_times)
 
 
 def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[tuple[str, str, Mapping[str, object]]]:
@@ -603,7 +539,6 @@ def readiness_errors(
     pull_request: Mapping[str, object],
     threads: Sequence[Mapping[str, object]],
     comments: Sequence[Mapping[str, object]],
-    reactions: Mapping[int, Sequence[Mapping[str, object]]],
     review_bot: str,
     require_draft: bool,
     referenced_issues: Sequence[issue_contract.Issue] = (),
@@ -662,31 +597,24 @@ def readiness_errors(
     initial_markers = [marker for marker in markers if marker[0] == "initial"]
     final_markers = [marker for marker in markers if marker[0] == "final"]
 
+    latest_initial: tuple[str, str, Mapping[str, object]] | None = None
     if not initial_markers:
         errors.append("initial review marker がありません")
-    elif not any(
-        _review_is_for(
-            typed_reviews,
-            review_bot,
-            marker_head,
-            _marker_updated_at(comment),
-            final_comment["created_at"],
-        )
-        or _bot_plus_one(
-            comment,
-            reactions,
-            review_bot,
-            comment["created_at"],
-            final_comment["created_at"],
-        )
-        for _phase, marker_head, comment in initial_markers
-        for _final_phase, _final_head, final_comment in final_markers
-    ):
-        errors.append("initial review に review bot の完了記録がありません")
+    else:
+        initial_times = [
+            _marker_updated_time(marker[2]) for marker in initial_markers
+        ]
+        if any(marker_time is None for marker_time in initial_times):
+            errors.append("initial review marker の時刻が不正です")
+        else:
+            latest_initial = max(
+                zip(initial_markers, initial_times), key=lambda item: item[1]
+            )[0]
 
     current_final_markers = [
         marker for marker in final_markers if marker[1] == head
     ]
+    latest_final: tuple[str, str, Mapping[str, object]] | None = None
     if current_final_markers:
         # A later final marker supersedes earlier evidence, including when an
         # old initial marker was edited into a final marker.
@@ -696,28 +624,41 @@ def readiness_errors(
         if any(marker_time is None for marker_time in marker_times):
             current_final_markers = []
         else:
-            current_final_markers = [
-                max(
-                    zip(current_final_markers, marker_times),
-                    key=lambda item: item[1],
-                )[0]
-            ]
+            latest_final = max(
+                zip(current_final_markers, marker_times),
+                key=lambda item: item[1],
+            )[0]
     if not final_markers:
         errors.append("final review marker がありません")
-    elif not current_final_markers:
+    elif latest_final is None:
         errors.append("final review marker が最新HEADを指していません")
-    elif not any(
-        _final_review_evidence_is_fresh(
+    elif issue_updated_at is not None and (
+        _marker_updated_time(latest_final[2]) is None
+        or _marker_updated_time(latest_final[2]) <= issue_updated_at
+    ):
+        errors.append("final review marker が参照Issue更新後ではありません")
+    elif not _final_review_evidence_is_fresh(
             typed_reviews,
-            reactions,
             review_bot,
             head,
-            comment,
+            latest_final[2],
             issue_updated_at,
-        )
-        for _phase, _marker_head, comment in current_final_markers
-    ):
+        ):
         errors.append("final review に参照Issue更新後の review bot 完了記録がありません")
+
+    if latest_initial is not None and latest_final is not None:
+        initial_time = _marker_updated_time(latest_initial[2])
+        final_time = _marker_updated_time(latest_final[2])
+        if initial_time is None or final_time is None or initial_time >= final_time:
+            errors.append("initial review marker は最新 final review marker より前である必要があります")
+        elif not _review_is_for(
+            typed_reviews,
+            review_bot,
+            latest_initial[1],
+            _marker_updated_at(latest_initial[2]),
+            _marker_updated_at(latest_final[2]),
+        ):
+            errors.append("initial review に review bot の完了記録がありません")
 
     return errors
 
@@ -1060,20 +1001,6 @@ def _paginated_api_array(endpoint: str) -> list[dict[str, object]]:
                 raise TypeError("GitHub API item must be an object")
             flattened.append(item)
     return flattened
-
-
-def _comment_reactions(
-    repository: str, comments: Sequence[Mapping[str, object]]
-) -> dict[int, list[dict[str, object]]]:
-    reactions: dict[int, list[dict[str, object]]] = {}
-    for comment in comments:
-        comment_id = comment["id"]
-        if not isinstance(comment_id, int):
-            raise TypeError("comment id must be an integer")
-        reactions[comment_id] = _paginated_api_array(
-            f"repos/{repository}/issues/comments/{comment_id}/reactions"
-        )
-    return reactions
 
 
 def _latch_source_run_id(details_url: object, repository: str) -> str | None:
@@ -1442,7 +1369,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"repos/{repository}/issues/{arguments.pr}/comments"
     )
     threads = _review_threads(repository, arguments.pr)
-    reactions = _comment_reactions(repository, comments)
     base, head = _require_boundary(
         pull_request.get("baseRefOid"), pull_request.get("headRefOid"), expected_boundary
     )
@@ -1506,7 +1432,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             pull_request,
             threads,
             comments,
-            reactions,
             review_bot="chatgpt-codex-connector",
             require_draft=arguments.require_draft,
             referenced_issues=referenced_issues,

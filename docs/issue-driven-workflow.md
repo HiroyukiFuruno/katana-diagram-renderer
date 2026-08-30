@@ -107,7 +107,7 @@ python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
 @codex review
 ```
 
-最終レビューでは `phase=final` と最新HEAD SHAを使う。レビュー指摘へのreplyとresolveを省略したままReady化してはならない。
+最終レビューでは `phase=final` と最新HEAD SHAを使う。initial/finalの完了証跡は、対応するmarker投稿後かつ最新HEADに対してbot reviewが提出された場合だけとする。`eyes`等のreactionは受付中を示す補助表示であり、永続的な完了証跡として受理しない。レビュー指摘へのreplyとresolveを省略したままReady化してはならない。
 
 ### オーケストレーションとハーネス
 
@@ -138,10 +138,8 @@ writerは全open PRを完全paginationで一回だけsnapshotし、local/default
 
 Issueのopened/edited/deleted/transferred/pinned/unpinned/closed/reopened/assigned/unassigned/labeled/unlabeled/locked/unlocked/milestoned/demilestoned/typed/untyped/field_added/field_removedと、通常Issueへのcomment created/edited/deletedは同じ再評価起点である。dispatcherはeventを型検証し、open PRを完全paginationする。ページ、番号、state、本文、repository、重複に異常があればfail-closedとする。full URLによるclosing referenceは同一repositoryのURLだけを受理し、別repositoryのURLはlocal Issue claimから除外する。その結果local canonical closerを満たさない当該PRは個別failureにする。PR bodyがnullなら空のcloserとして当該PRを個別failureにし、snapshot全体の処理は継続する。変更Issueをsame-repository closing keywordで参照するlocal/default-base PRがあれば、rate budget内で同期pending化して一回のwriter再評価へ渡す。作成・編集前の本文も対象に含めるため、Issue closureの変更時は旧Issueと新Issueのclaimant双方を再評価する。複数Issue closingや複数claimantはwriterの既存ready契約でfailureとなる。GitHubのcontent/API rate超過やAPI失敗時は未処理headに旧successが一時的に残り得るため、後続scheduleとmerge直前のlocal gateで再評価する。Actionsの起動前・API失敗時も同様であり、merge直前のlocal gateが必須である。厳密な原子保証には外部GitHub Appまたはmerge authorityが必要である。
 
-final review markerとreactionだけで最終証跡が揃う場合も、Draftのまま`pr-ready-check`を通してからReady化する。Ready化後のreview/Issue/CI変化はdispatcherが到達すればpending化され、最新の全open reconciliationで収束する。起動窓は残るため、merge直前に`just pr-ready-check <PR番号>`を必ず再実行する。Issue契約を復元した場合も必要な最終review、`pr-ready-check`、Ready化を順にやり直す。sourceなしのIssue再評価はreview latchを直接解放しない。
+marker投稿後に最新HEADへbot reviewが提出されたことを確認してから、Draftのまま`pr-ready-check`を通してReady化する。Ready化後のreview/Issue/CI変化はdispatcherが到達すればpending化され、最新の全open reconciliationで収束する。起動窓は残るため、merge直前に`just pr-ready-check <PR番号>`を必ず再実行する。Issue契約を復元した場合も必要な最終review、`pr-ready-check`、Ready化を順にやり直す。sourceなしのIssue再評価はreview latchを直接解放しない。
 
 GitHub Actionsではreview threadのresolve/unresolve変更を検知できないため、branch protectionの`required_conversation_resolution=true`を必須にする。新しいreviewまたは未解決threadが同一HEADに追加されても、trusted Check Runの再評価とGitHub native conversation gateの両方でmergeを拒否する。
 
-bootstrap後は使い捨てPRで次を実機確認する。最新HEADに対する専用App Check RunとPR merge SHAに付くActions latchの両方がrequired checkとして評価されること、両方success後にfinal review marker commentを編集するとreaction証跡が無効化されwriterがfailure Check Runへ更新してmergeが拒否されること、そして新しいfinal reviewとReady化で新sensor runだけが再びsuccessになることを確認する。
-
-reactionの削除はGitHub Actionsのtrigger対象ではない。final markerの`+1`はreview bot自身だけを証跡として受理し、通常のPR actorは他者のreactionを削除できないため、第三者による削除はこのハーネスの信頼境界外である。review botの資格情報または本人がreactionを削除した場合は自動再評価されない残余制約があるため、operatorはDraftへ戻し、新しいfinal review証跡とReady化を実施して再評価する。
+bootstrap後は使い捨てPRで次を実機確認する。最新HEADに対する専用App Check RunとPR merge SHAに付くActions latchの両方がrequired checkとして評価されること、両方success後にfinal marker commentを編集すると旧bot review証跡が失効してwriterがfailure Check Runへ更新しmergeが拒否されること、そして新しいmarker後のbot review提出とReady化でだけ再びsuccessになることを確認する。reactionは受付中等の補助表示に限り、smokeの成功・回復判定には使用しない。

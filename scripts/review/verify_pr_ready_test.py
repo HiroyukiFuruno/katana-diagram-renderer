@@ -40,7 +40,6 @@ def successful_state() -> tuple[
     dict[str, object],
     list[dict[str, object]],
     list[dict[str, object]],
-    dict[int, list[dict[str, object]]],
 ]:
     pull_request = {
         "isDraft": True,
@@ -62,7 +61,13 @@ def successful_state() -> tuple[
                 "commit": {"oid": INITIAL_HEAD},
                 "state": "COMMENTED",
                 "submittedAt": "2026-08-29T03:01:30Z",
-            }
+            },
+            {
+                "author": {"login": BOT},
+                "commit": {"oid": HEAD},
+                "state": "COMMENTED",
+                "submittedAt": "2026-08-29T03:02:30Z",
+            },
         ],
     }
     threads = [{"id": "thread-1", "isResolved": True}]
@@ -70,17 +75,7 @@ def successful_state() -> tuple[
         marker(1, "initial", INITIAL_HEAD),
         marker(2, "final", HEAD),
     ]
-    reactions = {
-        1: [],
-        2: [
-            {
-                "content": "+1",
-                "created_at": "2026-08-29T03:02:30Z",
-                "user": {"login": f"{BOT}[bot]"},
-            }
-        ],
-    }
-    return pull_request, threads, comments, reactions
+    return pull_request, threads, comments
 
 
 def current_canonical_closer() -> list[dict[str, object]]:
@@ -93,17 +88,13 @@ class VerifyPrReadyTest(unittest.TestCase):
         pull_request: dict[str, object] | None = None,
         threads: list[dict[str, object]] | None = None,
         comments: list[dict[str, object]] | None = None,
-        reactions: dict[int, list[dict[str, object]]] | None = None,
         referenced_issues: tuple[subject.issue_contract.Issue, ...] = (),
     ) -> list[str]:
-        default_pr, default_threads, default_comments, default_reactions = (
-            successful_state()
-        )
+        default_pr, default_threads, default_comments = successful_state()
         return subject.readiness_errors(
             pull_request or default_pr,
             threads if threads is not None else default_threads,
             comments if comments is not None else default_comments,
-            reactions if reactions is not None else default_reactions,
             review_bot=BOT,
             require_draft=True,
             referenced_issues=referenced_issues,
@@ -122,29 +113,41 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertEqual(self.errors(), [])
 
     def test_rejects_final_evidence_before_referenced_issue_edit(self) -> None:
+        pull_request, _, _ = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[1]["submittedAt"] = "2026-08-29T03:04:01Z"
         errors = self.errors(
+            pull_request=pull_request,
             referenced_issues=(self.issue(64, "2026-08-29T03:03:00Z"),)
         )
-        self.assertIn("参照Issue更新後", " ".join(errors))
+        self.assertIn("marker が参照Issue更新後", " ".join(errors))
 
     def test_accepts_final_evidence_after_referenced_issue_edit(self) -> None:
-        _, _, comments, reactions = successful_state()
-        reactions[2][0]["created_at"] = "2026-08-29T03:04:01Z"
+        pull_request, _, comments = successful_state()
+        comments[1] = marker(
+            2, "final", HEAD, updated_at="2026-08-29T03:04:01Z"
+        )
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[1]["submittedAt"] = "2026-08-29T03:04:02Z"
         self.assertEqual(
             self.errors(
+                pull_request=pull_request,
                 comments=comments,
-                reactions=reactions,
                 referenced_issues=(self.issue(64, "2026-08-29T03:04:00Z"),),
             ),
             [],
         )
 
     def test_uses_latest_referenced_issue_edit_for_final_evidence(self) -> None:
-        _, _, comments, reactions = successful_state()
-        reactions[2][0]["created_at"] = "2026-08-29T03:04:01Z"
+        pull_request, _, comments = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[1]["submittedAt"] = "2026-08-29T03:04:01Z"
         errors = self.errors(
+            pull_request=pull_request,
             comments=comments,
-            reactions=reactions,
             referenced_issues=(
                 self.issue(64, "2026-08-29T03:03:00Z"),
                 self.issue(65, "2026-08-29T03:05:00Z"),
@@ -461,12 +464,12 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject._open_pull_request_snapshot("/immutable/open-pulls.json")
 
     def test_rejects_ready_pr_before_the_gate(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["isDraft"] = False
         self.assertIn("Draft", " ".join(self.errors(pull_request=pull_request)))
 
     def test_rejects_final_review_marker_for_an_old_head(self) -> None:
-        _, _, comments, _ = successful_state()
+        _, _, comments = successful_state()
         comments[1] = marker(2, "final", INITIAL_HEAD)
         self.assertIn("最新HEAD", " ".join(self.errors(comments=comments)))
 
@@ -475,7 +478,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn("未resolve", " ".join(self.errors(threads=threads)))
 
     def test_rejects_failed_or_pending_checks(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -487,7 +490,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
 
     def test_ignores_trusted_governance_pending_check(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -505,7 +508,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertEqual(self.errors(pull_request=pull_request), [])
 
     def test_ignores_review_latch_failure_when_regular_ci_succeeds(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -523,7 +526,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertEqual(self.errors(pull_request=pull_request), [])
 
     def test_rejects_regular_ci_failure_alongside_review_latch_failure(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -541,7 +544,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
 
     def test_rejects_pending_regular_ci_alongside_trusted_check(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -559,7 +562,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
 
     def test_keeps_legacy_governance_context_compatibility(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
@@ -577,47 +580,63 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertEqual(self.errors(pull_request=pull_request), [])
 
     def test_rejects_final_marker_without_bot_completion(self) -> None:
+        pull_request, _, _ = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        pull_request["reviews"] = [reviews[0]]
         self.assertIn(
             "final",
-            " ".join(self.errors(reactions={1: [], 2: []})),
+            " ".join(self.errors(pull_request=pull_request)),
         )
 
-    def test_rejects_edited_marker_with_old_bot_reaction(self) -> None:
-        _, _, comments, reactions = successful_state()
+    def test_rejects_initial_marker_without_post_marker_bot_review(self) -> None:
+        pull_request, _, _ = successful_state()
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        pull_request["reviews"] = [reviews[1]]
+        self.assertIn("initial", " ".join(self.errors(pull_request=pull_request)))
+
+    def test_accepts_initial_review_on_current_head_before_final_marker(self) -> None:
+        pull_request, _, comments = successful_state()
+        comments[0] = marker(1, "initial", HEAD)
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[0]["commit"] = {"oid": HEAD}
+        self.assertEqual(self.errors(pull_request=pull_request, comments=comments), [])
+
+    def test_rejects_latest_initial_marker_after_final_marker(self) -> None:
+        _, _, comments = successful_state()
+        comments.append(marker(3, "initial", HEAD))
+        errors = self.errors(comments=comments)
+        self.assertIn("initial review marker は最新 final", " ".join(errors))
+
+    def test_rejects_stale_initial_evidence_for_a_newer_initial_marker(self) -> None:
+        _, _, comments = successful_state()
+        latest_initial = marker(3, "initial", INITIAL_HEAD)
+        latest_initial["created_at"] = "2026-08-29T03:01:45Z"
+        latest_initial["updated_at"] = "2026-08-29T03:01:45Z"
+        comments.append(latest_initial)
+        errors = self.errors(comments=comments)
+        self.assertIn("initial review に", " ".join(errors))
+
+    def test_accepts_edited_marker_with_new_bot_review(self) -> None:
+        pull_request, _, comments = successful_state()
         comments[1] = marker(
             2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
         )
-        self.assertIn(
-            "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[1]["submittedAt"] = "2026-08-29T03:04:30Z"
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request,
+                comments=comments,
+            ),
+            [],
         )
-
-    def test_rejects_final_bot_reaction_when_marker_edit_time_is_missing(self) -> None:
-        _, _, comments, reactions = successful_state()
-        comments[1].pop("updated_at")
-        self.assertIn(
-            "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
-        )
-
-    def test_rejects_final_bot_reaction_when_marker_edit_precedes_creation(self) -> None:
-        _, _, comments, reactions = successful_state()
-        comments[1]["updated_at"] = "2026-08-29T03:01:00Z"
-        self.assertIn(
-            "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
-        )
-
-    def test_accepts_edited_marker_with_new_bot_reaction(self) -> None:
-        _, _, comments, reactions = successful_state()
-        comments[1] = marker(
-            2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
-        )
-        reactions[2][0]["created_at"] = "2026-08-29T03:04:30Z"
-        self.assertEqual(self.errors(comments=comments, reactions=reactions), [])
 
     def test_rejects_edited_initial_marker_reused_as_final_evidence(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         reviews[0]["submittedAt"] = "2026-08-29T03:00:30Z"
@@ -645,18 +664,16 @@ class VerifyPrReadyTest(unittest.TestCase):
                 "user": {"login": "HiroyukiFuruno"},
             }
         )
-        reactions[1] = []
         self.assertIn(
             "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
+            " ".join(self.errors(comments=comments)),
         )
 
     def test_rejects_review_submitted_in_same_second_as_marker_edit(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         comments[1]["updated_at"] = "2026-08-29T03:04:00Z"
-        reactions[2] = []
         reviews.append(
             {
                 "author": {"login": BOT},
@@ -667,15 +684,14 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
         self.assertIn(
             "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
+            " ".join(self.errors(comments=comments)),
         )
 
     def test_accepts_review_submitted_after_marker_edit_second(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         comments[1]["updated_at"] = "2026-08-29T03:04:00Z"
-        reactions[2] = []
         reviews.append(
             {
                 "author": {"login": BOT},
@@ -688,32 +704,12 @@ class VerifyPrReadyTest(unittest.TestCase):
             self.errors(
                 pull_request=pull_request,
                 comments=comments,
-                reactions=reactions,
             ),
             [],
         )
 
-    def test_rejects_edited_marker_with_same_second_bot_reaction(self) -> None:
-        _, _, comments, reactions = successful_state()
-        comments[1] = marker(
-            2, "final", HEAD, updated_at="2026-08-29T03:04:00Z"
-        )
-        reactions[2][0]["created_at"] = "2026-08-29T03:04:00Z"
-        self.assertIn(
-            "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
-        )
-
-    def test_rejects_invalid_bot_reaction_timestamp(self) -> None:
-        _, _, comments, reactions = successful_state()
-        reactions[2][0]["created_at"] = "not-a-timestamp"
-        self.assertIn(
-            "final",
-            " ".join(self.errors(comments=comments, reactions=reactions)),
-        )
-
     def test_rejects_review_completed_before_its_marker(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         reviews[0]["submittedAt"] = "2026-08-29T03:00:00Z"
@@ -723,10 +719,11 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
 
     def test_rejects_dismissed_review_as_final_evidence(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         reviews[0]["state"] = "DISMISSED"
+        reviews[1]["state"] = "DISMISSED"
         reviews.append(
             {
                 "author": {"login": BOT},
@@ -735,17 +732,15 @@ class VerifyPrReadyTest(unittest.TestCase):
                 "submittedAt": "2026-08-29T03:03:30Z",
             }
         )
-        reactions[2] = []
         errors = self.errors(
             pull_request=pull_request,
             comments=comments,
-            reactions=reactions,
         )
         self.assertIn("initial", " ".join(errors))
         self.assertIn("final", " ".join(errors))
 
     def test_accepts_approved_review_as_valid_evidence(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         reviews = pull_request["reviews"]
         assert isinstance(reviews, list)
         reviews.append(
@@ -761,27 +756,26 @@ class VerifyPrReadyTest(unittest.TestCase):
             self.errors(
                 pull_request=pull_request,
                 comments=comments,
-                reactions=reactions,
             ),
         )
 
     def test_rejects_marker_without_the_codex_review_trigger(self) -> None:
-        _, _, comments, reactions = successful_state()
+        _, _, comments = successful_state()
         for comment in comments:
             body = comment["body"]
             assert isinstance(body, str)
             comment["body"] = body.replace("\n@codex review", "")
-        errors = " ".join(self.errors(comments=comments, reactions=reactions))
+        errors = " ".join(self.errors(comments=comments))
         self.assertIn("initial", errors)
         self.assertIn("final", errors)
 
     def test_rejects_missing_ci_results(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["statusCheckRollup"] = []
         self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
 
     def test_rejects_one_review_used_for_both_review_phases(self) -> None:
-        pull_request, _, comments, _ = successful_state()
+        pull_request, _, comments = successful_state()
         comments[0] = marker(1, "initial", HEAD)
         pull_request["reviews"] = [
             {
@@ -797,13 +791,12 @@ class VerifyPrReadyTest(unittest.TestCase):
                 self.errors(
                     pull_request=pull_request,
                     comments=comments,
-                    reactions={1: [], 2: []},
                 )
             ),
         )
 
     def test_rejects_resolved_thread_without_author_reply(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         pull_request["author"] = {"login": "HiroyukiFuruno"}
         threads = [
             {
@@ -819,12 +812,11 @@ class VerifyPrReadyTest(unittest.TestCase):
             pull_request=pull_request,
             threads=threads,
             comments=comments,
-            reactions=reactions,
         )
         self.assertIn("reply", " ".join(errors).lower())
 
     def test_accepts_resolved_thread_with_author_reply_after_root(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         pull_request["author"] = {"login": "HiroyukiFuruno"}
         threads = [
             {
@@ -842,13 +834,12 @@ class VerifyPrReadyTest(unittest.TestCase):
                 pull_request=pull_request,
                 threads=threads,
                 comments=comments,
-                reactions=reactions,
             ),
             [],
         )
 
     def test_accepts_resolved_thread_with_trusted_maintainer_reply_to_bot_pr(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         pull_request["author"] = {"login": "dependabot[bot]"}
         threads = [
             {
@@ -869,13 +860,12 @@ class VerifyPrReadyTest(unittest.TestCase):
                 pull_request=pull_request,
                 threads=threads,
                 comments=comments,
-                reactions=reactions,
             ),
             [],
         )
 
     def test_rejects_resolved_thread_with_untrusted_reply_to_bot_pr(self) -> None:
-        pull_request, _, comments, reactions = successful_state()
+        pull_request, _, comments = successful_state()
         pull_request["author"] = {"login": "dependabot[bot]"}
         threads = [
             {
@@ -895,7 +885,6 @@ class VerifyPrReadyTest(unittest.TestCase):
             pull_request=pull_request,
             threads=threads,
             comments=comments,
-            reactions=reactions,
         )
         self.assertIn("reply", " ".join(errors).lower())
 
@@ -960,21 +949,6 @@ class VerifyPrReadyTest(unittest.TestCase):
                 if "--paginate" in arguments or any("page=2" in arg for arg in arguments):
                     return all_comments
                 return filler
-            if arguments[:1] == ("api",) and arguments[1].startswith(
-                "repos/owner/repo/issues/comments/"
-            ):
-                if arguments[1].endswith("/32/reactions"):
-                    return [
-                        {"content": "heart", "user": {"login": "reviewer"}}
-                        for _ in range(100)
-                    ] + [
-                        {
-                            "content": "+1",
-                            "created_at": "2026-08-29T03:03:30Z",
-                            "user": {"login": f"{BOT}[bot]"},
-                        }
-                    ]
-                return []
             if arguments[0:2] == ("api", "graphql"):
                 return {
                     "data": {
@@ -996,54 +970,8 @@ class VerifyPrReadyTest(unittest.TestCase):
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
-    def test_reads_reaction_past_the_first_api_page(self) -> None:
-        pull_request, threads, comments, _ = successful_state()
-        comments[0]["id"] = 31
-        comments[1]["id"] = 32
-
-        def gh_json(*arguments: str) -> object:
-            if arguments[:2] == ("pr", "view"):
-                return pull_request
-            if arguments[:2] == ("api", "repos/owner/repo/issues/72/comments"):
-                return comments
-            if arguments[:2] == ("api", "repos/owner/repo/issues/comments/31/reactions"):
-                return []
-            if arguments[:2] == ("api", "repos/owner/repo/issues/comments/32/reactions"):
-                if "--paginate" in arguments or any("page=2" in arg for arg in arguments):
-                    return [
-                        {"content": "heart", "user": {"login": "reviewer"}}
-                        for _ in range(100)
-                    ] + [
-                        {
-                            "content": "+1",
-                            "created_at": "2026-08-29T03:02:30Z",
-                            "user": {"login": f"{BOT}[bot]"},
-                        }
-                    ]
-                return []
-            if arguments[0:2] == ("api", "graphql"):
-                return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": threads,
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                }
-                            }
-                        }
-                    }
-                }
-            raise AssertionError(f"unexpected gh call: {arguments}")
-
-        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
-            subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
-        ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
-        ):
-            self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
-
     def test_reads_review_past_the_first_graphql_page(self) -> None:
-        pull_request, threads, comments, _ = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request["reviews"] = []
 
         def gh_json(*arguments: str) -> object:
@@ -1051,16 +979,6 @@ class VerifyPrReadyTest(unittest.TestCase):
                 return pull_request
             if arguments[:2] == ("api", "repos/owner/repo/issues/72/comments"):
                 return comments
-            if arguments[:2] == ("api", "repos/owner/repo/issues/comments/1/reactions"):
-                return []
-            if arguments[:2] == ("api", "repos/owner/repo/issues/comments/2/reactions"):
-                return [
-                    {
-                        "content": "+1",
-                        "created_at": "2026-08-29T03:02:30Z",
-                        "user": {"login": f"{BOT}[bot]"},
-                    }
-                ]
             if arguments[0:2] == ("api", "graphql"):
                 query = next((arg for arg in arguments if "reviews" in arg), "")
                 if query:
@@ -1202,7 +1120,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject._reviews("owner/repo", 72)
 
     def test_rejects_boundary_changed_during_readiness_check(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
         changed_pull_request = dict(pull_request)
         changed_pull_request["headRefOid"] = "d" * 40
@@ -1217,8 +1135,8 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(
+            subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1270,12 +1188,11 @@ class VerifyPrReadyTest(unittest.TestCase):
             )
 
     def test_rejects_initial_snapshot_different_from_expected(self) -> None:
-        pull_request, _, _, _ = successful_state()
+        pull_request, _, _ = successful_state()
         pull_request["baseRefOid"] = "d" * 40
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=[]
-        ), patch.object(subject, "_review_threads", return_value=[]), patch.object(
-            subject, "_comment_reactions", return_value={}
+        ), patch.object(subject, "_review_threads", return_value=[]
         ):
             with self.assertRaisesRegex(ValueError, "initial base/head"):
                 subject.main(
@@ -1292,7 +1209,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 )
 
     def test_rejects_success_final_snapshot_different_from_expected(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         changed_pull_request = dict(pull_request)
         changed_pull_request["headRefOid"] = "d" * 40
         snapshot_count = 0
@@ -1305,8 +1222,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1326,11 +1242,10 @@ class VerifyPrReadyTest(unittest.TestCase):
                 )
 
     def test_accepts_matching_start_and_final_snapshots(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1352,14 +1267,13 @@ class VerifyPrReadyTest(unittest.TestCase):
             )
 
     def test_rejects_issue_edit_between_identical_pr_boundaries(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         initial_issue = self.issue(64, "2026-08-29T03:00:00Z")
         edited_issue = self.issue(64, "2026-08-29T03:03:00Z")
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
@@ -1371,7 +1285,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rejects_issue_body_change_with_the_same_updated_at(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         initial_issue = self.issue(64, "2026-08-29T03:00:00Z")
         changed_issue = subject.issue_contract.Issue(
             number=64,
@@ -1383,8 +1297,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
@@ -1396,7 +1309,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rejects_pr_updated_at_change_after_an_aba_body_mutation(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         changed_pull_request = dict(pull_request)
         changed_pull_request["updatedAt"] = "2026-08-29T03:04:00Z"
 
@@ -1404,7 +1317,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             subject, "_gh_json", side_effect=[pull_request, changed_pull_request]
         ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
             subject, "_review_threads", return_value=threads
-        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+        ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
             return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
@@ -1415,7 +1328,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rechecks_ci_status_rollup_immediately_before_success(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         final_snapshot = deepcopy(pull_request)
         final_snapshot["statusCheckRollup"] = [
             {
@@ -1430,7 +1343,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             subject, "_gh_json", side_effect=[pull_request, final_snapshot]
         ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
             subject, "_review_threads", return_value=threads
-        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+        ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
             return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
@@ -1441,7 +1354,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rejects_body_change_after_initial_closing_contract(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         changed_pull_request = dict(pull_request)
         changed_pull_request["body"] = "Closes #65"
 
@@ -1449,7 +1362,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             subject, "_gh_json", side_effect=[pull_request, changed_pull_request]
         ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
             subject, "_review_threads", return_value=threads
-        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+        ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
             return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
@@ -1460,7 +1373,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rejects_new_open_closer_after_initial_contract(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         initial_open_pull_requests = current_canonical_closer()
         changed_open_pull_requests = initial_open_pull_requests + [
             {"number": 73, "isDraft": True, "body": "Fixes #64"}
@@ -1468,8 +1381,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract,
             "referenced_issue_snapshot",
@@ -1483,12 +1395,11 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_existing_readiness_error_is_not_masked_by_snapshot_refence(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request["isDraft"] = False
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1584,7 +1495,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
         changed_pull_request = dict(pull_request)
         changed_pull_request["baseRefOid"] = "e" * 40
@@ -1599,8 +1510,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", side_effect=two_snapshots), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1616,13 +1526,12 @@ class VerifyPrReadyTest(unittest.TestCase):
                 )
 
     def test_accepts_unchanged_boundary_after_readiness_check(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64"})
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1632,13 +1541,12 @@ class VerifyPrReadyTest(unittest.TestCase):
             )
 
     def test_does_not_fetch_final_boundary_when_readiness_has_errors(self) -> None:
-        pull_request, threads, comments, reactions = successful_state()
+        pull_request, threads, comments = successful_state()
         pull_request.update({"baseRefOid": "c" * 40, "body": "Closes #64", "isDraft": False})
 
         with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
             subject, "_paginated_api_array", return_value=comments
-        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-            subject, "_comment_reactions", return_value=reactions
+        ), patch.object(subject, "_review_threads", return_value=threads
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=(self.issue(64, "2026-08-29T03:00:00Z"),)
         ), patch.object(subject, "_open_pull_requests", return_value=current_canonical_closer()
@@ -1863,8 +1771,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
             subject, "_paginated_api_array", return_value=[]
-        ), patch.object(subject, "_review_threads", return_value=[]), patch.object(
-            subject, "_comment_reactions", return_value={}
+        ), patch.object(subject, "_review_threads", return_value=[]
         ), patch.object(
             subject.issue_contract, "referenced_issue_snapshot", return_value=()
         ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
@@ -1907,7 +1814,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             ),
         ):
             with self.subTest(state=state):
-                pull, threads, comments, reactions = successful_state()
+                pull, threads, comments = successful_state()
                 pull["statusCheckRollup"] = [
                     {
                         "__typename": "CheckRun",
@@ -1919,8 +1826,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                 ]
                 with patch.object(subject, "_gh_json", return_value=pull), patch.object(
                     subject, "_paginated_api_array", return_value=comments
-                ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
-                    subject, "_comment_reactions", return_value=reactions
+                ), patch.object(subject, "_review_threads", return_value=threads
                 ), patch.object(
                     subject.issue_contract, "referenced_issue_snapshot", return_value=()
                 ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
