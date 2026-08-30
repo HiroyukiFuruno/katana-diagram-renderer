@@ -27,6 +27,21 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         ):
             self.assertIn(text, self.writer)
 
+    def test_governed_pull_request_workflows_have_no_path_filter(self) -> None:
+        """Every governed PR path must start CI and release-preflight generation."""
+        root = Path(__file__).parents[2]
+        for relative in (".github/workflows/test-and-build.yml", ".github/workflows/release-preflight.yml"):
+            text = (root / relative).read_text(encoding="utf-8")
+            pull_request = re.search(r"(?ms)^  pull_request:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", text)
+            self.assertIsNotNone(pull_request, relative)
+            body = pull_request.group("body")
+            self.assertNotRegex(body, r"(?m)^    paths(?:-ignore)?:")
+
+        ci_text = (root / ".github/workflows/test-and-build.yml").read_text(encoding="utf-8")
+        push = re.search(r"(?ms)^  push:\n(?P<body>.*?)(?=^  pull_request:)", ci_text)
+        self.assertIsNotNone(push)
+        self.assertRegex(push.group("body"), r"(?m)^    paths:")
+
     def test_success_re_reads_ci_generation_from_one_final_shared_snapshot_before_post(self) -> None:
         self.assertIn("final_evidence_for_pr(decision.head, initial_evidence)", self.writer)
         self.assertIn("head_sha={head}&per_page=100", self.writer)

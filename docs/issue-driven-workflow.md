@@ -69,7 +69,7 @@ gh pr ready 72
 
 bootstrap PRのReady化とmergeには、上記一時Check Runの成功に加えて、最新HEADのfinal review完了、未resolve thread 0、既存CI、DoDを全て要求する。PR内のallowlist、自己承認、`verify_push_issue.py` の緩和、PR由来workflowによるbootstrap Check Runの発行は禁止する。merge直後に一時Check Runをrequired checkから除去し、専用App IDに固定した `KRR / PR governance (trusted check)` とGitHub Actions `app_id=15368` に固定した `KRR / PR governance review latch` をrequiredへ切り替える。使い捨てPRで両checkを実機smokeし、改変後のfinal review証跡が旧Check Runを失効させることまで確認して完了とする。
 
-操作は次のCLIに固定する。`activate` はmerge前、`finalize` はmerge直後、`verify` はsmoke PR確認後に実行する。`--apply` はrequired checkを書き換える2操作だけに付け、App token/private keyを引数へ直書きしてはならない。PR checkoutのコードはbootstrap evidenceとして実行しない。activate/finalizeは別々の`KRR_GOVERNANCE_APP_JWT`と`KRR_GOVERNANCE_APP_TOKEN`を環境変数から受け取り、CLI引数・出力へ出してはならない。
+操作は次のCLIに固定し、`activate`（merge前）→保護されたmerge→`finalize`（merge後）→使い捨てsmoke PRのmerge→`verify`（smoke PR merge後）の順序を崩さない。`--apply` はrequired checkを書き換える`activate`/`finalize`だけに付け、各操作の直前にaction-time confirmationを取得する。App token/private keyを引数へ直書きしてはならない。PR checkoutのコードはbootstrap evidenceとして実行しない。activate/finalizeは別々の`KRR_GOVERNANCE_APP_JWT`と`KRR_GOVERNANCE_APP_TOKEN`を環境変数から受け取り、CLI引数・出力へ出してはならない。
 
 ```bash
 SCRIPT=/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py
@@ -80,14 +80,21 @@ bootstrap_args=(
   --expected-head <40-character-head-sha>
   --expected-app-id <governance-app-id>
   --allowed-workflow .github/workflows/pr-governance.yml
+  --allowed-workflow .github/workflows/pr-governance-status-writer.yml
   --allowed-workflow .github/workflows/pr-governance-review-events.yml
   --allowed-workflow .github/workflows/release.yml
+  --allowed-workflow .github/workflows/release-preflight.yml
+  --allowed-workflow .github/workflows/test-and-build.yml
   --expected-diff-sha256 <64-character-diff-sha256>
 )
 export KRR_GOVERNANCE_APP_JWT="${KRR_GOVERNANCE_APP_JWT:?set the App JWT outside the command line}"
 export KRR_GOVERNANCE_APP_TOKEN="${KRR_GOVERNANCE_APP_TOKEN:?set the installation token outside the command line}"
+# action-time confirmation required immediately before this protected mutation
 python3 "$SCRIPT" activate "${bootstrap_args[@]}" --apply
+# Run only after the bootstrap PR has been merged through the protected gate.
+# action-time confirmation required immediately before this protected mutation
 python3 "$SCRIPT" finalize "${bootstrap_args[@]}" --apply
+# Run only after the disposable smoke PR has also been merged.
 python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
 ```
 

@@ -142,6 +142,28 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("if: needs.resolve_event.outputs.reconcile == 'true'", self.workflow)
         self.assertIn("if: steps.current-targets.outputs.has_targets == 'true'", self.workflow)
 
+    def test_dispatcher_accepts_optional_colon_in_closing_references(self) -> None:
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        pulls = [[
+            {"number": 72, "state": "open", "body": "Fixes: #64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}},
+            {"number": 73, "state": "open", "body": "Resolves: https://github.com/owner/repository/issues/64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}},
+        ]]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+            fake.write_text("#!/bin/sh\nprintf '%s' \"${PULLS}\"\n", encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "",
+                "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master",
+                "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["event_targets"], "[72,73]")
+
     def test_malformed_workflow_source_expands_every_derivable_issue_closure(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None
@@ -200,6 +222,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 "number": number,
                 "state": "open",
                 "body": "Fixes #64" if number in {72, 73} else "Fixes #99",
+                "draft": False,
                 "base": local_base,
                 "head": {"sha": f"{number:040x}", "repo": {"full_name": "owner/repository"}},
             }
@@ -254,7 +277,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertNotIn("AFFECTED: ${{ steps.current-targets.outputs.priority_targets }}", self.workflow[early:full])
         self.assertIn("AFFECTED: ${{ steps.current-targets.outputs.all_invalidation_targets }}", self.workflow[full:])
 
-    def test_priority_duplicate_head_skips_early_writer_and_invalidates_once(self) -> None:
+    def test_priority_duplicate_head_skips_early_writer_and_invalidates_every_known_head(self) -> None:
         current = re.search(
             r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
@@ -270,9 +293,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         duplicate_head, unique_head = "a" * 40, "b" * 40
         local_base = {"ref": "master", "repo": {"full_name": "owner/repository"}}
         pulls = [[
-            {"number": 72, "state": "open", "body": "Fixes #64", "base": local_base, "head": {"sha": duplicate_head, "repo": {"full_name": "owner/repository"}}},
-            {"number": 73, "state": "open", "body": "Fixes #64", "base": local_base, "head": {"sha": duplicate_head.upper(), "repo": {"full_name": "owner/repository"}}},
-            {"number": 74, "state": "open", "body": "Fixes #99", "base": local_base, "head": {"sha": unique_head, "repo": {"full_name": "owner/repository"}}},
+            {"number": 72, "state": "open", "body": "Fixes #64", "draft": False, "base": local_base, "head": {"sha": duplicate_head, "repo": {"full_name": "owner/repository"}}},
+            {"number": 73, "state": "open", "body": "Fixes #64", "draft": False, "base": local_base, "head": {"sha": duplicate_head.upper(), "repo": {"full_name": "owner/repository"}}},
+            {"number": 74, "state": "open", "body": "Fixes #99", "draft": False, "base": local_base, "head": {"sha": unique_head, "repo": {"full_name": "owner/repository"}}},
         ]]
         response = {
             "id": 101, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
@@ -319,6 +342,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                 "GH_TOKEN": "read", "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42",
                 "AFFECTED": selection["all_invalidation_targets"],
+                "KNOWN_TARGET_SNAPSHOTS": selection["all_invalidation_target_snapshots"],
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
             invalidated = subprocess.run(
@@ -327,9 +351,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             )
             self.assertNotEqual(invalidated.returncode, 0)
             writes = posts.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(writes), 1)
+            self.assertEqual(len(writes), 2)
             self.assertIn(f"head_sha={duplicate_head}", writes[0])
-            self.assertNotIn(f"head_sha={unique_head}", writes[0])
+            self.assertTrue(any(f"head_sha={unique_head}" in write for write in writes))
         early = self.workflow.index("Dispatch and bind the early event writer")
         await_early = self.workflow.index("Await the bound early event writer before all-open invalidation")
         self.assertIn("if: steps.current-targets.outputs.has_priority_targets == 'true'", self.workflow[early:await_early])
@@ -344,9 +368,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         source_head, duplicate_head = "c" * 40, "a" * 40
         base = {"ref": "master", "repo": {"full_name": "owner/repository"}}
         pulls = [[
-            {"number": 72, "state": "open", "body": "Fixes #64", "base": base, "head": {"sha": source_head, "repo": {"full_name": "owner/repository"}}},
-            {"number": 73, "state": "open", "body": "Fixes #99", "base": base, "head": {"sha": duplicate_head, "repo": {"full_name": "owner/repository"}}},
-            {"number": 74, "state": "open", "body": "Fixes #100", "base": base, "head": {"sha": duplicate_head.upper(), "repo": {"full_name": "owner/repository"}}},
+            {"number": 72, "state": "open", "body": "Fixes #64", "draft": False, "base": base, "head": {"sha": source_head, "repo": {"full_name": "owner/repository"}}},
+            {"number": 73, "state": "open", "body": "Fixes #99", "draft": False, "base": base, "head": {"sha": duplicate_head, "repo": {"full_name": "owner/repository"}}},
+            {"number": 74, "state": "open", "body": "Fixes #100", "draft": False, "base": base, "head": {"sha": duplicate_head.upper(), "repo": {"full_name": "owner/repository"}}},
         ]]
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
@@ -424,9 +448,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIsNotNone(match); assert match is not None
         local_base = {"ref": "master", "repo": {"full_name": "owner/repository"}}
         pulls = [[
-            {"number": 64, "state": "open", "body": "Fixes #1", "base": local_base, "head": {"sha": "d" * 40, "repo": {"full_name": "owner/repository"}}},
-            {"number": 65, "state": "open", "body": "Fixes #2", "base": local_base, "head": {"sha": "e" * 40, "repo": {"full_name": "owner/repository"}}},
-            {"number": 66, "state": "open", "body": "Fixes #3", "base": local_base, "head": {"repo": {"full_name": "fork/repository"}}},
+            {"number": 64, "state": "open", "body": "Fixes #1", "draft": False, "base": local_base, "head": {"sha": "d" * 40, "repo": {"full_name": "owner/repository"}}},
+            {"number": 65, "state": "open", "body": "Fixes #2", "draft": False, "base": local_base, "head": {"sha": "e" * 40, "repo": {"full_name": "owner/repository"}}},
+            {"number": 66, "state": "open", "body": "Fixes #3", "draft": False, "base": local_base, "head": {"repo": {"full_name": "fork/repository"}}},
         ]]
         for pages, expected in ((pulls, 0), ([[pulls[0][0]], [pulls[0][0]]], 1)):
             with self.subTest(duplicate=expected == 1), tempfile.TemporaryDirectory() as temporary:
@@ -454,6 +478,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                             "event_targets": "[64,65]", "has_event_targets": "true",
                             "has_priority_targets": "true", "priority_targets": "[64]",
                             "has_all_invalidation_targets": "true", "all_invalidation_targets": "[65]",
+                            "all_invalidation_target_snapshots": "[[65,\"" + "e" * 40 + "\",false]]",
                             "writer_head": "a" * 40, "default_branch": "master",
                         },
                     )
@@ -630,7 +655,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn('type(draft) is not bool', program)
         self.assertIn('"carry_pending":str(carry_pending)', program)
 
-    def test_invalidator_fails_closed_when_a_draft_would_inherit_terminal_carry(self) -> None:
+    def test_invalidator_pendingizes_a_draft_before_failing_closed_on_terminal_carry(self) -> None:
         match = re.search(
             r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
@@ -658,12 +683,13 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             environment = os.environ | {
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                 "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": "[72]",
+                "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, True]]),
                 "PULL": json.dumps({"draft": True, "head": {"sha": head}}),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
             result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(log.exists())
+            self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
 
     def test_invalidator_carries_pending_tail_across_104_to_600_open_prs(self) -> None:
         """Every later all-open generation inherits a valid pending tail, not just its first page."""
@@ -698,6 +724,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                     "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": json.dumps(list(range(1, total + 1))),
+                    "KNOWN_TARGET_SNAPSHOTS": json.dumps([[number, f"{number:040x}", False] for number in range(1, total + 1)]),
                     "GITHUB_OUTPUT": str(output), "PATH": os.environ["PATH"],
                 }
                 with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
@@ -715,7 +742,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertLess(len(manifest.encode("utf-8")), 65_535)
         self.assertIn('inputs[check_manifest]={raw_manifest}', self.workflow)
 
-    def test_invalidator_replaces_duplicate_heads_once_without_touching_unique_heads(self) -> None:
+    def test_invalidator_replaces_duplicate_heads_and_pendingizes_unique_known_heads(self) -> None:
         match = re.search(
             r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
@@ -743,16 +770,17 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             environment = os.environ | {
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                 "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": "[72,73,74]",
+                "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, False], [73, head, False], [74, unique_head, False]]),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
             result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
             writes = post.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(writes), 1)
+            self.assertEqual(len(writes), 2)
             self.assertIn(f"head_sha={head}", writes[0])
             self.assertIn(f"external_id=krr-governance/v1/{head}/dispatcher-9", writes[0])
             self.assertIn("status=in_progress", writes[0])
-            self.assertNotIn(f"head_sha={unique_head}", writes[0])
+            self.assertTrue(any(f"head_sha={unique_head}" in write for write in writes))
 
     def test_event_source_and_duplicate_heads_are_invalidated_after_an_earlier_failure(self) -> None:
         match = re.search(
@@ -783,15 +811,68 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             environment = os.environ | {
                 "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                 "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": "[72,73,74,75]", "EVENT_TARGETS": "[72]",
+                "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, source_head, False], [73, duplicate_head, False], [74, duplicate_head, False], [75, unrelated_head, False]]),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
             result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
             writes = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(writes), 2)
+            self.assertEqual(len(writes), 3)
             self.assertEqual(sum(f"head_sha={source_head}" in write for write in writes), 1)
             self.assertEqual(sum(f"head_sha={duplicate_head}" in write for write in writes), 1)
-            self.assertFalse(any(f"head_sha={unrelated_head}" in write for write in writes))
+            self.assertEqual(sum(f"head_sha={unrelated_head}" in write for write in writes), 1)
+
+    def test_invalidator_pendingizes_all_known_heads_before_a_refresh_failure(self) -> None:
+        match = re.search(
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None").replace("write_clock=[time.monotonic()+8.1]", "write_clock=[time.monotonic()]")
+        first_head, second_head = "a" * 40, "b" * 40
+        calls: list[list[str]] = []; posted: dict[int, dict[str, object]] = {}
+
+        def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(arguments)
+            endpoint = arguments[-1]
+            if isinstance(endpoint, str) and "check-runs?" in endpoint:
+                return response([])
+            if "--method" in arguments and "POST" in arguments:
+                fields = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in arguments if "=" in item}
+                identifier = 100 + len(posted)
+                check = {
+                    "id": identifier, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
+                    "head_sha": fields["head_sha"], "external_id": fields["external_id"],
+                    "status": "in_progress", "conclusion": None, "details_url": fields["details_url"],
+                }
+                posted[identifier] = check
+                return response(check)
+            if isinstance(endpoint, str) and "/check-runs/" in endpoint:
+                return response(posted[int(endpoint.rsplit("/", 1)[1])])
+            if isinstance(endpoint, str) and endpoint.endswith("/pulls/72"):
+                return response({}, 7)
+            if isinstance(endpoint, str) and endpoint.endswith("/pulls/73"):
+                return response({"draft": False, "head": {"sha": second_head}})
+            raise AssertionError(arguments)
+
+        environment = os.environ | {
+            "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+            "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": "[72,73]",
+            "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, first_head, False], [73, second_head, False]]),
+            "GITHUB_OUTPUT": str(Path(tempfile.gettempdir()) / "krr-invalidator-output"), "PATH": os.environ["PATH"],
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(SystemExit):
+                exec(program, {"__name__": "__main__"})
+        post_indexes = [index for index, arguments in enumerate(calls) if "--method" in arguments and "POST" in arguments]
+        refresh_indexes = [index for index, arguments in enumerate(calls) if arguments[-1] in {"repos/owner/repository/pulls/72", "repos/owner/repository/pulls/73"}]
+        self.assertEqual(len(post_indexes), 2)
+        self.assertEqual(len(refresh_indexes), 2)
+        self.assertLess(max(post_indexes), min(refresh_indexes))
+        self.assertEqual({check["head_sha"] for check in posted.values()}, {first_head, second_head})
 
     def test_writer_drain_handles_historical_and_completed_races_but_fails_closed_otherwise(self) -> None:
         match = re.search(
@@ -918,6 +999,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "GITHUB_OUTPUT": str(directory / "output"),
                     "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "PULLS": json.dumps([[{"number": 72, "state": "open"}]]),
                     "AFFECTED": "[72]",
+                    "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, "a" * 40, False]]),
                     "PULL": json.dumps({"draft": False, "head": {"sha": "a" * 40}}), "POST": json.dumps(response),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
@@ -958,6 +1040,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "GITHUB_OUTPUT": str(directory / "output"),
                     "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "PULLS": "[]",
                     "AFFECTED": json.dumps(list(range(1, total + 1))),
+                    "KNOWN_TARGET_SNAPSHOTS": json.dumps([[number, "a" * 40, False] for number in range(1, total + 1)]),
                     "PULL": json.dumps({"draft": False, "head": {"sha": "a" * 40}}),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }

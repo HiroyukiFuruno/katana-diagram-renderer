@@ -187,7 +187,8 @@ jobs:
                   bodies[number] = body or ""
           owner, repository_name = repository.split("/", 1)
           closing = re.compile(
-              r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b\s+"
+              r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+              r"(?:[ \t]*:[ \t]*|[ \t]+)"
               r"(?:#|https://github\.com/" + re.escape(owner) + "/" + re.escape(repository_name) + r"/issues/)([1-9][0-9]*)\b",
               re.I,
           )
@@ -338,6 +339,7 @@ jobs:
               raise SystemExit("Current open pull request response is invalid.")
           seen: set[int] = set()
           targets: list[int] = []
+          target_snapshots: dict[int, tuple[str, bool]] = {}
           governed_heads: dict[str, list[int]] = {}
           for page in pages:
               for pull in page:
@@ -358,8 +360,13 @@ jobs:
                       head_sha = head.get("sha")
                       if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) is None:
                           raise SystemExit("Current open pull request head is invalid.")
+                      draft = pull.get("draft")
+                      if type(draft) is not bool:
+                          raise SystemExit("Current open pull request draft state is invalid.")
                       targets.append(number)
-                      governed_heads.setdefault(head_sha.lower(), []).append(number)
+                      normalized_head = head_sha.lower()
+                      target_snapshots[number] = (normalized_head, draft)
+                      governed_heads.setdefault(normalized_head, []).append(number)
           current_targets = set(targets)
           event_targets = [number for number in event_targets if number in current_targets]
           duplicate_governed_targets = {
@@ -387,6 +394,10 @@ jobs:
               number for number in targets
               if number not in preserved and number not in set(event_tail)
           ]
+          all_invalidation_target_snapshots = [
+              [number, *target_snapshots[number]]
+              for number in all_invalidation_targets
+          ]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("has_targets=" + ("true" if targets else "false") + "\n")
               output.write("targets=" + json.dumps(targets) + "\n")
@@ -396,6 +407,7 @@ jobs:
               output.write("priority_targets=" + json.dumps(priority_targets, separators=(",", ":")) + "\n")
               output.write("has_all_invalidation_targets=" + ("true" if all_invalidation_targets else "false") + "\n")
               output.write("all_invalidation_targets=" + json.dumps(all_invalidation_targets, separators=(",", ":")) + "\n")
+              output.write("all_invalidation_target_snapshots=" + json.dumps(all_invalidation_target_snapshots, separators=(",", ":")) + "\n")
               output.write("writer_head=" + writer_head + "\n")
               output.write("default_branch=" + branch + "\n")
           PY
@@ -653,6 +665,7 @@ jobs:
           CHECK_WRITE_TOKEN: ${{ steps.invalidator-token.outputs.token }}
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
           AFFECTED: ${{ steps.current-targets.outputs.all_invalidation_targets }}
+          KNOWN_TARGET_SNAPSHOTS: ${{ steps.current-targets.outputs.all_invalidation_target_snapshots }}
           EVENT_TARGETS: ${{ steps.current-targets.outputs.event_targets }}
         run: |
           python3 - <<'PY'
@@ -664,19 +677,18 @@ jobs:
           try: numbers=json.loads(os.environ.get("AFFECTED", ""))
           except json.JSONDecodeError as error: raise SystemExit("Affected pull request set is invalid.") from error
           if not isinstance(numbers,list) or not numbers or any(type(number) is not int or number<1 for number in numbers) or len(set(numbers))!=len(numbers): raise SystemExit("Affected pull request set is invalid.")
+          try: snapshots=json.loads(os.environ.get("KNOWN_TARGET_SNAPSHOTS", ""))
+          except json.JSONDecodeError as error: raise SystemExit("Known pull request snapshot is invalid.") from error
+          if not isinstance(snapshots,list) or len(snapshots)!=len(numbers): raise SystemExit("Known pull request snapshot is invalid.")
+          known={}
+          for entry,number in zip(snapshots,numbers,strict=True):
+              if not isinstance(entry,list) or len(entry)!=3 or entry[0]!=number or not isinstance(entry[1],str) or re.fullmatch(r"[0-9a-fA-F]{40}",entry[1]) is None or type(entry[2]) is not bool or number in known: raise SystemExit("Known pull request snapshot is invalid.")
+              known[number]=(entry[1].lower(),entry[2])
           try: event_targets=json.loads(os.environ.get("EVENT_TARGETS", "[]"))
           except json.JSONDecodeError as error: raise SystemExit("Event target set is invalid.") from error
           if not isinstance(event_targets,list) or any(type(number) is not int or number<1 for number in event_targets) or len(set(event_targets))!=len(event_targets): raise SystemExit("Event target set is invalid.")
-          failures=[]; manifest=[]; pulls={}; heads={}; write_clock=[time.monotonic()+8.1]
-          for number in numbers:
-              current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False)
-              if current.returncode!=0: failures.append(number); continue
-              try:
-                  pull=json.loads(current.stdout); head=pull.get("head",{}).get("sha") if isinstance(pull,dict) else None; draft=pull.get("draft") if isinstance(pull,dict) else None
-              except json.JSONDecodeError: head=draft=None
-              if not isinstance(head,str) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or type(draft) is not bool: failures.append(number); continue
-              pulls[number]=(head,draft); heads.setdefault(head.lower(),[]).append(number)
-          if failures or len(pulls)!=len(numbers): raise SystemExit("Current governance pull request heads are invalid.")
+          failures=[]; manifest=[]; heads={}; write_clock=[time.monotonic()+8.1]
+          for number,(head,_draft) in known.items(): heads.setdefault(head,[]).append(number)
           # A Check Run is scoped to head SHA, not PR number.  Shared heads
           # must first receive one new pending generation so an old success
           # cannot remain mergeable while the writer fails closed.
@@ -703,28 +715,10 @@ jobs:
               except json.JSONDecodeError: return None
               if not isinstance(check,dict) or check.get("id")!=identifier or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external_id or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: return None
               return identifier
-          if duplicate_heads:
-              if any(number not in pulls for number in event_targets): raise SystemExit("Event target set does not match current pull requests.")
-              event_heads=[]
-              for number in event_targets:
-                  head=pulls[number][0].lower()
-                  if head not in event_heads: event_heads.append(head)
-              invalidation_heads=event_heads+[head for head in duplicate_heads if head not in set(event_heads)]
-              duplicate_results=[invalidate_head(head,0) for head in invalidation_heads]
-              if any(identifier is None for identifier in duplicate_results): raise SystemExit("Unable to invalidate duplicate governance pull request heads.")
-              raise SystemExit("Duplicate governed pull request head SHA.")
-          for number in numbers:
-              head,draft=pulls[number]
-              # Every dispatcher generation receives a new immutable Check
-              # Run.  Check Run PATCH has no CAS: POST-only invalidation
-              # prevents a cancelled older writer from overwriting this
-              # generation's pending state.
-              dispatcher=os.environ["GITHUB_RUN_ID"]
-              if re.fullmatch(r"[1-9][0-9]*", dispatcher) is None: failures.append(number); continue
-              external_id=f"krr-governance/v1/{head.lower()}/dispatcher-{dispatcher}"
+          def prior_carry_pending(head):
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
               listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/commits/{head}/check-runs?{query}"],capture_output=True,text=True,check=False)
-              if listed.returncode!=0: failures.append(number); continue
+              if listed.returncode!=0: return None
               try:
                   pages=json.loads(listed.stdout)
                   if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("check_runs"),list) for page in pages): raise ValueError
@@ -739,18 +733,47 @@ jobs:
                           datetime.fromisoformat(created.replace("Z","+00:00"))
                           external_ids.add(candidate_external); generations.append(candidate)
                   latest=max(generations,key=lambda item:(datetime.fromisoformat(item["created_at"].replace("Z","+00:00")),item["id"])) if generations else None
-              except (json.JSONDecodeError,ValueError,TypeError): failures.append(number); continue
-              base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/"; base_parts=urlparse(base)
+              except (json.JSONDecodeError,ValueError,TypeError): return None
+              base_parts=urlparse(base)
               def is_prior_dispatcher_invalidation(details):
                   if not isinstance(details,str): return False
                   parts=urlparse(details); query_values=parse_qs(parts.query,keep_blank_values=True); run_id=parts.path.removeprefix(base_parts.path)
                   return parts.scheme==base_parts.scheme and parts.netloc==base_parts.netloc and not parts.params and not parts.fragment and bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path==base_parts.path+run_id and query_values.keys()=={"dispatcher_run_id","carry_pending"} and query_values["dispatcher_run_id"]==[run_id] and query_values["carry_pending"] in (["0"],["1"])
               prior_id=(urlparse(latest.get("details_url")).path.removeprefix(base_parts.path) if isinstance(latest,dict) and isinstance(latest.get("details_url"),str) else "")
-              carry_pending=int(latest is not None and latest.get("status")=="in_progress" and latest.get("conclusion") is None and is_prior_dispatcher_invalidation(latest.get("details_url")) and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{prior_id}")
-              if carry_pending and draft:
-                  failures.append(number); continue
-              details=base+dispatcher+"?"+urlencode({"dispatcher_run_id":dispatcher,"carry_pending":str(carry_pending)})
+              return int(latest is not None and latest.get("status")=="in_progress" and latest.get("conclusion") is None and is_prior_dispatcher_invalidation(latest.get("details_url")) and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{prior_id}")
+          # This is intentionally before every per-PR refresh.  A refresh can
+          # fail or race, but it must never leave a known current/event HEAD's
+          # older trusted success mergeable.  Continue every independent POST
+          # after failures, then fail closed as one batch.
+          posted={}
+          for head,members in heads.items():
+              carry_pending=prior_carry_pending(head)
+              if carry_pending is None:
+                  failures.extend(members)
+                  carry_pending=0
+              if carry_pending and any(known[number][1] for number in members):
+                  failures.extend(members)
+                  carry_pending=0
               identifier=invalidate_head(head,carry_pending)
+              if identifier is None: failures.extend(members)
+              else: posted[head]=identifier
+          if duplicate_heads:
+              if any(number not in known for number in event_targets): raise SystemExit("Event target set does not match current pull requests.")
+              raise SystemExit("Duplicate governed pull request head SHA.")
+          # The preflight pending Check Runs above are the only dispatcher
+          # writes.  Refresh afterwards only proves the number/head/draft
+          # snapshot did not move while those immutable generations were made.
+          for number in numbers:
+              expected_head,expected_draft=known[number]
+              current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False)
+              if current.returncode!=0:
+                  failures.append(number); continue
+              try:
+                  pull=json.loads(current.stdout); head=pull.get("head",{}).get("sha") if isinstance(pull,dict) else None; draft=pull.get("draft") if isinstance(pull,dict) else None
+              except json.JSONDecodeError: head=draft=None
+              if not isinstance(head,str) or head.lower()!=expected_head or type(draft) is not bool or draft!=expected_draft:
+                  failures.append(number); continue
+              identifier=posted.get(expected_head)
               if identifier is None: failures.append(number); continue
               manifest.append([number,identifier])
           if failures or len(manifest)!=len(numbers): raise SystemExit("Unable to invalidate one or more current pull requests.")

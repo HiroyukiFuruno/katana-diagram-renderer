@@ -34,7 +34,8 @@ DISPATCHER_EVENTS = frozenset({"pull_request_target", "issue_comment", "issues",
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 NUMBER = re.compile(r"[1-9][0-9]*")
 CLOSING = re.compile(
-    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b\s+(?:"
+    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
+    r"(?:[ \t]*:[ \t]*|[ \t]+)(?:"
     r"#(?P<short>[1-9][0-9]*)|"
     r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)/issues/(?P<full>[1-9][0-9]*)"
     r")\b",

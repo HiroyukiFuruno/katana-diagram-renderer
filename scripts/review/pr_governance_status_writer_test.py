@@ -68,6 +68,27 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertIsNone(WRITER.canonical_issue("Fixes #64; closes #65"))
         self.assertIsNone(WRITER.canonical_issue("No closer"))
 
+    def test_canonical_issue_accepts_optional_colon_like_local_parser(self) -> None:
+        with self.identity():
+            self.assertEqual(WRITER.canonical_issue("Closes: #64"), "64")
+            self.assertEqual(
+                WRITER.canonical_issue(
+                    "Fixes: https://github.com/owner/repository/issues/64"
+                ),
+                "64",
+            )
+            self.assertEqual(WRITER.canonical_issue("Resolves :\t#64"), "64")
+
+    def test_canonical_issue_does_not_treat_colon_text_as_a_closing_reference(self) -> None:
+        with self.identity():
+            for body in (
+                "encloses: #64",
+                "Closes:: #64",
+                "Closes #64x",
+                "Closes: https://github.com/other/repository/issues/64",
+            ):
+                self.assertIsNone(WRITER.canonical_issue(body), body)
+
     def test_full_url_closer_must_target_the_current_repository(self) -> None:
         with self.identity():
             self.assertEqual(
