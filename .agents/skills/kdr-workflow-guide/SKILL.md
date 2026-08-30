@@ -66,6 +66,7 @@ KDR の品質ゲートは、描画ランタイム、runtime asset、CLI、crate 
 
 PR を作る前に `/self-review` と必要な品質ゲートを終えます。
 PR 作成は `/create_pull_request` を使い、ベースブランチは現在のブランチ名と作業文脈から決めます。
+Draftでのreview、指摘のreply/resolve、最新HEADのfinal reviewを終えたら、`just pr-ready-check "<pr>"` を実行してReady化します。Ready化後にmerge承認を得た場合も、`gh pr merge` の直前に同じコマンドを再実行し、Ready PRの最新Issue/marker/thread/CI/base/headを再検証します。
 
 ## 6. 持ち込まないもの
 

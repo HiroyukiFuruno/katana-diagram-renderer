@@ -1,526 +1,78 @@
 from __future__ import annotations
 
-import json
-import os
-import re
-import subprocess
-import sys
-import tempfile
 import unittest
 from pathlib import Path
-from textwrap import dedent
 
 
-class PrGovernanceCiIssueCommentTest(unittest.TestCase):
+class GovernanceCiAndIssueContractTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.workflow = (
-            Path(__file__).parents[2] / ".github/workflows/pr-governance.yml"
-        ).read_text(encoding="utf-8")
+        root = Path(__file__).parents[2]
+        self.dispatcher = (root / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.writer = (root / "scripts/review/pr_governance_status_writer.py").read_text(encoding="utf-8")
+        self.writer_workflow = (root / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
 
-    def resolver(self) -> str:
-        match = re.search(
-            r"- name: Resolve PR targets from a trusted event.*?"
-            r"python3 - <<'PY'\n(.*?)\n          PY",
-            self.workflow,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        assert match is not None
-        return dedent(match.group(1))
-
-    def ci_source_fence(self, name: str) -> str:
-        start = self.workflow.index(f"- name: {name}")
-        match = re.search(
-            r"python3 - <<'PY'\n(.*?)\n          PY",
-            self.workflow[start:],
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        assert match is not None
-        return dedent(match.group(1))
-
-    def publisher_program(self, step_name: str) -> str:
-        start = self.workflow.index(f"- name: {step_name}")
-        match = re.search(r"python3 - <<'PY'\n(.*?)\n          PY", self.workflow[start:], re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return dedent(match.group(1))
-
-    def final_revalidation_script(self) -> str:
-        start = self.workflow.index("- name: Revalidate final governance contract before success")
-        match = re.search(r"run: \|\n(.*?)(?=\n      - name:)", self.workflow[start:], re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return dedent(match.group(1))
-
-    def run_final_revalidation(self, action: str) -> tuple[subprocess.CompletedProcess[str], str, str]:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            bin_directory = directory / "bin"
-            bin_directory.mkdir()
-            output = directory / "output"
-            log = directory / "gh.log"
-            base_sha = "b" * 40
-            head_sha = "a" * 40
-            timestamp = "2026-08-29T00:00:00Z"
-            (bin_directory / "gh").write_text(
-                "#!/bin/sh\n"
-                "printf '%s\\n' \"$*\" >> \"${FAKE_GH_LOG}\"\n"
-                "case \"$*\" in\n"
-                f"  *'/pulls/72'*'.base.sha'*) printf '%s\\n' '{base_sha}' ;;\n"
-                f"  *'/pulls/72'*'.head.sha'*) printf '%s\\n' '{head_sha}' ;;\n"
-                "  *'/pulls/72'*'.head.ref'*) printf '%s\\n' 'governance-test' ;;\n"
-                f"  *'/issues/64'*'.updated_at'*) printf '%s\\n' '{timestamp}' ;;\n"
-                "  *'/issues/comments/3'*'.id'*) printf '%s\\n' '3' ;;\n"
-                f"  *'/issues/comments/3'*'.created_at'*) printf '%s\\n' '{timestamp}' ;;\n"
-                f"  *'/issues/comments/3'*'.updated_at'*) printf '%s\\n' '{timestamp}' ;;\n"
-                "  *) exit 97 ;;\n"
-                "esac\n",
-                encoding="utf-8",
-            )
-            (bin_directory / "python3").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            for executable in (bin_directory / "gh", bin_directory / "python3"):
-                executable.chmod(0o755)
-            environment = os.environ | {
-                "PATH": f"{bin_directory}:{os.environ['PATH']}",
-                "FAKE_GH_LOG": str(log),
-                "GITHUB_OUTPUT": str(output),
-                "GITHUB_REPOSITORY": "owner/repository",
-                "PR_NUMBER": "72", "ISSUE_NUMBER": "64",
-                "ISSUE_UPDATED_AT": timestamp, "ISSUE_ACTION": action,
-                "ISSUE_SOURCE": "issue_comment", "COMMENT_ID": "3",
-                "COMMENT_CREATED_AT": timestamp, "COMMENT_UPDATED_AT": timestamp,
-            }
-            result = subprocess.run(
-                ["/bin/bash", "-c", self.final_revalidation_script()],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            return result, output.read_text(encoding="utf-8"), log.read_text(encoding="utf-8")
-
-    def test_ci_and_release_workflow_runs_have_strict_server_side_sources(self) -> None:
-        resolver = self.resolver()
-        self.assertIn("- CI", self.workflow)
-        self.assertIn("- release-preflight", self.workflow)
-        self.assertIn("- requested", self.workflow)
-        self.assertIn("- in_progress", self.workflow)
-        self.assertIn("- completed", self.workflow)
-        self.assertIn('"CI": ".github/workflows/test-and-build.yml"', resolver)
-        self.assertIn(
-            '"release-preflight": ".github/workflows/release-preflight.yml"',
-            resolver,
-        )
-        self.assertIn('run_event != "pull_request"', resolver)
-        self.assertIn('trusted_run.get("repository")', resolver)
-        self.assertIn('trusted_run.get("head_sha")', resolver)
-        self.assertIn('for field in ("run_number", "run_attempt")', resolver)
-        self.assertIn('trusted_run.get("workflow_id")', resolver)
-        self.assertIn("pull request does not bind trusted base and head", resolver)
-        self.assertIn("default_branch_workflow_blob(expected_path, run_head_sha)", resolver)
-        self.assertNotIn('"PR governance publisher"', resolver)
-
-    def test_requested_ci_invalidates_an_old_success_with_pending_and_completed_failure(self) -> None:
-        self.assertIn('conclusion = "pending"', self.workflow)
-        self.assertIn('run_action in {"requested", "in_progress"}', self.resolver())
-        self.assertIn("Trusted CI or release-preflight source is pending.", self.workflow)
-        self.assertIn('"${SOURCE_KIND}" == ci && "${SOURCE_CONCLUSION}" == pending', self.workflow)
-        self.assertIn('"${SOURCE_KIND}" == ci && "${SOURCE_CONCLUSION}" != success', self.workflow)
-        self.assertIn("Fence CI source against the current PR head", self.workflow)
-        self.assertIn('source["head_sha"] != os.environ["EXPECTED_HEAD_SHA"]', self.workflow)
-        self.assertIn('source.get("status") != "completed"', self.workflow)
-        self.assertIn("source_run_attempt=${SOURCE_RUN_ATTEMPT}", self.workflow)
-        self.assertIn("source_workflow_id=${SOURCE_WORKFLOW_ID}", self.workflow)
-        self.assertIn("source_head_sha=${SOURCE_HEAD_SHA}", self.workflow)
-        self.assertIn("source_base_sha=${SOURCE_BASE_SHA}", self.workflow)
-        self.assertIn("source_status=${SOURCE_STATUS}", self.workflow)
-        self.assertIn("source_conclusion=${SOURCE_CONCLUSION}", self.workflow)
-        self.assertIn('"source_status", "source_conclusion"', self.workflow)
-        self.assertIn("SOURCE_STATUS: ${{ steps.event.outputs.source_status }}", self.workflow)
-        self.assertIn("CI source status or conclusion is invalid.", self.workflow)
-        self.assertIn("Non-CI source cannot bind a CI status.", self.workflow)
-        self.assertIn("Revalidate final CI source generation", self.workflow)
-        self.assertIn("SOURCE_GENERATIONS", self.workflow)
-        self.assertIn("max(generations)", self.workflow)
-
-    def test_ci_source_fences_reject_a_base_update_after_the_run_started(self) -> None:
-        source_run = {
-            "id": 900,
-            "head_sha": "a" * 40,
-            "run_attempt": 2,
-            "run_number": 8,
-            "workflow_id": 44,
-            "status": "in_progress",
-            "pull_requests": [{
-                "number": 72,
-                "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                "head": {"repo": {"full_name": "owner/repository"}},
-            }],
-        }
-        generations = [{"workflow_runs": [{
-            "event": "pull_request", "head_sha": "a" * 40,
-            "run_number": 8, "run_attempt": 2,
-        }]}]
-        environment = os.environ | {
-            "GITHUB_REPOSITORY": "owner/repository",
-            "SOURCE_RUN_JSON": __import__("json").dumps(source_run),
-            "SOURCE_GENERATIONS": __import__("json").dumps(generations),
-            "SOURCE_RUN_ATTEMPT": "2", "SOURCE_RUN_NUMBER": "8",
-            "SOURCE_WORKFLOW_ID": "44", "SOURCE_HEAD_SHA": "a" * 40,
-            "SOURCE_BASE_SHA": "b" * 40, "EXPECTED_HEAD_SHA": "a" * 40,
-            "EXPECTED_BASE_SHA": "c" * 40, "SOURCE_CONCLUSION": "pending",
-        }
-        for name in (
-            "Fence CI source against the current PR head",
-            "Revalidate final CI source generation",
+    def test_ci_and_release_generations_bind_path_repo_pr_base_head_and_attempt(self) -> None:
+        for name, path in (
+            ("CI", ".github/workflows/test-and-build.yml"),
+            ("release-preflight", ".github/workflows/release-preflight.yml"),
         ):
-            result = subprocess.run(
-                [sys.executable, "-c", self.ci_source_fence(name)],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 1, f"{name}: {result.stderr}")
-
-    def test_ci_source_fences_reject_a_refetched_pull_with_a_different_head(self) -> None:
-        source_run = {
-            "head_sha": "a" * 40,
-            "run_attempt": 2,
-            "run_number": 8,
-            "workflow_id": 44,
-            "status": "in_progress",
-            "pull_requests": [{
-                "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}},
-            }],
-        }
-        generations = [{"workflow_runs": [{
-            "event": "pull_request", "head_sha": "a" * 40,
-            "run_number": 8, "run_attempt": 2,
-        }]}]
-        environment = os.environ | {
-            "GITHUB_REPOSITORY": "owner/repository",
-            "SOURCE_RUN_JSON": __import__("json").dumps(source_run),
-            "SOURCE_GENERATIONS": __import__("json").dumps(generations),
-            "SOURCE_RUN_ATTEMPT": "2", "SOURCE_RUN_NUMBER": "8",
-            "SOURCE_WORKFLOW_ID": "44", "SOURCE_HEAD_SHA": "a" * 40,
-            "SOURCE_BASE_SHA": "b" * 40, "EXPECTED_HEAD_SHA": "a" * 40,
-            "EXPECTED_BASE_SHA": "b" * 40, "SOURCE_CONCLUSION": "pending",
-        }
-        for name in (
-            "Fence CI source against the current PR head",
-            "Revalidate final CI source generation",
+            self.assertIn(f'generation(number, base, head, "{name}", "{path}", evidence)', self.writer)
+            self.assertIn(f'run.get("name") == name and workflow_path_matches(run.get("path"), path)', self.writer)
+        for text in (
+            'run.get("event") == "pull_request"', 'item.get("number") == number',
+            'run_base.get("sha") == base', 'run_head.get("sha") == head',
+            'run.get("workflow_id") == workflow_id', 'type(run.get("run_attempt")) is int',
+            'Default-branch CI workflow ID is invalid.', 'if evidence is None:\n        trusted_workflow_blob(path, base, head)', 'return max(matches, key=lambda item:',
         ):
-            result = subprocess.run(
-                [sys.executable, "-c", self.ci_source_fence(name)],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 1, f"{name}: {result.stderr}")
+            self.assertIn(text, self.writer)
 
-    def test_ci_source_fences_accept_only_the_current_generation(self) -> None:
-        source_run = {
-            "id": 900,
-            "head_sha": "a" * 40,
-            "run_attempt": 2,
-            "run_number": 8,
-            "workflow_id": 44,
-            "status": "in_progress",
-            "pull_requests": [{
-                "number": 72,
-                "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
-            }],
-        }
-        base_environment = os.environ | {
-            "GITHUB_REPOSITORY": "owner/repository",
-            "SOURCE_RUN_JSON": json.dumps(source_run),
-            "SOURCE_RUN_ID": "900", "SOURCE_PR_NUMBER": "72",
-            "SOURCE_RUN_ATTEMPT": "2", "SOURCE_RUN_NUMBER": "8",
-            "SOURCE_WORKFLOW_ID": "44", "SOURCE_HEAD_SHA": "a" * 40,
-            "SOURCE_BASE_SHA": "b" * 40, "EXPECTED_HEAD_SHA": "a" * 40,
-            "EXPECTED_BASE_SHA": "b" * 40, "SOURCE_CONCLUSION": "pending",
-        }
-        names = (
-            "Fence CI source against the current PR head",
-            "Revalidate final CI source generation",
-        )
-        for latest, expected_exit in (((8, 2), 0), ((8, 3), 1), ((9, 1), 1)):
-            runs = [{
-                "id": 900, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
-                "run_number": 8, "run_attempt": 2, "pull_requests": [{
-                    "number": 72,
-                    "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                    "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
-                }],
-            }]
-            if latest != (8, 2):
-                runs.append({
-                    "id": 901, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
-                    "run_number": latest[0], "run_attempt": latest[1], "pull_requests": [{
-                        "number": 72,
-                        "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                        "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
-                    }],
-                })
-            generations = [{"workflow_runs": runs}]
-            environment = base_environment | {"SOURCE_GENERATIONS": json.dumps(generations)}
-            for name in names:
-                result = subprocess.run(
-                    [sys.executable, "-c", self.ci_source_fence(name)],
-                    capture_output=True, text=True, env=environment, check=False,
-                )
-                self.assertEqual(result.returncode, expected_exit, f"{latest}, {name}: {result.stderr}")
+    def test_success_re_reads_ci_generation_from_one_final_shared_snapshot_before_post(self) -> None:
+        self.assertIn("final_evidence_for_pr(decision.head, initial_evidence)", self.writer)
+        self.assertIn("head_sha={head}&per_page=100", self.writer)
+        self.assertIn("def finalize_decision", self.writer)
+        self.assertIn("latest != generations", self.writer)
+        self.assertIn("CI generation changed during governance revalidation.", self.writer)
+        self.assertIn("check_changed_since(decision.head, decision.pending_check_fingerprint)", self.writer)
 
-        foreign_same_head = {
-            "id": 901, "workflow_id": 44, "event": "pull_request", "head_sha": "a" * 40,
-            "run_number": 99, "run_attempt": 1, "pull_requests": [{
-                "number": 73,
-                "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
-            }],
-        }
-        environment = base_environment | {"SOURCE_GENERATIONS": json.dumps([{"workflow_runs": [runs[0], foreign_same_head]}])}
-        for name in names:
-            result = subprocess.run(
-                [sys.executable, "-c", self.ci_source_fence(name)],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
+    def test_default_branch_writer_uses_protected_environment_and_split_tokens(self) -> None:
+        self.assertIn("environment: pr-governance", self.writer_workflow)
+        self.assertIn("Writer SHA does not match default branch head.", self.writer_workflow)
+        self.assertIn("Writer workflow differs from default branch.", self.writer_workflow)
+        self.assertIn("ref: ${{ github.sha }}", self.writer_workflow)
+        self.assertIn("bootstrap-validation bound this immutable dispatch SHA", self.writer_workflow)
+        self.assertIn("persist-credentials: false", self.writer_workflow)
+        self.assertIn("permission-checks: write", self.writer_workflow)
+        self.assertIn("def read_environment(*, default_token: bool = False)", self.writer)
+        self.assertIn('return {"GH_TOKEN": token, "PATH": os.environ["PATH"]}', self.writer)
+        self.assertIn("environment = {\"GH_TOKEN\": token, \"PATH\": environment[\"PATH\"]}", self.writer)
+        self.assertIn("DEFAULT_READ_TOKEN: ${{ github.token }}", self.writer_workflow)
+        self.assertIn("Create read-only governance App token", self.writer_workflow)
 
-    def test_readiness_gate_uses_one_complete_current_pr_snapshot(self) -> None:
-        start = self.workflow.index("      - name: Verify PR readiness")
-        end = self.workflow.index("\n      - name: Revalidate final governance contract before success", start)
-        step = self.workflow[start:end]
-        base_assignment = step.index('current_base="$(gh api')
-        head_assignment = step.index('current_head="$(gh api')
-        readiness_call = step.index("python3 scripts/review/verify_pr_ready.py")
-        self.assertLess(base_assignment, readiness_call)
-        self.assertLess(head_assignment, readiness_call)
-        invocation = step[readiness_call : step.index("verification_exit=$?", readiness_call)]
-        self.assertIn('--expected-base-sha "${current_base}"', invocation)
-        self.assertIn('--expected-head-sha "${current_head}"', invocation)
-        self.assertNotIn('--expected-base-sha "${verified_base}"', invocation)
-        self.assertNotIn('--expected-head-sha "${verified_head}"', invocation)
-        self.assertEqual(invocation.count("--expected-base-sha"), 1)
-        self.assertEqual(invocation.count("--expected-head-sha"), 1)
+    def test_issue_comment_and_issue_events_are_bounded_to_one_default_branch_arbiter(self) -> None:
+        self.assertIn("issue_comment:", self.dispatcher)
+        self.assertIn("issues:", self.dispatcher)
+        self.assertIn("workflow_dispatch:", self.writer_workflow)
+        # The dispatcher passes only its immutable run ID; it never passes a
+        # caller-controlled count, PR ref, SHA, or target set to the writer.
+        self.assertNotIn("invalidated_count", self.writer_workflow)
+        self.assertNotIn("invalidated_count", self.dispatcher)
+        self.assertIn("dispatcher_run_id:", self.writer_workflow)
+        self.assertNotIn("inputs.pr", self.writer_workflow)
 
-    def test_readiness_snapshot_is_not_reused_after_a_base_or_head_swap(self) -> None:
-        start = self.workflow.index("      - name: Verify PR readiness")
-        end = self.workflow.index("\n      - name: Revalidate final governance contract before success", start)
-        step = self.workflow[start:end]
-        readiness_call = step.index("python3 scripts/review/verify_pr_ready.py")
-        invocation = step[readiness_call : step.index("verification_exit=$?", readiness_call)]
-        self.assertRegex(
-            invocation,
-            r'--expected-base-sha "\$\{current_base\}" \\\s*\n\s*--expected-head-sha "\$\{current_head\}"',
-        )
-        self.assertNotRegex(invocation, r'--expected-(?:base|head)-sha "\$\{verified_(?:base|head)\}"')
-        self.assertLess(
-            self.workflow.index("      - name: Verify PR readiness"),
-            self.workflow.index("      - name: Revalidate final governance contract before success"),
-        )
-        self.assertLess(
-            self.workflow.index("      - name: Revalidate final governance contract before success"),
-            self.workflow.index("      - name: Fence final status against newer governance generation"),
-        )
-        self.assertLess(
-            self.workflow.index("      - name: Fence final status against newer governance generation"),
-            self.workflow.index("      - name: Revalidate final CI source generation"),
-        )
-
-    def test_preflight_invalidates_each_normal_matrix_target(self) -> None:
-        program = self.publisher_program("Publish preflight pending state to current trusted pull request heads")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            fake = directory / "fake_gh.py"
-            log = directory / "log"
-            fake.write_text(
-                "import json, os, sys\n"
-                "args = sys.argv[1:]\n"
-                "with open(os.environ['FAKE_GH_LOG'], 'a', encoding='utf-8') as out: out.write(json.dumps(args) + '\\n')\n"
-                "text = ' '.join(args)\n"
-                "if '/pulls/' in text and os.environ.get('FAIL_PULL_GET') == '1': sys.exit(1)\n"
-                "if '/pulls/1' in text: print(json.dumps({'number': 1, 'state': 'open', 'draft': False, 'body': 'Fixes #64', 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'a'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
-                "elif '/pulls/2' in text: print(json.dumps({'number': 2, 'state': 'open', 'draft': False, 'body': 'Fixes #64', 'base': {'repo': {'full_name': 'owner/repository'}}, 'head': {'sha': 'b'*40, 'repo': {'full_name': 'owner/repository'}}}))\n"
-                "elif '--method' in args and 'b'*40 in text and os.environ.get('FAIL_SECOND') == '1': sys.exit(1)\n"
-                "elif '--method' in args: sys.exit(0)\n"
-                "else: sys.exit(97)\n",
-                encoding="utf-8",
-            )
-            gh = directory / "gh"
-            gh.write_text(f"#!/bin/sh\nexec {sys.executable} {fake} \"$@\"\n", encoding="utf-8")
-            gh.chmod(0o755)
-            base_environment = os.environ | {
-                "PATH": f"{directory}:{os.environ['PATH']}", "FAKE_GH_LOG": str(log),
-                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com",
-                "GITHUB_RUN_ID": "999",
-            }
-            for number, head in (("1", "a" * 40), ("2", "b" * 40)):
-                result = subprocess.run(
-                    [sys.executable, "-c", program],
-                    capture_output=True,
-                    text=True,
-                    env=base_environment | {"PR_NUMBER": number, "FIXED_HEAD_SHA": head, "CANONICAL_ISSUE_NUMBER": "64"},
-                    check=False,
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-            successful_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(sum("/statuses/" in " ".join(call) for call in successful_calls), 2)
-            failed_environment = base_environment | {
-                "FAIL_SECOND": "1", "PR_NUMBER": "2", "FIXED_HEAD_SHA": "b" * 40, "CANONICAL_ISSUE_NUMBER": "64",
-            }
-            log.unlink()
-            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=failed_environment, check=False)
-            self.assertNotEqual(result.returncode, 0)
-            failed_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(sum("/statuses/" in " ".join(call) for call in failed_calls), 3)
-
-            log.unlink()
-            unavailable_environment = base_environment | {
-                "FAIL_PULL_GET": "1", "PR_NUMBER": "1", "FIXED_HEAD_SHA": "a" * 40, "CANONICAL_ISSUE_NUMBER": "64",
-            }
-            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=unavailable_environment, check=False)
-            self.assertNotEqual(result.returncode, 0)
-            unavailable_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(sum("/statuses/" in " ".join(call) for call in unavailable_calls), 1)
-            self.assertEqual(sum("/pulls/1" in " ".join(call) for call in unavailable_calls), 3)
-
-            log.unlink()
-            mismatch_environment = base_environment | {
-                "PR_NUMBER": "1", "FIXED_HEAD_SHA": "a" * 40,
-                "CANONICAL_ISSUE_NUMBER": "65",
-            }
-            result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, env=mismatch_environment, check=False)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("canonical Issue changed", result.stderr)
-            mismatch_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(sum("/statuses/" in " ".join(call) for call in mismatch_calls), 1)
-
-    def test_pr_workflow_blob_must_match_the_default_branch_without_checkout(self) -> None:
-        resolver = self.resolver()
-        self.assertIn("/contents/{path}?ref={ref}", resolver)
-        self.assertIn("PR workflow blob differs from the trusted default branch.", resolver)
-        self.assertIn('payload.get("type") != "file"', resolver)
-        self.assertNotIn("actions/checkout", resolver)
-        self.assertNotIn("subprocess.run([\"git\"", resolver)
-
-    def test_non_pr_issue_comment_revalidates_all_matching_ready_prs(self) -> None:
-        resolver = self.resolver()
-        self.assertIn("def comment_freshness", resolver)
-        self.assertIn("def closing_targets", resolver)
-        self.assertIn("--paginate", resolver)
-        self.assertIn("--slurp", resolver)
-        self.assertIn('f"repos/{repository}/issues/comments/{comment_id}"', resolver)
-        self.assertIn('action not in {"created", "edited", "deleted"}', resolver)
-        self.assertIn("Issue changed before comment target resolution completed.", resolver)
-        self.assertIn('"issue_comment"', resolver)
-        self.assertIn("if action != \"deleted\"", resolver)
-        self.assertIn("Issue comment freshness timestamp is invalid.", resolver)
-
-    def test_final_comment_revalidation_binds_issue_and_comment_timestamps(self) -> None:
-        final_start = self.workflow.index("- name: Revalidate final governance contract before success")
-        final_end = self.workflow.index("\n      - name: Fence final status", final_start)
-        final = self.workflow[final_start:final_end]
-        for variable in (
-            "ISSUE_SOURCE",
-            "COMMENT_ID",
-            "COMMENT_CREATED_AT",
-            "COMMENT_UPDATED_AT",
+    def test_ready_and_merge_harness_rechecks_the_same_gate_immediately_before_merge(self) -> None:
+        root = Path(__file__).parents[2]
+        for relative in (
+            "AGENTS.md",
+            ".codex/skills/impl-release/SKILL.md",
+            ".agents/skills/impl-release/SKILL.md",
+            ".codex/skills/create_pull_request/SKILL.md",
+            ".agents/skills/create_pull_request/SKILL.md",
         ):
-            self.assertIn(variable, final)
-        self.assertIn("issue_comment:created|issue_comment:edited|issue_comment:deleted", final)
-        self.assertIn('"${current_comment_id}" != "${COMMENT_ID}"', final)
-        self.assertIn('"${current_comment_updated_at}" != "${COMMENT_UPDATED_AT}"', final)
-
-    def test_final_comment_revalidation_uses_current_comment_only_for_created_or_edited(self) -> None:
-        for action in ("created", "edited", "deleted"):
-            with self.subTest(action=action):
-                result, output, log = self.run_final_revalidation(action)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("issue_freshness_exit=0", output)
-                self.assertIn("repos/owner/repository/issues/64 --jq .updated_at", log)
-                if action == "deleted":
-                    self.assertNotIn("issues/comments/3", log)
-                else:
-                    self.assertEqual(log.count("issues/comments/3"), 3)
-
-    def test_schedule_is_only_a_default_branch_reconciliation_path(self) -> None:
-        resolver = self.resolver()
-        self.assertIn("schedule:", self.workflow)
-        self.assertIn("def scheduled_targets", resolver)
-        self.assertIn('elif event_name == "schedule"', resolver)
-        self.assertIn("Scheduled open pull request response contains a duplicate", resolver)
-        self.assertIn("MAX_MATRIX_TARGETS = 256", resolver)
-
-    def test_resolver_accepts_nullable_unrelated_body_without_losing_matching_prs(self) -> None:
-        from scripts.review.pr_governance_event_test import PrGovernanceReviewEventTest
-
-        harness = PrGovernanceReviewEventTest(methodName="run_resolver")
-        harness.setUp()
-        result, outputs = harness.run_resolver(
-            "issues",
-            [[
-                {"number": 1, "state": "open", "draft": False, "body": None},
-                {"number": 2, "state": "open", "draft": False, "body": "Fixes #64"},
-            ]],
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            [item["pr_number"] for item in __import__("json").loads(outputs["matrix"])["include"]],
-            ["2"],
-        )
-
-    def test_bind_accepts_requested_ci_generation_and_issue_source(self) -> None:
-        match = re.search(
-            r"- name: Bind resolved target.*?python3 - <<'PY'\n(.*?)\n          PY",
-            self.workflow,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(match)
-        assert match is not None
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            output = Path(temporary_directory) / "output"
-            environment = os.environ | {
-                "PR_NUMBER": "72", "SOURCE_RUN_ID": "900", "SOURCE_KIND": "ci",
-                "SOURCE_CONCLUSION": "pending", "SOURCE_RUN_ATTEMPT": "2",
-                "SOURCE_RUN_NUMBER": "8", "SOURCE_WORKFLOW_ID": "44",
-                "SOURCE_HEAD_SHA": "a" * 40, "CANONICAL_ISSUE_NUMBER": "64", "ISSUE_GENERATION_RUN_ID": "901",
-                "ISSUE_NUMBER": "64", "ISSUE_UPDATED_AT": "2026-08-29T00:00:00Z",
-                "ISSUE_ACTION": "created", "ISSUE_SOURCE": "issue_comment",
-                "COMMENT_ID": "3", "COMMENT_CREATED_AT": "2026-08-29T00:00:00Z",
-                "COMMENT_UPDATED_AT": "2026-08-29T00:00:00Z", "GITHUB_OUTPUT": str(output),
-            }
-            result = subprocess.run(
-                [sys.executable, "-c", dedent(match.group(1))],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 1, result.stderr)
-            # A source and Issue generation must remain mutually exclusive.
-            for name in (
-                "SOURCE_RUN_ID", "SOURCE_KIND", "SOURCE_CONCLUSION",
-                "SOURCE_RUN_ATTEMPT", "SOURCE_RUN_NUMBER", "SOURCE_WORKFLOW_ID",
-                "SOURCE_HEAD_SHA",
-            ):
-                environment[name] = ""
-            result = subprocess.run(
-                [sys.executable, "-c", dedent(match.group(1))],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            environment.update(
-                {
-                    "SOURCE_RUN_ID": "900", "SOURCE_KIND": "ci",
-                    "SOURCE_STATUS": "in_progress", "SOURCE_CONCLUSION": "pending", "SOURCE_RUN_ATTEMPT": "2",
-                    "SOURCE_RUN_NUMBER": "8", "SOURCE_WORKFLOW_ID": "44",
-                    "SOURCE_HEAD_SHA": "a" * 40, "SOURCE_BASE_SHA": "b" * 40,
-                    "CANONICAL_ISSUE_NUMBER": "64",
-                    "ISSUE_GENERATION_RUN_ID": "",
-                    "ISSUE_NUMBER": "", "ISSUE_UPDATED_AT": "", "ISSUE_ACTION": "",
-                    "ISSUE_SOURCE": "", "COMMENT_ID": "", "COMMENT_CREATED_AT": "",
-                    "COMMENT_UPDATED_AT": "",
-                }
-            )
-            result = subprocess.run(
-                [sys.executable, "-c", dedent(match.group(1))],
-                capture_output=True, text=True, env=environment, check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            with self.subTest(path=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn("gh pr merge", text)
+                self.assertIn("just pr-ready-check", text)
+                self.assertIn("直前", text)
 
 
 if __name__ == "__main__":

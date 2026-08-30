@@ -927,48 +927,59 @@ class VerifyPushIssueTest(unittest.TestCase):
                     pr_number=72,
                 )
 
-    def test_trusted_workflow_invokes_pr_range_mode_after_default_branch_checkout(self) -> None:
+    def test_trusted_default_advance_rejects_workflow_but_allows_nonworkflow_change(self) -> None:
+        base, trusted = "a" * 40, "b" * 40
+        def compare(files: list[dict[str, str]]) -> dict[str, object]:
+            return {"base_commit": {"sha": base}, "files": files}
+        with patch.object(subject, "_gh_json", return_value=compare([{"filename": ".github/workflows/ci.yml"}])):
+            self.assertEqual(
+                subject._default_advance_workflow_errors(
+                    repository="HiroyukiFuruno/katana-render-runtime", base_sha=base, trusted_default_sha=trusted,
+                ),
+                [".github/workflows/ci.yml"],
+            )
+        with patch.object(subject, "_gh_json", return_value=compare([{"filename": "README.md"}])):
+            self.assertEqual(
+                subject._default_advance_workflow_errors(
+                    repository="HiroyukiFuruno/katana-render-runtime", base_sha=base, trusted_default_sha=trusted,
+                ),
+                [],
+            )
+        with patch.object(subject, "_gh_json", return_value=compare([{"filename": ".github/workflows/new.yml", "previous_filename": ".github/workflows/old.yml"}])):
+            self.assertEqual(
+                subject._default_advance_workflow_errors(
+                    repository="HiroyukiFuruno/katana-render-runtime", base_sha=base, trusted_default_sha=trusted,
+                ),
+                [".github/workflows/new.yml", ".github/workflows/old.yml"],
+            )
+
+    def test_trusted_dispatcher_observes_pull_request_target_without_checkout_or_pr_code(self) -> None:
         workflow = (
             Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
         ).read_text(encoding="utf-8")
-        checkout = "- name: Check out trusted default-branch repository"
-        verifier = "python3 scripts/hooks/verify_push_issue.py"
+        writer = (
+            Path(subject.__file__).parents[2] / "scripts/review/pr_governance_status_writer.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("workflow_run:", workflow)
-        self.assertNotIn("pull_request_target:", workflow)
-        self.assertIn(
-            "default_branch=\"$(gh api \"repos/${GITHUB_REPOSITORY}\" --jq '.default_branch')\"",
-            workflow,
-        )
-        self.assertIn(
-            "trusted_base_sha=\"$(gh api \"repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}\" --jq '.object.sha')\"",
-            workflow,
-        )
-        self.assertIn("ref: ${{ steps.pull-request.outputs.trusted_base_sha }}", workflow)
-        self.assertNotIn("ref: ${{ steps.pull-request.outputs.base_sha }}", workflow)
-        self.assertIn(checkout, workflow)
-        self.assertIn(verifier, workflow)
-        self.assertIn("--pr-base-sha \"${current_base}\"", workflow)
-        self.assertIn("--pr-head-sha \"${current_head}\"", workflow)
-        self.assertIn("--pr-branch \"${current_branch}\"", workflow)
-        self.assertLess(workflow.index(checkout), workflow.index(verifier))
+        self.assertIn("pull_request_target:", workflow)
+        self.assertNotIn("actions/checkout", workflow)
+        self.assertIn('event_name == "pull_request_target"', workflow)
+        self.assertIn('f"repos/{repository}/pulls/{source_number_value}"', workflow)
+        self.assertIn('current_base_repository.get("full_name") != repository', workflow)
+        self.assertIn('current_head_repository.get("full_name") != repository', workflow)
+        self.assertIn("scripts/hooks/verify_push_issue.py", writer)
+        self.assertIn('"--pr-base-sha", base', writer)
+        self.assertIn('"--pr-head-sha", head', writer)
 
-    def test_final_trusted_status_compares_against_resolved_base_sha(self) -> None:
-        workflow = (
-            Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
+    def test_final_single_arbiter_status_rechecks_resolved_base_sha(self) -> None:
+        writer = (
+            Path(subject.__file__).parents[2] / "scripts/review/pr_governance_status_writer.py"
         ).read_text(encoding="utf-8")
-        final_status = workflow[workflow.index("- name: Publish final governance state") :]
-
-        self.assertIn(
-            "BASE_SHA: ${{ steps.pull-request.outputs.base_sha }}", final_status
-        )
-        self.assertIn(
-            '[[ "${CURRENT_BASE}" != "${BASE_SHA}" ]]', final_status
-        )
-        self.assertIn(
-            "else\n            state=success\n"
-            "            description='Trusted PR governance passed.'",
-            final_status,
-        )
+        self.assertIn("def finalize_decision", writer)
+        self.assertIn("final_closer_is_unique(decision.number, decision.issue, decision.base, decision.head", writer)
+        self.assertIn('generation(decision.number, decision.base, decision.head, "CI"', writer)
+        self.assertIn("base=decision.base if state == \"success\"", writer)
+        self.assertIn("head=decision.head if state == \"success\"", writer)
 
     def test_new_branch_without_upstream_uses_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

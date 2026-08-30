@@ -604,11 +604,14 @@ fn assert_pr_ready_recipe_metadata(ready_check: &str) {
     for required in [
         "set -euo pipefail",
         "pr={{quote(pr)}}",
-        "gh pr view \"$pr\" --json baseRefOid,headRefOid,headRefName",
+        "gh pr view \"$pr\" --json baseRefOid,headRefOid,headRefName,isDraft",
         "gh repo view --json nameWithOwner",
         "gh returned incomplete or unsafe PR metadata",
-        "IFS=\"$(printf '\\011')\" read -r base_sha head_sha branch repository extra",
+        "IFS=\"$(printf '\\011')\" read -r base_sha head_sha branch repository readiness_mode extra",
         "not any(ord(character) < 32 or ord(character) == 127",
+        "isinstance(fields[4], bool)",
+        "\"require-draft\" if fields[4] else \"allow-ready\"",
+        "\"$readiness_mode\" != \"require-draft\" && \"$readiness_mode\" != \"allow-ready\"",
     ] {
         assert!(
             ready_check.contains(required),
@@ -636,7 +639,9 @@ fn assert_pr_ready_recipe_issue_dispatch(ready_check: &str) {
 
 fn assert_pr_ready_recipe_readiness_dispatch(ready_check: &str) {
     assert!(ready_check.contains("scripts/review/verify_pr_ready.py"));
-    assert!(ready_check.contains("--require-draft"));
+    assert!(ready_check.contains("\"--$readiness_mode\""));
+    assert!(ready_check.contains("\"require-draft\""));
+    assert!(ready_check.contains("\"allow-ready\""));
 }
 
 fn assert_pr_ready_recipe_order(ready_check: &str) {
@@ -729,7 +734,7 @@ fn assert_bootstrap_overview_terms(agents: &str, workflow: &str) {
             "PR内の例外",
             "自己承認",
             "verify_push_issue.py",
-            "KRR / PR governance (trusted)",
+            "KRR / PR governance (trusted check)",
             "KRR / PR governance review latch",
             "app_id=15368",
             "使い捨てPR",
@@ -791,23 +796,27 @@ fn assert_no_legacy_pr_ready_invocation(root: &Path) -> TestResult {
 
 fn assert_governance_workflow_contract(root: &Path) -> TestResult {
     let governance = std::fs::read_to_string(root.join(".github/workflows/pr-governance.yml"))?;
+    let writer =
+        std::fs::read_to_string(root.join(".github/workflows/pr-governance-status-writer.yml"))?;
+    let writer_program =
+        std::fs::read_to_string(root.join("scripts/review/pr_governance_status_writer.py"))?;
     let review_sensor =
         std::fs::read_to_string(root.join(".github/workflows/pr-governance-review-events.yml"))?;
-    assert_governance_trigger_contract(&governance);
+    assert_governance_trigger_contract(&governance, &writer_program);
     assert_governance_sensor_contract(&review_sensor);
-    assert_governance_source_contract(&governance);
-    assert_governance_status_contract(&governance);
-    assert_governance_access_contract(&governance);
+    assert_governance_source_contract(&governance, &writer, &writer_program);
+    assert_governance_status_contract(&governance, &writer_program);
+    assert_governance_access_contract(&governance, &writer);
     Ok(())
 }
 
-fn assert_governance_trigger_contract(governance: &str) {
-    assert!(governance.contains("python3 scripts/review/verify_pr_ready.py"));
-    assert!(governance.contains("--allow-ready"));
+fn assert_governance_trigger_contract(governance: &str, writer_program: &str) {
+    assert!(writer_program.contains("scripts/review/verify_pr_ready.py"));
+    assert!(writer_program.contains("--allow-ready"));
     assert!(governance.contains("issue_comment:"));
     assert!(governance.contains("workflow_run:"));
     assert!(governance.contains("PR governance review sensor"));
-    assert!(!governance.contains("pull_request_target:"));
+    assert!(governance.contains("pull_request_target:"));
     assert!(
         !governance
             .lines()
@@ -830,60 +839,72 @@ fn assert_governance_sensor_contract(sensor: &str) {
     assert!(!sensor.contains("pull_request_target:"));
     assert!(sensor.contains("KRR / PR governance review latch"));
     assert!(sensor.contains("actions: read"));
-    assert!(sensor.contains("statuses: read"));
+    assert!(sensor.contains("checks: read"));
 }
 
-fn assert_governance_source_contract(governance: &str) {
+fn assert_governance_source_contract(governance: &str, writer: &str, writer_program: &str) {
     for required in [
-        "Resolve PR state and trusted default-branch SHA",
-        "default_branch=\"$(gh api \"repos/${GITHUB_REPOSITORY}\" --jq '.default_branch')\"",
-        "trusted_base_sha=\"$(gh api \"repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}\" --jq '.object.sha')\"",
-        "echo \"trusted_base_sha=${trusted_base_sha}\"",
-        "ref: ${{ steps.pull-request.outputs.trusted_base_sha }}",
+        "Resolve current open pull requests from the trusted default branch",
+        "Validate trusted default-branch writer",
+        "Rebind trusted default branch before token creation",
+        "ref: ${{ github.sha }}",
+        "persist-credentials: false",
+        "trusted_dispatcher_source",
+        "rebind_trusted_default_writer",
     ] {
         assert!(
-            governance.contains(required),
+            governance.contains(required)
+                || writer.contains(required)
+                || writer_program.contains(required),
             "trusted source contract must contain {required}"
         );
     }
-    assert!(!governance.contains("ref: ${{ steps.pull-request.outputs.base_sha }}"));
-    assert!(!governance.contains("ref: ${{ github.event.pull_request.head.sha }}"));
-    assert!(!governance.contains("ref: refs/pull/"));
-    assert!(!governance.contains("github.event.pull_request.merge_commit_sha"));
+    assert!(!writer.contains("ref: refs/pull/"));
+    assert!(!writer.contains("github.event.pull_request.merge_commit_sha"));
 }
 
-fn assert_governance_status_contract(governance: &str) {
-    assert!(
-        governance
-            .contains("gh api --method POST \"repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}\"")
-    );
-    for state in ["state=pending", "state=failure", "state=success"] {
+fn assert_governance_status_contract(governance: &str, writer_program: &str) {
+    for required in [
+        "repos/{REPOSITORY}/check-runs",
+        "CHECK_NAME = \"KRR / PR governance (trusted check)\"",
+        "CHECK_EXTERNAL_PREFIX",
+        "in_progress",
+        "success",
+        "failure",
+        "check_fingerprint",
+    ] {
         assert!(
-            governance.contains(state),
-            "trusted governance must publish {state}"
+            governance.contains(required) || writer_program.contains(required),
+            "trusted governance Check Run contract must contain {required}"
         );
     }
-    assert!(governance.contains("KRR / PR governance (trusted)"));
     assert!(governance.contains("environment: pr-governance"));
+    assert!(!governance.contains("/statuses/"));
 }
 
-fn assert_governance_access_contract(governance: &str) {
+fn assert_governance_access_contract(governance: &str, writer: &str) {
     assert!(
         governance
             .contains("actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349")
+            || writer.contains(
+                "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+            )
     );
     for required in [
         "KRR_GOVERNANCE_APP_ID",
         "KRR_GOVERNANCE_APP_PRIVATE_KEY",
         "outputs.token",
         "GH_TOKEN: ${{ steps.",
-        "if: always()",
+        "permission-checks: write",
+        "CHECK_WRITE_TOKEN",
     ] {
         assert!(
-            governance.contains(required),
+            governance.contains(required) || writer.contains(required),
             "trusted governance must contain {required}"
         );
     }
+    assert!(!governance.contains("statuses: write"));
+    assert!(!writer.contains("statuses: write"));
 }
 
 fn frontmatter_name(skill: &str) -> Option<&str> {

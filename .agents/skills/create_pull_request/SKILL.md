@@ -89,9 +89,9 @@ CI、self-review、lint、test、coverage、OpenSpec/DoD、最新 HEAD review、
 対象PRが governance workflow 自体の初回導入または改修である場合だけ、通常の `pr-ready-check` が workflow変更を拒否する境界を、次の一時 bootstrap 手順で解消します。これは通常PRへ適用してはならず、PR内の条件分岐・ブランチ名・Issue番号・PR author・workflow変更を根拠にした自己承認も禁止します。
 
 1. PR外で運用する専用 GitHub App が、対象PRの固定 HEAD SHA、参照 Issue が OPEN であること、依存更新証跡、PR range の Issue 契約、最新 review・未resolve thread 0、既存 CI・DoD を独立に検証する。
-2. App が対象の固定 SHA に一時 context `KRR / PR governance bootstrap` を success で投稿し、その App ID を required status check に固定する。status と App ID の対応を API で確認できない場合は進めない。
-3. 通常の review/CI/DoD と branch protection を満たしたことを確認してから Ready 化・merge する。固定 SHA が変わったら bootstrap status は無効として再検証する。
-4. merge 直後に一時 context と bootstrap 用設定を除去し、専用 App の `KRR / PR governance (trusted)` と GitHub Actions の `KRR / PR governance review latch` を App ID 固定の required check として有効化し、実PRで smoke 検証する。
+2. App が対象の固定 SHA に一時 Check Run `KRR / PR governance bootstrap` を completed/successで作成または更新し、そのApp IDをrequired checkに固定する。Check RunとApp IDの対応をAPIで確認できない場合は進めない。
+3. 通常の review/CI/DoD と branch protection を満たしたことを確認してから Ready 化・merge する。固定 SHA が変わったら bootstrap Check Run は無効として再検証する。
+4. merge直後に一時Check Runとbootstrap用設定を除去し、専用Appの `KRR / PR governance (trusted check)` とGitHub Actionsの `KRR / PR governance review latch` をApp ID固定のrequired checkとして有効化し、実PRでsmoke検証する。
 
 専用 App、固定 SHA、required check のいずれかを用意できない場合は merge せず、PR内の bypass で代替しません。
 
@@ -100,7 +100,7 @@ just pr-ready-check "<pr-number>" && \
   gh pr ready "<pr-number>"
 ```
 
-Ready 化後に merge 承認を依頼し、承認後だけ通常の merge を実行します。承認前の merge、`--admin`、`--no-verify`、Draft なし PR 作成は禁止です。
+Ready 化後に merge 承認を依頼し、承認後は `gh pr merge` の直前に同じ `just pr-ready-check "<pr-number>"` を再実行してReady PRの最新Issue/marker/thread/CI/base/headを再検証した場合だけ通常の merge を実行します。承認前の merge、`--admin`、`--no-verify`、Draft なし PR 作成は禁止です。
 
 ```bash
 gh pr merge --merge --delete-branch "<pr-number>"

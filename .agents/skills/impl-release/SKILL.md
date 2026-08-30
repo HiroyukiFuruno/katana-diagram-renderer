@@ -109,17 +109,17 @@ CI green だけでは Ready 条件を満たしません。指摘が出た場合�
 just pr-ready-check "<number>" && gh pr ready "${pr_url}"
 ```
 
-`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認前に merge してはいけません。
+`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認後、`gh pr merge` の直前に同じ `just pr-ready-check "<number>"` を再実行し、Ready PRの最新Issue/marker/thread/CI/base/headを再検証します。承認前に merge してはいけません。
 
 ### governance workflow の初回 bootstrap
 
-PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、通常の `pr-ready-check` の代替を曖昧に設けてはいけません。PR 外の専用 GitHub App が、対象 PR の固定 HEAD SHA、Issue OPEN、依存更新証跡、PR range の Issue contract、最新 review、未 resolve thread 0、既存 CI / DoD を独立検証し、同じ固定 SHA に一時 status `KRR / PR governance bootstrap` を App ID 付きで投稿します。PR 内の workflow、branch 名、Issue、status を自己承認の根拠にしてはいけません。
+PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、通常の `pr-ready-check` の代替を曖昧に設けてはいけません。PR 外の専用 GitHub App が、対象 PR の固定 HEAD SHA、Issue OPEN、依存更新証跡、PR range の Issue contract、最新 review、未 resolve thread 0、既存 CI / DoD を独立検証し、同じ固定 SHA に一時 Check Run `KRR / PR governance bootstrap` を App ID 付きでcompleted/successにします。PR 内の workflow、branch 名、Issue、Check Runを自己承認の根拠にしてはいけません。
 
-この一時 status を保護ブランチの required context に追加して Ready / merge を進める場合も、通常の review と CI gate を省略しません。merge 直後に bootstrap context を除去し、専用 App の `KRR / PR governance (trusted)` と GitHub Actions App ID `15368` の `KRR / PR governance review latch` を required に切り替え、使い捨て PR で smoke 検証します。bootstrap 以外の通常 PR は必ず `just pr-ready-check "<number>"` を通します。
+この一時 Check Runを保護ブランチのApp ID固定required checkに追加してReady/mergeを進める場合も、通常のreviewとCI gateを省略しません。merge直後にbootstrap Check Run設定を除去し、専用Appの `KRR / PR governance (trusted check)` とGitHub Actions App ID `15368` の `KRR / PR governance review latch` をrequiredに切り替え、使い捨てPRでsmoke検証します。bootstrap以外の通常PRは必ず `just pr-ready-check "<number>"` を通します。
 
 ## Phase 7: merge と自動リリース
 
-承認後だけ通常の merge を実行し、merge 後に archive と Release workflow の結果を確認します。
+承認後は、直前の `just pr-ready-check "<number>"` が成功した場合だけ通常の merge を実行し、merge 後に archive と Release workflow の結果を確認します。
 
 ```bash
 gh pr merge --merge --delete-branch "${pr_url}"
@@ -133,5 +133,5 @@ gh run list --workflow Release --limit 5
 - [ ] 最新 HEAD の final marker review と未 resolve 0
 - [ ] CI / DoD / `release-target-check` / `pr-ready-check` PASS
 - [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract を含む）後に Ready 化
-- [ ] Ready 化後に merge 承認を得て merge
+- [ ] Ready 化後に merge 承認を得て、`gh pr merge` 直前の `just pr-ready-check "<number>"` 成功後に merge
 - [ ] merge 後に OpenSpec archive と Release workflow を確認

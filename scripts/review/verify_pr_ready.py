@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+from urllib.parse import parse_qs, urlparse
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -26,12 +27,14 @@ _VALID_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
 _SELF_CHECK_NAMES = frozenset(
     {
         "PR governance",
-        "KRR / PR governance (trusted)",
+        "KRR / PR governance (trusted check)",
         "KRR / PR governance review latch",
     }
 )
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
+_TRUSTED_CHECK = "KRR / PR governance (trusted check)"
+_LATCH_CHECK = "KRR / PR governance review latch"
 
 
 def _bot_login(value: object) -> str | None:
@@ -334,6 +337,30 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
         if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise TypeError("open pull requests endCursor must be a unique string")
         seen_cursors.add(cursor)
+
+
+def _open_pull_request_snapshot(path: str) -> list[dict[str, object]]:
+    """Load the immutable single-arbiter open-PR snapshot fail-closed."""
+    try:
+        with open(path, encoding="utf-8") as source:
+            payload = json.load(source)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("open pull request snapshot is unavailable") from error
+    if not isinstance(payload, list):
+        raise TypeError("open pull request snapshot must be an array")
+    values: list[dict[str, object]] = []
+    seen: set[int] = set()
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise TypeError("open pull request snapshot item must be an object")
+        number, draft, body = item.get("number"), item.get("isDraft"), item.get("body")
+        if type(number) is not int or number < 1 or number in seen:
+            raise TypeError("open pull request snapshot number is invalid")
+        if not isinstance(draft, bool) or not isinstance(body, str):
+            raise TypeError("open pull request snapshot item is invalid")
+        seen.add(number)
+        values.append({"number": number, "isDraft": draft, "body": body})
+    return values
 
 
 def closing_open_pull_request_errors(
@@ -696,6 +723,7 @@ def _verify_final_readiness_snapshot_unchanged(
     initial_updated_at: str,
     initial_issue_identity: tuple[tuple[int, str, str, str, str], ...],
     initial_closers: frozenset[int],
+    open_pull_requests: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
     """Fence every mutable input that justified a successful readiness result."""
 
@@ -746,7 +774,11 @@ def _verify_final_readiness_snapshot_unchanged(
         for number in _open_pull_request_closers(
             repository=repository,
             issue_number=current_issues[0].number,
-            open_pull_requests=_open_pull_requests(repository),
+            open_pull_requests=(
+                list(open_pull_requests)
+                if open_pull_requests is not None
+                else _open_pull_requests(repository)
+            ),
         )
     )
     if current_closers != initial_closers:
@@ -986,12 +1018,161 @@ def _comment_reactions(
     return reactions
 
 
+def _governance_check_error(
+    repository: str, pull_request: int, base_branch: object, base_sha: str, head: str,
+    evidence: dict[str, object] | None = None,
+) -> str | None:
+    """Require exactly one terminal trusted Check Run and its Actions evidence."""
+    if not isinstance(base_branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch):
+        raise TypeError("baseRefName must be a safe branch name")
+    protection = _gh_json("api", f"repos/{repository}/branches/{base_branch}/protection/required_status_checks")
+    if not isinstance(protection, Mapping):
+        raise TypeError("required status checks response must be an object")
+    checks = protection.get("checks")
+    if not isinstance(checks, list):
+        raise TypeError("required status checks checks must be an array")
+    trusted_apps = [item.get("app_id") for item in checks if isinstance(item, Mapping) and item.get("context") == _TRUSTED_CHECK]
+    latch_apps = [item.get("app_id") for item in checks if isinstance(item, Mapping) and item.get("context") == _LATCH_CHECK]
+    if len(trusted_apps) != 1 or type(trusted_apps[0]) is not int or trusted_apps[0] < 1:
+        return "branch protection trusted Check Run App binding is missing or ambiguous"
+    if latch_apps != [15368]:
+        return "branch protection review latch App binding is not exact"
+    app_id = trusted_apps[0]
+    raw_pages = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_TRUSTED_CHECK.replace(' ', '%20')}&app_id={app_id}&filter=all&per_page=100")
+    if not isinstance(raw_pages, list) or not all(isinstance(page, Mapping) for page in raw_pages):
+        raise TypeError("check-runs pagination response must contain page objects")
+    runs: list[Mapping[str, object]] = []
+    for page in raw_pages:
+        page_runs = page.get("check_runs")
+        if not isinstance(page_runs, list) or not all(isinstance(run, Mapping) for run in page_runs):
+            raise TypeError("check-runs page must contain an array")
+        runs.extend(page_runs)
+    matches = [run for run in runs if isinstance(run, Mapping) and run.get("name") == _TRUSTED_CHECK and run.get("head_sha", "").lower() == head.lower() and isinstance(run.get("app"), Mapping) and run["app"].get("id") == app_id]
+    if len(matches) != 1:
+        return "trusted Check Run must have exactly one matching App/head run"
+    run = matches[0]
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        return "trusted Check Run is not completed successfully"
+    external_id = run.get("external_id")
+    details = run.get("details_url")
+    if external_id != f"krr-governance/v1/{head.lower()}":
+        return "trusted Check Run external_id is invalid"
+    if not isinstance(details, str):
+        return "trusted Check Run details_url lacks exact source_run_id evidence"
+    source_ids = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
+    if len(source_ids) != 1 or re.fullmatch(r"[1-9][0-9]*", source_ids[0]) is None:
+        return "trusted Check Run details_url lacks exact source_run_id evidence"
+    latch_payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_LATCH_CHECK.replace(' ', '%20')}&app_id=15368&filter=all&per_page=100")
+    if not isinstance(latch_payload, list) or not all(isinstance(page, Mapping) for page in latch_payload):
+        raise TypeError("latch Check Run pagination response must contain page objects")
+    latch_runs = [item for page in latch_payload for item in (page.get("check_runs") if isinstance(page.get("check_runs"), list) else [])]
+    if not all(isinstance(item, Mapping) for item in latch_runs):
+        raise TypeError("latch Check Run page must contain an array")
+    latch_candidates = [item for item in latch_runs if item.get("name") == _LATCH_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == 15368]
+    same_source = []
+    for item in latch_candidates:
+        details = item.get("details_url")
+        ids = re.findall(r"/actions/runs/([1-9][0-9]*)/?$", urlparse(details).path) if isinstance(details, str) else []
+        if len(ids) == 1 and ids[0] == source_ids[0] and not urlparse(details).query:
+            same_source.append(item)
+    if len(same_source) != 1:
+        return "review latch Check Run for the trusted source must have exactly one matching run"
+    latch = same_source[0]
+    if latch.get("status") != "completed" or latch.get("conclusion") != "success":
+        return "review latch Check Run is not completed successfully"
+    source = _gh_json("api", f"repos/{repository}/actions/runs/{source_ids[0]}")
+    if not isinstance(source, Mapping):
+        return "trusted source Actions run response is invalid"
+    if (
+        source.get("id") != int(source_ids[0])
+        or source.get("name") != "PR governance review sensor"
+        or source.get("event") not in {"pull_request", "pull_request_review", "pull_request_review_comment"}
+        or source.get("run_attempt") != 1
+        or source.get("head_sha", "").lower() != head.lower()
+        or source.get("status") != "completed"
+        or source.get("conclusion") != "success"
+        or not isinstance(source.get("path"), str)
+        or source.get("path", "").split("@", 1)[0] != ".github/workflows/pr-governance-review-events.yml"
+        or ("@" in source.get("path", "") and (
+            re.fullmatch(r"[A-Za-z0-9._/-]+", source.get("path", "").split("@", 1)[1]) is None
+            or source.get("path", "").split("@", 1)[1].startswith("/")
+            or "//" in source.get("path", "").split("@", 1)[1]
+            or any(part in {".", ".."} for part in source.get("path", "").split("@", 1)[1].split("/"))
+        ))
+    ):
+        return "trusted source Actions run evidence does not match"
+    pull_requests = source.get("pull_requests")
+    if not isinstance(pull_requests, list) or len(pull_requests) != 1 or not isinstance(pull_requests[0], Mapping) or pull_requests[0].get("number") != pull_request:
+        return "trusted source Actions run PR identity does not match"
+    source_pr = pull_requests[0]
+    source_repo = source.get("repository")
+    source_base = source_pr.get("base")
+    source_head = source_pr.get("head")
+    if (
+        not isinstance(source_repo, Mapping) or source_repo.get("full_name") != repository
+        or not isinstance(source_base, Mapping) or source_base.get("sha", "").lower() != base_sha.lower()
+        or source_base.get("ref") != base_branch
+        or not isinstance(source_base.get("repo"), Mapping) or source_base["repo"].get("full_name") != repository
+        or not isinstance(source_head, Mapping) or source_head.get("sha", "").lower() != head.lower()
+        or not isinstance(source_head.get("repo"), Mapping) or source_head["repo"].get("full_name") != repository
+    ):
+        return "trusted source Actions run PR boundary does not match"
+    latest_candidates: list[Mapping[str, object]] = []
+    for event_name in ("pull_request", "pull_request_review", "pull_request_review_comment"):
+        payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/actions/workflows/pr-governance-review-events.yml/runs?event={event_name}&per_page=100")
+        if not isinstance(payload, list) or not all(isinstance(page, Mapping) for page in payload):
+            raise TypeError("sensor workflow run pagination response is invalid")
+        for page in payload:
+            values = page.get("workflow_runs")
+            if not isinstance(values, list) or not all(isinstance(value, Mapping) for value in values):
+                raise TypeError("sensor workflow run page is invalid")
+            for value in values:
+                runs_pr = value.get("pull_requests")
+                repo = value.get("repository")
+                path = value.get("path", "")
+                if (
+                    value.get("name") == "PR governance review sensor"
+                    and value.get("event") == event_name
+                    and value.get("run_attempt") == 1
+                    and value.get("head_sha", "").lower() == head.lower()
+                    and isinstance(repo, Mapping) and repo.get("full_name") == repository
+                    and isinstance(runs_pr, list) and len(runs_pr) == 1
+                    and isinstance(runs_pr[0], Mapping) and runs_pr[0].get("number") == pull_request
+                    and isinstance(runs_pr[0].get("base"), Mapping)
+                    and runs_pr[0]["base"].get("sha", "").lower() == base_sha.lower()
+                    and runs_pr[0]["base"].get("ref") == base_branch
+                    and isinstance(runs_pr[0]["base"].get("repo"), Mapping)
+                    and runs_pr[0]["base"]["repo"].get("full_name") == repository
+                    and isinstance(runs_pr[0].get("head"), Mapping)
+                    and runs_pr[0]["head"].get("sha", "").lower() == head.lower()
+                    and isinstance(runs_pr[0]["head"].get("repo"), Mapping)
+                    and runs_pr[0]["head"]["repo"].get("full_name") == repository
+                    and isinstance(path, str) and path.split("@", 1)[0] == ".github/workflows/pr-governance-review-events.yml"
+                ):
+                    latest_candidates.append(value)
+    if not latest_candidates:
+        return "trusted source Actions run is not the latest sensor generation"
+    latest = max(latest_candidates, key=lambda value: (value.get("run_number", 0), value.get("id", 0)))
+    if latest.get("id") != int(source_ids[0]):
+        return "trusted source Actions run is not the latest sensor generation"
+    if evidence is not None:
+        evidence.update({
+            "protection": tuple(sorted((str(item.get("context")), item.get("app_id")) for item in checks if isinstance(item, Mapping))),
+            "check": tuple(run.get(key) for key in ("id", "name", "head_sha", "external_id", "status", "conclusion", "details_url")),
+            "latch": tuple(latch.get(key) for key in ("id", "name", "head_sha", "status", "conclusion", "details_url")),
+            "source": tuple(source.get(key) for key in ("id", "name", "path", "event", "run_attempt", "head_sha", "status", "conclusion")),
+            "source_pr": (source_pr.get("number"), source_base.get("sha"), source_base.get("ref"), source_base["repo"].get("full_name"), source_head.get("sha"), source_head["repo"].get("full_name")),
+        })
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--repository", help="GitHub repository as OWNER/REPOSITORY")
     parser.add_argument("--expected-base-sha")
     parser.add_argument("--expected-head-sha")
+    parser.add_argument("--open-pull-snapshot")
     draft_group = parser.add_mutually_exclusive_group()
     draft_group.add_argument(
         "--require-draft", dest="require_draft", action="store_true", default=True
@@ -1014,7 +1195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--repo",
         repository,
         "--json",
-        "isDraft,baseRefOid,headRefOid,body,updatedAt,statusCheckRollup,reviews,author",
+        "isDraft,baseRefOid,headRefOid,baseRefName,body,updatedAt,statusCheckRollup,reviews,author",
     )
     if not isinstance(pull_request, dict):
         raise TypeError("pull request response must be an object")
@@ -1047,10 +1228,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         body=initial_body,
         referenced_issues=referenced_issues,
     )
+    governance_evidence: dict[str, object] = {}
+    if not arguments.require_draft:
+        governance_error = _governance_check_error(
+            repository, arguments.pr, pull_request.get("baseRefName"), base, head, governance_evidence
+        )
+        if governance_error is not None:
+            errors.append(governance_error)
     initial_issue_identity: tuple[tuple[int, str, str, str, str], ...] = ()
     initial_closers: frozenset[int] = frozenset()
     if referenced_issues and not errors:
-        open_pull_requests = _open_pull_requests(repository)
+        open_pull_requests = (
+            _open_pull_request_snapshot(arguments.open_pull_snapshot)
+            if arguments.open_pull_snapshot is not None
+            else _open_pull_requests(repository)
+        )
         errors.extend(
             closing_open_pull_request_errors(
                 repository=repository,
@@ -1097,7 +1289,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_updated_at=initial_updated_at,
         initial_issue_identity=initial_issue_identity,
         initial_closers=initial_closers,
+        open_pull_requests=(
+            open_pull_requests
+            if arguments.open_pull_snapshot is not None and referenced_issues and not errors
+            else None
+        ),
     )
+    if not arguments.require_draft:
+        final_governance_evidence: dict[str, object] = {}
+        governance_error = _governance_check_error(
+            repository, arguments.pr, pull_request.get("baseRefName"), base, head, final_governance_evidence
+        )
+        if governance_error is not None or final_governance_evidence != governance_evidence:
+            raise ValueError("governance evidence changed during readiness check")
     print(f"PR #{arguments.pr} is ready")
     return 0
 

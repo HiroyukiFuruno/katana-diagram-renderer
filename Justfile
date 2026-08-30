@@ -222,18 +222,18 @@ pr-ready-check pr:
       echo "pr-ready-check requires a positive numeric pull request number" >&2
       exit 2
     fi
-    pr_metadata="$(gh pr view "$pr" --json baseRefOid,headRefOid,headRefName)"
+    pr_metadata="$(gh pr view "$pr" --json baseRefOid,headRefOid,headRefName,isDraft)"
     repository_metadata="$(gh repo view --json nameWithOwner)"
-    if ! IFS="$(printf '\011')" read -r base_sha head_sha branch repository extra < <(python3 -c 'import json, re, sys; pull = json.loads(sys.argv[1]); repo = json.loads(sys.argv[2]); fields = (pull.get("baseRefOid"), pull.get("headRefOid"), pull.get("headRefName"), repo.get("nameWithOwner")); valid = isinstance(fields[0], str) and re.fullmatch(r"[0-9a-fA-F]{40}", fields[0]) and isinstance(fields[1], str) and re.fullmatch(r"[0-9a-fA-F]{40}", fields[1]) and isinstance(fields[2], str) and not any(ord(character) < 32 or ord(character) == 127 for character in fields[2]) and isinstance(fields[3], str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", fields[3]); valid or sys.exit("gh returned incomplete or unsafe PR metadata"); print(*fields, sep=chr(9))' "$pr_metadata" "$repository_metadata"); then
+    if ! IFS="$(printf '\011')" read -r base_sha head_sha branch repository readiness_mode extra < <(python3 -c 'import json, re, sys; pull = json.loads(sys.argv[1]); repo = json.loads(sys.argv[2]); fields = (pull.get("baseRefOid"), pull.get("headRefOid"), pull.get("headRefName"), repo.get("nameWithOwner"), pull.get("isDraft")); valid = isinstance(fields[0], str) and re.fullmatch(r"[0-9a-fA-F]{40}", fields[0]) and isinstance(fields[1], str) and re.fullmatch(r"[0-9a-fA-F]{40}", fields[1]) and isinstance(fields[2], str) and not any(ord(character) < 32 or ord(character) == 127 for character in fields[2]) and isinstance(fields[3], str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", fields[3]) and isinstance(fields[4], bool); valid or sys.exit("gh returned incomplete or unsafe PR metadata"); print(*fields[:4], "require-draft" if fields[4] else "allow-ready", sep=chr(9))' "$pr_metadata" "$repository_metadata"); then
       echo "gh returned incomplete PR metadata" >&2
       exit 2
     fi
-    if [[ -n "${extra:-}" || -z "$base_sha" || -z "$head_sha" || -z "$branch" || -z "$repository" ]]; then
+    if [[ -n "${extra:-}" || -z "$base_sha" || -z "$head_sha" || -z "$branch" || -z "$repository" || ( "$readiness_mode" != "require-draft" && "$readiness_mode" != "allow-ready" ) ]]; then
       echo "gh returned incomplete PR metadata" >&2
       exit 2
     fi
     python3 scripts/hooks/verify_push_issue.py --pr-number "$pr" --pr-base-sha "$base_sha" --pr-head-sha "$head_sha" --pr-branch "$branch" --repository "$repository"
-    python3 scripts/review/verify_pr_ready.py --pr "$pr" --repository "$repository" --require-draft --expected-base-sha "$base_sha" --expected-head-sha "$head_sha"
+    python3 scripts/review/verify_pr_ready.py --pr "$pr" --repository "$repository" "--$readiness_mode" --expected-base-sha "$base_sha" --expected-head-sha "$head_sha"
 
 # Install Playwright Chromium for official Mermaid / Draw.io reference rendering
 browser-install:

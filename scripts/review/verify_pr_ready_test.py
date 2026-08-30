@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -431,7 +433,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
-                "name": "KRR / PR governance (trusted)",
+                "name": "KRR / PR governance (trusted check)",
                 "status": "IN_PROGRESS",
                 "conclusion": "",
             },
@@ -485,7 +487,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         pull_request["statusCheckRollup"] = [
             {
                 "__typename": "CheckRun",
-                "name": "KRR / PR governance (trusted)",
+                "name": "KRR / PR governance (trusted check)",
                 "status": "IN_PROGRESS",
                 "conclusion": "",
             },
@@ -1430,7 +1432,9 @@ class VerifyPrReadyTest(unittest.TestCase):
         check_end = justfile.index("\n\n# ", check_start)
         check = justfile[check_start:check_end]
         self.assertIn("verify_push_issue.py --pr-number \"$pr\" --pr-base-sha \"$base_sha\" --pr-head-sha \"$head_sha\"", check)
-        self.assertIn("verify_pr_ready.py --pr \"$pr\" --repository \"$repository\" --require-draft --expected-base-sha \"$base_sha\" --expected-head-sha \"$head_sha\"", check)
+        self.assertIn("baseRefOid,headRefOid,headRefName,isDraft", check)
+        self.assertIn('"require-draft" if fields[4] else "allow-ready"', check)
+        self.assertIn("verify_pr_ready.py --pr \"$pr\" --repository \"$repository\" \"--$readiness_mode\" --expected-base-sha \"$base_sha\" --expected-head-sha \"$head_sha\"", check)
         self.assertLess(check.index("verify_push_issue.py"), check.index("verify_pr_ready.py"))
 
     def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
@@ -1497,6 +1501,419 @@ class VerifyPrReadyTest(unittest.TestCase):
                 subject.main(["--pr", "72", "--repository", "owner/repo"]), 1
             )
             verify_snapshot.assert_not_called()
+
+
+class StrictGovernanceCheckRunTest(unittest.TestCase):
+    """Contract fixtures for the non-Draft trusted Check Run gate."""
+
+    repository = "owner/repo"
+    pull_request = 72
+    base = "c" * 40
+    head = HEAD
+    branch = "master"
+    app_id = 42
+    source_run_id = 901
+
+    def _source(self, *, event: str = "pull_request_review") -> dict[str, object]:
+        return {
+            "id": self.source_run_id,
+            "name": "PR governance review sensor",
+            "path": ".github/workflows/pr-governance-review-events.yml@refs/pull/72/merge",
+            "event": event,
+            "run_number": 1,
+            "run_attempt": 1,
+            "head_sha": self.head,
+            "status": "completed",
+            "conclusion": "success",
+            "repository": {"full_name": self.repository},
+            "pull_requests": [
+                {
+                    "number": self.pull_request,
+                    "base": {
+                        "sha": self.base,
+                        "ref": self.branch,
+                        "repo": {"full_name": self.repository},
+                    },
+                    "head": {
+                        "sha": self.head,
+                        "repo": {"full_name": self.repository},
+                    },
+                }
+            ],
+        }
+
+    def _run(self) -> dict[str, object]:
+        return {
+            "id": 101,
+            "name": subject._TRUSTED_CHECK,
+            "head_sha": self.head,
+            "app": {"id": self.app_id},
+            "status": "completed",
+            "conclusion": "success",
+            "external_id": f"krr-governance/v1/{self.head}",
+            "details_url": (
+                "https://github.com/owner/repo/actions/runs/123"
+                f"?source_run_id={self.source_run_id}"
+            ),
+        }
+
+    def _latch_run(self) -> dict[str, object]:
+        return {
+            "id": 201,
+            "name": subject._LATCH_CHECK,
+            "head_sha": self.head,
+            "app": {"id": 15368},
+            "status": "completed",
+            "conclusion": "success",
+            "details_url": (
+                f"https://github.com/{self.repository}/actions/runs/{self.source_run_id}"
+            ),
+        }
+
+    def _protection(self, checks: list[dict[str, object]] | None = None) -> dict[str, object]:
+        return {
+            "checks": checks
+            if checks is not None
+            else [
+                {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
+                {"context": subject._LATCH_CHECK, "app_id": 15368},
+            ]
+        }
+
+    def _gate(
+        self,
+        *,
+        pages: list[dict[str, object]] | None = None,
+        latch_pages: list[dict[str, object]] | None = None,
+        protection: dict[str, object] | None = None,
+        source: dict[str, object] | None = None,
+        source_history: list[dict[str, object]] | None = None,
+        source_history_pages: list[list[dict[str, object]]] | None = None,
+    ) -> str | None:
+        check_pages = pages if pages is not None else [{"check_runs": [self._run()]}]
+        latch_check_pages = (
+            latch_pages
+            if latch_pages is not None
+            else [{"check_runs": [self._latch_run()]}]
+        )
+        source_run = source if source is not None else self._source()
+        history_runs = source_history if source_history is not None else [source_run]
+        history_pages = (
+            source_history_pages
+            if source_history_pages is not None
+            else [history_runs]
+        )
+        required = protection if protection is not None else self._protection()
+
+        def gh_json(*arguments: str) -> object:
+            endpoint = next(
+                (
+                    argument
+                    for argument in arguments
+                    if argument.startswith(f"repos/{self.repository}/")
+                ),
+                "",
+            )
+            if endpoint.endswith("/protection/required_status_checks"):
+                return required
+            if "/check-runs?" in endpoint:
+                if "review" in endpoint and "latch" in endpoint:
+                    return latch_check_pages
+                return check_pages
+            if endpoint == f"repos/{self.repository}/actions/runs/{self.source_run_id}":
+                return source_run
+            if endpoint.startswith(
+                f"repos/{self.repository}/actions/workflows/"
+                "pr-governance-review-events.yml/runs?"
+            ):
+                query = parse_qs(urlparse(endpoint).query)
+                requested_events = query.get("event", [])
+                return [
+                    {
+                        "workflow_runs": [
+                            run
+                            for run in page
+                            if not requested_events or run.get("event") in requested_events
+                        ]
+                    }
+                    for page in history_pages
+                ]
+            raise AssertionError(f"unexpected gh call: {arguments}")
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            return subject._governance_check_error(
+                self.repository,
+                self.pull_request,
+                self.branch,
+                self.base,
+                self.head,
+            )
+
+    def _allow_ready(self, sources: list[dict[str, object]]) -> int:
+        pull = {
+            "isDraft": False,
+            "baseRefOid": self.base,
+            "headRefOid": self.head,
+            "baseRefName": self.branch,
+            "body": "Closes #64",
+            "updatedAt": "2026-08-29T03:03:00Z",
+            "statusCheckRollup": [],
+            "reviews": [{}],
+        }
+        source_queue = list(sources)
+        latest_source = source_queue[0]
+
+        def gh_json(*arguments: str) -> object:
+            nonlocal latest_source
+            if arguments[:2] == ("pr", "view"):
+                return pull
+            endpoint = next(
+                (
+                    argument
+                    for argument in arguments
+                    if argument.startswith(f"repos/{self.repository}/")
+                ),
+                "",
+            )
+            if endpoint.endswith("/protection/required_status_checks"):
+                return self._protection()
+            if "/check-runs?" in endpoint:
+                if "review" in endpoint and "latch" in endpoint:
+                    return [{"check_runs": [self._latch_run()]}]
+                return [{"check_runs": [self._run()]}]
+            if endpoint == f"repos/{self.repository}/actions/runs/{self.source_run_id}":
+                if not source_queue:
+                    raise AssertionError("unexpected extra source-run read")
+                latest_source = source_queue.pop(0)
+                return latest_source
+            if endpoint.startswith(
+                f"repos/{self.repository}/actions/workflows/"
+                "pr-governance-review-events.yml/runs?"
+            ):
+                query = parse_qs(urlparse(endpoint).query)
+                requested_events = query.get("event", [])
+                return [{
+                    "workflow_runs": [
+                        latest_source
+                    ] if not requested_events or latest_source.get("event") in requested_events else []
+                }]
+            raise AssertionError(f"unexpected gh call: {arguments}")
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject, "_paginated_api_array", return_value=[]
+        ), patch.object(subject, "_review_threads", return_value=[]), patch.object(
+            subject, "_comment_reactions", return_value={}
+        ), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
+            subject, "readiness_errors", return_value=[]
+        ), patch.object(subject, "_verify_final_readiness_snapshot_unchanged"):
+            return subject.main(
+                ["--pr", str(self.pull_request), "--repository", self.repository, "--allow-ready"]
+            )
+
+    def test_draft_gate_does_not_require_trusted_or_latch_check_runs(self) -> None:
+        for state, governance_checks in (
+            ("absent", []),
+            (
+                "pending",
+                [
+                    {
+                        "__typename": "CheckRun",
+                        "name": subject._TRUSTED_CHECK,
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "name": subject._LATCH_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                    },
+                ],
+            ),
+        ):
+            with self.subTest(state=state):
+                pull, threads, comments, reactions = successful_state()
+                pull["statusCheckRollup"] = [
+                    {
+                        "__typename": "CheckRun",
+                        "name": "CI",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                    },
+                    *governance_checks,
+                ]
+                with patch.object(subject, "_gh_json", return_value=pull), patch.object(
+                    subject, "_paginated_api_array", return_value=comments
+                ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+                    subject, "_comment_reactions", return_value=reactions
+                ), patch.object(
+                    subject.issue_contract, "referenced_issue_snapshot", return_value=()
+                ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
+                    subject, "_verify_final_readiness_snapshot_unchanged"
+                ), patch.object(subject, "_governance_check_error") as governance:
+                    self.assertEqual(
+                        subject.main(["--pr", "72", "--repository", self.repository]), 0
+                    )
+                governance.assert_not_called()
+
+    def test_allow_ready_accepts_exact_trusted_check_and_all_supported_sensor_events(self) -> None:
+        for event in (
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ):
+            with self.subTest(event=event):
+                self.assertIsNone(self._gate(source=self._source(event=event)))
+        self.assertEqual(self._allow_ready([self._source(), self._source()]), 0)
+
+    def test_governance_check_rejects_missing_invalid_or_ambiguous_trusted_check_runs(self) -> None:
+        invalid_runs: dict[str, list[dict[str, object]]] = {
+            "absent": [],
+            "pending": [{**self._run(), "status": "in_progress", "conclusion": None}],
+            "failure": [{**self._run(), "conclusion": "failure"}],
+            "duplicate": [self._run(), {**self._run(), "id": 102}],
+            "foreign_app": [{**self._run(), "app": {"id": self.app_id + 1}}],
+            "wrong_head": [{**self._run(), "head_sha": "b" * 40}],
+            "wrong_external": [{**self._run(), "external_id": "krr-governance/v1/wrong"}],
+            "duplicate_source_query": [
+                {
+                    **self._run(),
+                    "details_url": "https://github.com/owner/repo/actions/runs/123?source_run_id=901&source_run_id=902",
+                }
+            ],
+        }
+        for name, runs in invalid_runs.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._gate(pages=[{"check_runs": runs}]))
+
+    def test_governance_check_requires_exact_branch_protection_app_bindings(self) -> None:
+        variants = {
+            "trusted_missing": [{"context": subject._LATCH_CHECK, "app_id": 15368}],
+            "trusted_duplicate": [
+                {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
+                {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
+                {"context": subject._LATCH_CHECK, "app_id": 15368},
+            ],
+            "trusted_unbound": [
+                {"context": subject._TRUSTED_CHECK, "app_id": None},
+                {"context": subject._LATCH_CHECK, "app_id": 15368},
+            ],
+            "latch_wrong_app": [
+                {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
+                {"context": subject._LATCH_CHECK, "app_id": 15369},
+            ],
+            "latch_duplicate": [
+                {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
+                {"context": subject._LATCH_CHECK, "app_id": 15368},
+                {"context": subject._LATCH_CHECK, "app_id": 15368},
+            ],
+        }
+        for name, checks in variants.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._gate(protection=self._protection(checks)))
+
+    def test_allow_ready_binds_latch_to_the_trusted_source_run(self) -> None:
+        invalid_latches: dict[str, list[dict[str, object]]] = {
+            "absent": [],
+            "pending": [{**self._latch_run(), "status": "in_progress", "conclusion": None}],
+            "failure": [{**self._latch_run(), "conclusion": "failure"}],
+            "foreign_app": [{**self._latch_run(), "app": {"id": 15369}}],
+            "wrong_head": [{**self._latch_run(), "head_sha": "b" * 40}],
+            "wrong_source": [
+                {
+                    **self._latch_run(),
+                    "details_url": f"https://github.com/{self.repository}/actions/runs/902",
+                }
+            ],
+            "duplicate_for_source": [self._latch_run(), {**self._latch_run(), "id": 202}],
+        }
+        for name, pages in invalid_latches.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._gate(latch_pages=[{"check_runs": pages}]))
+        older_latch = {
+            **self._latch_run(),
+            "id": 202,
+            "details_url": f"https://github.com/{self.repository}/actions/runs/900",
+        }
+        self.assertIsNone(
+            self._gate(latch_pages=[{"check_runs": [older_latch, self._latch_run()]}])
+        )
+
+    def test_governance_check_rejects_mismatched_source_run_identity(self) -> None:
+        variants: dict[str, dict[str, object]] = {}
+        for field, value in (
+            ("id", self.source_run_id + 1),
+            ("name", "other workflow"),
+            ("path", ".github/workflows/other.yml@master"),
+            ("event", "workflow_dispatch"),
+            ("run_attempt", 2),
+            ("status", "in_progress"),
+            ("conclusion", "failure"),
+            ("repository", {"full_name": "other/repo"}),
+            ("head_sha", "b" * 40),
+        ):
+            source = self._source()
+            source[field] = value
+            variants[field] = source
+        for name, source in variants.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._gate(source=source))
+
+    def test_governance_check_rejects_mismatched_source_pr_binding(self) -> None:
+        variants: dict[str, dict[str, object]] = {}
+        for name, path, value in (
+            ("number", ("number",), self.pull_request + 1),
+            ("base_sha", ("base", "sha"), "d" * 40),
+            ("base_ref", ("base", "ref"), "release"),
+            ("base_repo", ("base", "repo", "full_name"), "other/repo"),
+            ("head_sha", ("head", "sha"), "b" * 40),
+            ("head_repo", ("head", "repo", "full_name"), "other/repo"),
+        ):
+            source = self._source()
+            current: dict[str, object] = source["pull_requests"][0]  # type: ignore[index]
+            for key in path[:-1]:
+                current = current[key]  # type: ignore[assignment,index]
+            current[path[-1]] = value
+            variants[name] = source
+        for name, source in variants.items():
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._gate(source=source))
+
+    def test_governance_check_reads_a_matching_run_from_page_two(self) -> None:
+        self.assertIsNone(
+            self._gate(pages=[{"check_runs": []}, {"check_runs": [self._run()]}])
+        )
+
+    def test_governance_check_reads_a_matching_latch_from_page_two(self) -> None:
+        self.assertIsNone(
+            self._gate(latch_pages=[{"check_runs": []}, {"check_runs": [self._latch_run()]}])
+        )
+
+    def test_governance_check_rejects_a_trusted_source_that_is_not_latest(self) -> None:
+        for name, status, conclusion in (
+            ("requested", "queued", None),
+            ("in_progress", "in_progress", None),
+            ("completed", "completed", "success"),
+        ):
+            with self.subTest(name=name):
+                newer = self._source(event="pull_request_review_comment")
+                newer.update({
+                    "id": self.source_run_id + 1,
+                    "run_number": 2,
+                    "status": status,
+                    "conclusion": conclusion,
+                })
+                self.assertIsNotNone(
+                    self._gate(source_history_pages=[[self._source()], [newer]])
+                )
+
+    def test_allow_ready_rejects_source_base_change_between_initial_and_final_evidence(self) -> None:
+        changed = deepcopy(self._source())
+        changed["pull_requests"][0]["base"]["sha"] = "d" * 40  # type: ignore[index]
+        with self.assertRaisesRegex(ValueError, "governance evidence changed"):
+            self._allow_ready([self._source(), changed])
 
 
 if __name__ == "__main__":

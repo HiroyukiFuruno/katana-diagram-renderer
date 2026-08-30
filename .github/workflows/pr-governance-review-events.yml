@@ -3,7 +3,7 @@ name: PR governance review sensor
 on:
   # This workflow intentionally has no write permission, secrets, checkout, or
   # PR-controlled command. Its uniquely named check is the required Actions
-  # latch; a trusted default-branch publisher must bind a matching App status
+  # latch; a trusted default-branch publisher must complete a matching App Check Run
   # to this run before this job may succeed.
   pull_request:
     types:
@@ -26,7 +26,7 @@ on:
 
 permissions:
   actions: read
-  statuses: read
+  checks: read
 
 concurrency:
   group: pr-governance-review-latch-${{ github.event.pull_request.number || github.run_id }}
@@ -53,13 +53,13 @@ jobs:
           echo 'Draft PR cannot satisfy the governance review latch.' >&2
           exit 1
 
-      - name: Await matching trusted governance status
+      - name: Await matching trusted governance Check Run
         if: github.event.pull_request.draft == false
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           SOURCE_RUN_ID: ${{ github.run_id }}
-          STATUS_CREATOR_ID: ${{ vars.KRR_GOVERNANCE_STATUS_CREATOR_ID }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
           POLL_INTERVAL_SECONDS: '5'
           POLL_TIMEOUT_SECONDS: '840'
         run: |
@@ -70,9 +70,9 @@ jobs:
           import subprocess
           import sys
           import time
-          from urllib.parse import parse_qs, urlsplit
+          from urllib.parse import parse_qs, urlencode, urlsplit
 
-          context = "KRR / PR governance (trusted)"
+          check_name = "KRR / PR governance (trusted check)"
           sha_pattern = re.compile(r"^[0-9a-fA-F]{40}$")
           positive_number = re.compile(r"^[1-9][0-9]*$")
 
@@ -82,13 +82,13 @@ jobs:
 
           head_sha = os.environ.get("HEAD_SHA", "")
           source_run_id = os.environ.get("SOURCE_RUN_ID", "")
-          creator_id = os.environ.get("STATUS_CREATOR_ID", "")
+          app_id = os.environ.get("CHECK_APP_ID", "")
           if sha_pattern.fullmatch(head_sha) is None:
               fail("PR head SHA is invalid.")
           if positive_number.fullmatch(source_run_id) is None:
               fail("Sensor source run ID is invalid.")
-          if positive_number.fullmatch(creator_id) is None:
-              fail("KRR_GOVERNANCE_STATUS_CREATOR_ID is not configured.")
+          if positive_number.fullmatch(app_id) is None:
+              fail("KRR_GOVERNANCE_APP_ID is not configured.")
 
           try:
               interval = int(os.environ["POLL_INTERVAL_SECONDS"])
@@ -98,15 +98,20 @@ jobs:
           if interval < 1 or timeout < interval:
               fail("Governance latch polling configuration is invalid.")
 
-          def status_matches_source(status: object) -> bool:
-              if not isinstance(status, dict) or status.get("context") != context:
+          def check_matches_source(check: object) -> bool:
+              if not isinstance(check, dict) or check.get("name") != check_name:
                   return False
-              target_url = status.get("target_url")
-              if not isinstance(target_url, str):
+              details_url = check.get("details_url")
+              if not isinstance(details_url, str):
+                  return False
+              app = check.get("app")
+              if not isinstance(app, dict) or str(app.get("id")) != app_id:
+                  return False
+              if check.get("head_sha") != head_sha or check.get("external_id") != f"krr-governance/v1/{head_sha.lower()}":
                   return False
               try:
                   source_values = parse_qs(
-                      urlsplit(target_url).query,
+                      urlsplit(details_url).query,
                       keep_blank_values=True,
                   ).get("source_run_id")
               except ValueError:
@@ -114,10 +119,7 @@ jobs:
               return source_values == [source_run_id]
 
           deadline = time.monotonic() + timeout
-          endpoint = (
-              f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{head_sha}"
-              "/statuses?per_page=100"
-          )
+          endpoint = f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{head_sha}/check-runs?" + urlencode({"check_name": check_name, "app_id": app_id, "filter": "all", "per_page": 100})
           while True:
               result = subprocess.run(
                   ["gh", "api", "--paginate", "--slurp", endpoint],
@@ -126,44 +128,28 @@ jobs:
                   check=False,
               )
               if result.returncode != 0:
-                  fail("Unable to read the trusted governance status.")
+                  fail("Unable to read the trusted governance Check Run.")
               try:
                   pages = json.loads(result.stdout)
               except json.JSONDecodeError:
-                  fail("Trusted governance status response is not JSON.")
+                  fail("Trusted governance Check Run response is not JSON.")
               if not isinstance(pages, list) or not all(
-                  isinstance(page, list) for page in pages
-              ):
-                  fail("Trusted governance status response is invalid.")
-
-              matches = [
-                  status
+                  isinstance(page, dict) and isinstance(page.get("check_runs"), list)
                   for page in pages
-                  for status in page
-                  if status_matches_source(status)
-              ]
-              terminal_matches = [
-                  status
-                  for status in matches
-                  if isinstance(status, dict)
-                  and status.get("state") in {"success", "failure", "error"}
-              ]
-              if len(terminal_matches) > 1:
-                  fail("Multiple terminal governance statuses match this sensor run.")
-              if terminal_matches:
-                  terminal = terminal_matches[0]
-                  creator = terminal.get("creator")
-                  if (
-                      not isinstance(creator, dict)
-                      or type(creator.get("id")) is not int
-                      or str(creator["id"]) != creator_id
-                  ):
-                      fail("Governance status creator does not match the configured App.")
-                  if terminal["state"] == "success":
+              ):
+                  fail("Trusted governance Check Run response is invalid.")
+
+              matches = [check for page in pages for check in page.get("check_runs", []) if check_matches_source(check)]
+              if len(matches) > 1:
+                  fail("Multiple trusted governance Check Runs match this sensor run.")
+              if matches:
+                  terminal = matches[0]
+                  if terminal.get("status") == "completed" and terminal.get("conclusion") == "success":
                       raise SystemExit(0)
-                  fail("Trusted governance publisher reported failure.")
+                  if terminal.get("status") == "completed":
+                      fail("Trusted governance publisher reported failure.")
 
               if time.monotonic() >= deadline:
-                  fail("Timed out waiting for a matching trusted governance status.")
+                  fail("Timed out waiting for a matching trusted governance Check Run.")
               time.sleep(interval)
           PY

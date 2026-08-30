@@ -1,0 +1,140 @@
+name: PR governance status writer
+
+run-name: source=${{ inputs.dispatcher_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatcher_run_id:
+        description: Immutable dispatcher run that created this writer request.
+        required: true
+        type: string
+
+# This workflow never accepts a PR ref or a caller supplied target. The
+# bootstrap job binds both the executed bytes and the ref to default.
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  bootstrap-validation:
+    name: Validate trusted default-branch writer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Bind this dispatch to the repository default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          repository=os.environ["GITHUB_REPOSITORY"]
+          result=subprocess.run(["gh","api",f"repos/{repository}"],capture_output=True,text=True,check=False)
+          if result.returncode != 0: raise SystemExit("Unable to load repository default branch.")
+          try: repo=json.loads(result.stdout)
+          except json.JSONDecodeError as error: raise SystemExit("Repository response is not JSON.") from error
+          branch=repo.get("default_branch") if isinstance(repo,dict) else None
+          if not isinstance(branch,str) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch): raise SystemExit("Repository default branch is invalid.")
+          if os.environ.get("GITHUB_REF") != f"refs/heads/{branch}": raise SystemExit("Writer is not running from the trusted default branch.")
+          commit=subprocess.run(["gh","api",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False)
+          if commit.returncode != 0: raise SystemExit("Unable to load default branch head.")
+          try: head=json.loads(commit.stdout).get("object",{}).get("sha")
+          except json.JSONDecodeError as error: raise SystemExit("Default branch head is not JSON.") from error
+          if not isinstance(head,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",head) or os.environ.get("GITHUB_SHA") != head: raise SystemExit("Writer SHA does not match default branch head.")
+          for ref in (branch, head):
+              blob=subprocess.run(["gh","api",f"repos/{repository}/contents/.github/workflows/pr-governance-status-writer.yml?ref={ref}"],capture_output=True,text=True,check=False)
+              if blob.returncode != 0: raise SystemExit("Unable to load writer workflow blob.")
+              try: payload=json.loads(blob.stdout); sha=payload.get("sha") if isinstance(payload,dict) else None
+              except json.JSONDecodeError as error: raise SystemExit("Writer workflow blob is not JSON.") from error
+              if not isinstance(sha,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",sha): raise SystemExit("Writer workflow blob is invalid.")
+              if ref == branch: default_blob=sha
+              elif sha != default_blob: raise SystemExit("Writer workflow differs from default branch.")
+          PY
+
+  write-status:
+    name: Write authoritative governance Check Runs
+    needs: bootstrap-validation
+    environment: pr-governance
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pr-governance-status-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Rebind trusted default branch before token creation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          repository = os.environ["GITHUB_REPOSITORY"]
+          expected_head = os.environ.get("GITHUB_SHA", "")
+          if re.fullmatch(r"[0-9a-fA-F]{40}", expected_head) is None:
+              raise SystemExit("Writer SHA is invalid.")
+          def get(endpoint):
+              result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False)
+              if result.returncode != 0:
+                  raise SystemExit("Unable to rebind trusted default branch.")
+              try:
+                  return json.loads(result.stdout)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Trusted default response is not JSON.") from error
+          repository_value = get(f"repos/{repository}")
+          branch = repository_value.get("default_branch") if isinstance(repository_value, dict) else None
+          if not isinstance(branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is None:
+              raise SystemExit("Repository default branch is invalid.")
+          reference = get(f"repos/{repository}/git/ref/heads/{branch}")
+          head = reference.get("object", {}).get("sha") if isinstance(reference, dict) and isinstance(reference.get("object"), dict) else None
+          if head != expected_head:
+              raise SystemExit("Trusted default branch advanced while writer was queued.")
+          default_blob = get(f"repos/{repository}/contents/.github/workflows/pr-governance-status-writer.yml?ref={branch}")
+          immutable_blob = get(f"repos/{repository}/contents/.github/workflows/pr-governance-status-writer.yml?ref={expected_head}")
+          default_digest = default_blob.get("sha") if isinstance(default_blob, dict) else None
+          immutable_digest = immutable_blob.get("sha") if isinstance(immutable_blob, dict) else None
+          if not isinstance(default_digest, str) or re.fullmatch(r"[0-9a-fA-F]{40}", default_digest) is None or default_digest != immutable_digest:
+              raise SystemExit("Writer workflow differs from trusted default branch.")
+          PY
+
+      - name: Checkout trusted default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # bootstrap-validation bound this immutable dispatch SHA to default.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Create Check Run writer App token
+        id: check-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+
+      - name: Create read-only governance App token
+        id: read-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+
+      - name: Revalidate every current open pull request and publish fenced states
+        env:
+          # The high-rate read path and Check Run writer are two separate App
+          # tokens. The script never carries either across the other boundary.
+          GH_TOKEN: ${{ steps.read-token.outputs.token }}
+          DEFAULT_READ_TOKEN: ${{ github.token }}
+          CHECK_WRITE_TOKEN: ${{ steps.check-token.outputs.token }}
+          KRR_GOVERNANCE_CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          GOVERNANCE_DISPATCHER_RUN_ID: ${{ inputs.dispatcher_run_id }}
+        run: python3 scripts/review/pr_governance_status_writer.py
