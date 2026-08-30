@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -659,6 +659,146 @@ def _status_check_rollup_errors(
     return errors
 
 
+def _check_run_details_url(value: object, field: str) -> str | None:
+    """Accept a canonical HTTPS details URL or an omitted optional URL."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{field} must be a non-empty HTTPS URL")
+    parsed = urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError(f"{field} must be a canonical HTTPS URL")
+    return value
+
+
+def _rollup_check_run_identity(check: Mapping[str, object]) -> tuple[int | None, str | None]:
+    """Return immutable Check Run identity exposed by one rollup entry."""
+
+    if check.get("__typename") != "CheckRun":
+        raise TypeError("app-bound required status context must be a CheckRun")
+    database_id = check.get("databaseId")
+    raw_id = check.get("id")
+    if database_id is not None and (type(database_id) is not int or database_id < 1):
+        raise TypeError("rollup CheckRun databaseId must be a positive integer")
+    if raw_id is not None and not (
+        type(raw_id) is int or (isinstance(raw_id, str) and raw_id)
+    ):
+        raise TypeError("rollup CheckRun id must be a positive integer or opaque ID")
+    if type(raw_id) is int and raw_id < 1:
+        raise TypeError("rollup CheckRun id must be a positive integer")
+    if database_id is not None and type(raw_id) is int and raw_id != database_id:
+        raise ValueError("rollup CheckRun immutable IDs disagree")
+    immutable_id = database_id if database_id is not None else raw_id
+    if immutable_id is not None and type(immutable_id) is not int:
+        immutable_id = None
+
+    details_url = check.get("detailsUrl")
+    alternate_details_url = check.get("details_url")
+    if details_url is not None and alternate_details_url is not None and details_url != alternate_details_url:
+        raise ValueError("rollup CheckRun details URLs disagree")
+    if details_url is None:
+        details_url = alternate_details_url
+    details_url = _check_run_details_url(details_url, "rollup CheckRun details URL")
+    if immutable_id is None and details_url is None:
+        raise ValueError("rollup CheckRun lacks immutable ID and details URL")
+    return immutable_id, details_url
+
+
+def _required_check_run_producer_errors(
+    repository: str,
+    head: str,
+    status_rollup: object,
+    required_checks: _RequiredStatusChecks,
+) -> list[str]:
+    """Bind every App-bound required rollup success to its exact producer."""
+
+    if not isinstance(status_rollup, Sequence) or isinstance(status_rollup, (str, bytes)):
+        raise TypeError("statusCheckRollup must be a sequence")
+    if re.fullmatch(r"[0-9a-fA-F]{40}", head) is None:
+        raise ValueError("required Check Run producer head must be a 40-character SHA")
+    typed_rollup: list[Mapping[str, object]] = []
+    for check in status_rollup:
+        if not isinstance(check, Mapping):
+            raise TypeError("status check must be an object")
+        typed_rollup.append(check)
+
+    errors: list[str] = []
+    for context, app_id in required_checks[1]:
+        if context in _SELF_CHECK_NAMES or app_id is None:
+            continue
+        matches = [
+            check for check in typed_rollup if _status_check_context(check) == context
+        ]
+        if len(matches) != 1:
+            errors.append(
+                f"required CI Check Run producer がちょうど1件ではありません: {context} ({len(matches)}件)"
+            )
+            continue
+        try:
+            rollup_id, rollup_url = _rollup_check_run_identity(matches[0])
+            pages = _gh_json(
+                "api",
+                "--paginate",
+                "--slurp",
+                f"repos/{repository}/commits/{head}/check-runs?"
+                f"check_name={quote(context, safe='')}&app_id={app_id}&filter=all&per_page=100",
+            )
+            if not isinstance(pages, list) or not all(isinstance(page, Mapping) for page in pages):
+                raise TypeError("required Check Run pagination response must contain page objects")
+            candidates: list[Mapping[str, object]] = []
+            for page in pages:
+                page_runs = page.get("check_runs")
+                if not isinstance(page_runs, list) or not all(
+                    isinstance(run, Mapping) for run in page_runs
+                ):
+                    raise TypeError("required Check Run page must contain an array")
+                for run in page_runs:
+                    if run.get("name") != context:
+                        continue
+                    run_head = run.get("head_sha")
+                    run_app = run.get("app")
+                    run_id = run.get("id")
+                    run_url = _check_run_details_url(
+                        run.get("details_url"), "required Check Run details URL"
+                    )
+                    if (
+                        not isinstance(run_head, str)
+                        or re.fullmatch(r"[0-9a-fA-F]{40}", run_head) is None
+                        or run_head.casefold() != head.casefold()
+                        or not isinstance(run_app, Mapping)
+                        or type(run_app.get("id")) is not int
+                        or run_app.get("id") != app_id
+                        or type(run_id) is not int
+                        or run_id < 1
+                    ):
+                        raise ValueError("required Check Run producer binding is malformed")
+                    candidates.append(run)
+            bound = [
+                run
+                for run in candidates
+                if (rollup_id is None or run.get("id") == rollup_id)
+                and (rollup_url is None or run.get("details_url") == rollup_url)
+            ]
+            if len(bound) != 1:
+                raise ValueError(
+                    "required Check Run producer binding is missing or ambiguous"
+                )
+            if (
+                bound[0].get("status") != "completed"
+                or bound[0].get("conclusion") != "success"
+            ):
+                raise ValueError("required Check Run producer is not completed-success")
+        except (TypeError, ValueError) as error:
+            errors.append(f"required CI Check Run producer is invalid for {context}: {error}")
+    return errors
+
+
 def readiness_errors(
     pull_request: Mapping[str, object],
     threads: Sequence[Mapping[str, object]],
@@ -912,6 +1052,17 @@ def _verify_final_readiness_snapshot_unchanged(
     if final_ci_errors:
         raise ValueError(
             "CI status changed during readiness check: " + "; ".join(final_ci_errors)
+        )
+    final_producer_errors = _required_check_run_producer_errors(
+        repository,
+        initial_head,
+        payload.get("statusCheckRollup"),
+        final_required_checks,
+    )
+    if final_producer_errors:
+        raise ValueError(
+            "required CI Check Run producer changed during readiness check: "
+            + "; ".join(final_producer_errors)
         )
 
     current_issues = issue_contract.referenced_issue_snapshot(
@@ -1559,6 +1710,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     binding_error = _governance_app_binding_error(initial_required_checks)
     if binding_error is not None:
         errors.append(binding_error)
+    errors.extend(
+        _required_check_run_producer_errors(
+            repository,
+            head,
+            pull_request.get("statusCheckRollup"),
+            initial_required_checks,
+        )
+    )
     governance_evidence: dict[str, object] = {}
     if not arguments.require_draft:
         governance_error = _governance_check_error(

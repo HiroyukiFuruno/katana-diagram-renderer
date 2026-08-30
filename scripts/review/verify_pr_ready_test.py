@@ -716,6 +716,263 @@ class VerifyPrReadyTest(unittest.TestCase):
             [],
         )
 
+    def test_app_bound_required_context_binds_rollup_to_exact_check_run(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        details_url = "https://github.com/owner/repo/actions/runs/123/job/456"
+        rollup = [
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "databaseId": 99,
+                "detailsUrl": details_url,
+            }
+        ]
+        producer = {
+            "id": 99,
+            "name": "CI",
+            "head_sha": HEAD,
+            "app": {"id": 7},
+            "details_url": details_url,
+            "status": "completed",
+            "conclusion": "success",
+        }
+        historical_failure = {
+            **producer,
+            "id": 98,
+            "details_url": "https://github.com/owner/repo/actions/runs/122/job/455",
+            "conclusion": "failure",
+        }
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[
+                {"check_runs": [historical_failure]},
+                {"check_runs": [producer]},
+            ],
+        ) as gh_json:
+            self.assertEqual(
+                subject._required_check_run_producer_errors(
+                    "owner/repo", HEAD, rollup, required
+                ),
+                [],
+            )
+        arguments = gh_json.call_args.args
+        self.assertIn("--paginate", arguments)
+        self.assertIn("--slurp", arguments)
+        self.assertIn("app_id=7", arguments[-1])
+
+    def test_app_bound_required_context_rejects_unbound_or_malformed_producer(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        details_url = "https://github.com/owner/repo/actions/runs/123/job/456"
+        rollup = [
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "databaseId": 99,
+                "detailsUrl": details_url,
+            }
+        ]
+        producer = {
+            "id": 99,
+            "name": "CI",
+            "head_sha": HEAD,
+            "app": {"id": 7},
+            "details_url": details_url,
+            "status": "completed",
+            "conclusion": "success",
+        }
+        variants = {
+            "missing": [],
+            "wrong_app": [{**producer, "app": {"id": 8}}],
+            "duplicate": [producer, {**producer}],
+            "malformed_app": [{**producer, "app": {"id": True}}],
+            "malformed_id": [{**producer, "id": True}],
+            "malformed_url": [{**producer, "details_url": "not-a-url"}],
+            "pending": [{**producer, "status": "in_progress", "conclusion": None}],
+            "failure": [{**producer, "conclusion": "failure"}],
+            "cancelled": [{**producer, "conclusion": "cancelled"}],
+            "malformed_terminal": [{**producer, "status": None, "conclusion": 1}],
+        }
+        for name, runs in variants.items():
+            with self.subTest(name=name), patch.object(
+                subject, "_gh_json", return_value=[{"check_runs": runs}]
+            ):
+                errors = subject._required_check_run_producer_errors(
+                    "owner/repo", HEAD, rollup, required
+                )
+                self.assertTrue(errors)
+                self.assertIn("CI", " ".join(errors))
+
+        malformed_rollup = [{**rollup[0], "__typename": "StatusContext"}]
+        with patch.object(subject, "_gh_json") as gh_json:
+            errors = subject._required_check_run_producer_errors(
+                "owner/repo", HEAD, malformed_rollup, required
+            )
+        self.assertTrue(errors)
+        gh_json.assert_not_called()
+        for invalid_rollup in [
+            [{**rollup[0], "databaseId": True}],
+            [{**rollup[0], "id": True}],
+            [{**rollup[0], "detailsUrl": "not-a-url"}],
+        ]:
+            with self.subTest(rollup=invalid_rollup), patch.object(
+                subject, "_gh_json"
+            ) as gh_json:
+                errors = subject._required_check_run_producer_errors(
+                    "owner/repo", HEAD, invalid_rollup, required
+                )
+            self.assertTrue(errors)
+            gh_json.assert_not_called()
+
+    def test_legacy_null_app_required_context_does_not_require_a_check_run_producer(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        rollup = [
+            {
+                "__typename": "StatusContext",
+                "context": "CI",
+                "state": "SUCCESS",
+            }
+        ]
+        with patch.object(subject, "_gh_json") as gh_json:
+            self.assertEqual(
+                subject._required_check_run_producer_errors(
+                    "owner/repo", HEAD, rollup, required
+                ),
+                [],
+            )
+        gh_json.assert_not_called()
+
+    def test_final_snapshot_rejects_stale_app_bound_check_run_producer(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        details_url = "https://github.com/owner/repo/actions/runs/123/job/456"
+        final_snapshot, _, _ = successful_state()
+        final_snapshot["statusCheckRollup"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "databaseId": 99,
+                "detailsUrl": details_url,
+            }
+        ]
+        pending_producer = {
+            "id": 99,
+            "name": "CI",
+            "head_sha": HEAD,
+            "app": {"id": 7},
+            "details_url": details_url,
+            "status": "in_progress",
+            "conclusion": None,
+        }
+        with patch.object(
+            subject,
+            "_gh_json",
+            side_effect=[final_snapshot, [{"check_runs": [pending_producer]}]],
+        ), patch.object(
+            subject, "_required_status_check_snapshot", return_value=required
+        ):
+            with self.assertRaisesRegex(ValueError, "Check Run producer changed"):
+                subject._verify_final_readiness_snapshot_unchanged(
+                    repository="owner/repo",
+                    pull_request=72,
+                    initial_base="c" * 40,
+                    initial_head=HEAD,
+                    initial_base_branch="master",
+                    initial_body=BODY,
+                    initial_updated_at="2026-08-29T03:03:00Z",
+                    initial_required_checks=required,
+                    initial_issue_identity=(),
+                    initial_closers=frozenset(),
+                )
+
+    def test_main_rechecks_app_bound_producer_before_and_after_readiness(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        details_url = "https://github.com/owner/repo/actions/runs/123/job/456"
+        pull_request, threads, comments = successful_state()
+        pull_request["statusCheckRollup"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "databaseId": 99,
+                "detailsUrl": details_url,
+            }
+        ]
+        producer = {
+            "id": 99,
+            "name": "CI",
+            "head_sha": HEAD,
+            "app": {"id": 7},
+            "details_url": details_url,
+            "status": "completed",
+            "conclusion": "success",
+        }
+        check_run_calls = 0
+
+        def gh_json(*arguments: str) -> object:
+            nonlocal check_run_calls
+            if arguments[:2] == ("pr", "view"):
+                return pull_request
+            if arguments[:2] == ("api", "--paginate") and "check-runs?" in arguments[-1]:
+                check_run_calls += 1
+                return [{"check_runs": [producer]}]
+            raise AssertionError(f"unexpected gh call: {arguments}")
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ), patch.object(
+            subject, "_required_status_check_snapshot", return_value=required
+        ):
+            self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
+        self.assertEqual(check_run_calls, 2)
+
     def test_draft_rejects_invalid_required_governance_app_binding(self) -> None:
         pull_request, threads, comments = successful_state()
         invalid_required = (
