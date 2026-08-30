@@ -44,7 +44,13 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
 
     def test_success_re_reads_ci_generation_from_one_final_shared_snapshot_before_post(self) -> None:
         self.assertIn("final_evidence_for_pr(decision.head, initial_evidence)", self.writer)
-        self.assertIn("head_sha={head}&per_page=100", self.writer)
+        # The final shared snapshot must build the query through urlencode so
+        # the bounded endpoint remains correct even when a future parameter
+        # contains characters requiring escaping.
+        self.assertIn(
+            '"repos/{REPOSITORY}/actions/runs?" + urlencode({"head_sha": head, "per_page": 100})',
+            self.writer,
+        )
         self.assertIn("def finalize_decision", self.writer)
         self.assertIn("latest != generations", self.writer)
         self.assertIn("CI generation changed during governance revalidation.", self.writer)

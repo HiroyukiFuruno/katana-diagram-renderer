@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ class StatusWriterUnitTest(unittest.TestCase):
             {
                 "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[]",
                 "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[]", "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "0", "GOVERNANCE_CHECK_MANIFEST": "[]",
+                "GOVERNANCE_TERMINAL_ORDER_NUMBERS": "[]", "GOVERNANCE_TERMINAL_BATCH_NUMBERS": "[]",
+                "GOVERNANCE_CONTINUATION_INDEX": "0", "GOVERNANCE_COMPLETED_WRITER_RUN_IDS": "[]",
             },
         )
         self.dispatch_boundary.start()
@@ -53,6 +56,26 @@ class StatusWriterUnitTest(unittest.TestCase):
             "head_sha": "a" * 40, "status": status, "conclusion": conclusion,
             "repository": {"full_name": "owner/repository"},
             "pull_requests": [{"number": 72, "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}}],
+        }
+
+    @staticmethod
+    def dispatcher_run(
+        identifier: int = 88, *, event: str = "issues", status: str = "in_progress",
+        conclusion: object = None, created_at: str = "2026-08-30T00:00:00Z",
+    ) -> dict[str, object]:
+        return {
+            "id": identifier, "name": WRITER.DISPATCHER_NAME,
+            "path": ".github/workflows/pr-governance.yml@master", "event": event,
+            "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"},
+            "head_branch": "master", "workflow_id": 66, "run_number": 1, "run_attempt": 1, "status": status,
+            "conclusion": conclusion, "created_at": created_at,
+        }
+
+    @staticmethod
+    def dispatcher_page(*runs: dict[str, object], total_count: int | None = None) -> dict[str, object]:
+        return {
+            "total_count": len(runs) if total_count is None else total_count,
+            "workflow_runs": list(runs),
         }
 
     @staticmethod
@@ -143,13 +166,14 @@ class StatusWriterUnitTest(unittest.TestCase):
     def test_malformed_sibling_is_a_canonical_issue_claimant(self) -> None:
         source = {
             "number": 72, "state": "open", "body": "Fixes #64",
-            "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
+            "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository", "default_branch": "master"}},
+            "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
         }
         sibling = {
             "number": 73, "state": "open", "body": "Fixes #64; closes #65",
             "base": {"sha": "b" * 40}, "head": {"sha": "c" * 40},
         }
-        with patch.object(WRITER, "pull", return_value=source):
+        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "b" * 40}), patch.object(WRITER, "pull", return_value=source):
             self.assertFalse(WRITER.final_closer_is_unique(
                 72, "64", "b" * 40, "a" * 40, WRITER.pr_body_sha256("Fixes #64"),
                 {"64": frozenset({72, 73})},
@@ -173,24 +197,270 @@ class StatusWriterUnitTest(unittest.TestCase):
         with patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), patch.object(WRITER, "check_run", return_value=value):
                 self.assertTrue(WRITER.check_changed_since("a" * 40, 101))
 
-    def test_dispatcher_input_is_bound_to_one_default_branch_run(self) -> None:
-        run = {
-            "id": 88, "name": WRITER.DISPATCHER_NAME,
-            "path": ".github/workflows/pr-governance.yml@master",
-            "event": "issues", "head_sha": "d" * 40,
-            "repository": {"full_name": "owner/repository"},
-            "run_number": 4, "run_attempt": 1, "status": "in_progress",
+    def test_newer_dispatcher_generation_blocks_before_its_pending_check_exists(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(created_at="2026-08-30T00:00:00Z")
+        # The newer run ID is intentionally lower.  The immutable creation
+        # order, not numeric Actions IDs, decides which writer owns the head.
+        newer = self.dispatcher_run(7, status="queued", created_at="2026-08-30T00:01:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
         }
-        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40}), \
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(current, newer)):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_dispatcher_generation_order_uses_created_at_then_id_in_one_bounded_page(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        # Same timestamp uses the immutable ID only as the specified tie-break.
+        newer_tie = self.dispatcher_run(89, status="queued", created_at="2026-08-30T00:00:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(current, newer_tie)):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_dispatcher_generation_does_not_use_a_larger_id_when_created_earlier(self) -> None:
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:01:00Z")
+        older_with_larger_id = self.dispatcher_run(89, status="completed", conclusion="success", created_at="2026-08-30T00:00:00Z")
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}):
+            current_generation = WRITER.dispatcher_generation(current, require_success=True)
+            older_generation = WRITER.dispatcher_generation(older_with_larger_id)
+        self.assertFalse(WRITER.dispatcher_generation_is_newer(older_generation, current_generation))
+
+    def test_newer_active_dispatcher_generation_blocks_without_historical_check_scan(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        newer = self.dispatcher_run(7, status="in_progress", created_at="2026-08-30T00:01:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(current, newer)), \
+             patch.object(WRITER, "checks") as checks:
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+        checks.assert_not_called()
+
+    def test_dispatcher_fence_rejects_malformed_paginated_or_api_evidence(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run()
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        malformed = current | {"path": ".github/workflows/pr-governance.yml@evil"}
+        cases = (
+            ("malformed dispatcher identity", self.dispatcher_page(current, malformed)),
+            ("current snapshot differs from direct source", self.dispatcher_page(current | {"created_at": "2026-08-30T00:00:01Z"})),
+            ("truncated bounded page", self.dispatcher_page(current, total_count=2)),
+            ("malformed response", {"total_count": 1, "workflow_runs": "not-a-list"}),
+        )
+        for label, page in cases:
+            with self.subTest(label=label), self.identity(), patch.dict(os.environ, environment), \
+                 patch.object(WRITER, "api_json", return_value=current), \
+                 patch.object(WRITER, "object_page", return_value=page):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.reject_newer_dispatcher_barrier(head)
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", side_effect=WRITER.GovernanceError("API failure")):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_dispatcher_fence_ignores_unrelated_workflows_but_blocks_ci_requested_race(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, event="workflow_run", created_at="2026-08-30T00:00:00Z")
+        newer = self.dispatcher_run(7, event="workflow_run", status="queued", created_at="2026-08-30T00:01:00Z")
+        unrelated = {"name": "CI", "id": False, "path": None}
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(unrelated, current, newer)):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_dispatcher_generation_accepts_only_the_canonical_status_and_conclusion_pairs(self) -> None:
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}):
+            for status in WRITER.DISPATCHER_ACTIVE_STATUSES:
+                with self.subTest(active_status=status):
+                    self.assertEqual(
+                        WRITER.dispatcher_generation(self.dispatcher_run(status=status), require_success=True).identifier,
+                        88,
+                    )
+                    with self.assertRaises(WRITER.GovernanceError):
+                        WRITER.dispatcher_generation(self.dispatcher_run(status=status, conclusion="success"))
+            for conclusion in WRITER.DISPATCHER_TERMINAL_CONCLUSIONS:
+                completed = self.dispatcher_run(status="completed", conclusion=conclusion)
+                with self.subTest(terminal_conclusion=conclusion):
+                    self.assertEqual(WRITER.dispatcher_generation(completed).identifier, 88)
+                    if conclusion == "success":
+                        self.assertEqual(WRITER.dispatcher_generation(completed, require_success=True).identifier, 88)
+                    else:
+                        with self.assertRaises(WRITER.GovernanceError):
+                            WRITER.dispatcher_generation(completed, require_success=True)
+            for invalid in (
+                self.dispatcher_run(status="completed", conclusion=None),
+                self.dispatcher_run(status="completed", conclusion="unknown"),
+                self.dispatcher_run(status="unknown", conclusion=None),
+            ):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaises(WRITER.GovernanceError):
+                        WRITER.dispatcher_generation(invalid)
+
+    def test_active_and_failed_dispatchers_preempt_then_next_success_recovers(self) -> None:
+        head = "a" * 40
+        previous = self.dispatcher_run(88, status="completed", conclusion="success", created_at="2026-08-30T00:00:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        for status, conclusion in (
+            ("waiting", None), ("completed", "failure"),
+            ("completed", "cancelled"), ("completed", "startup_failure"),
+        ):
+            newer = self.dispatcher_run(7, status=status, conclusion=conclusion, created_at="2026-08-30T00:01:00Z")
+            with self.subTest(status=status, conclusion=conclusion), self.identity(), patch.dict(os.environ, environment), \
+                 patch.object(WRITER, "api_json", return_value=previous), \
+                 patch.object(WRITER, "object_page", return_value=self.dispatcher_page(previous, newer)):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.reject_newer_dispatcher_barrier(head)
+
+        recovered = self.dispatcher_run(7, status="completed", conclusion="success", created_at="2026-08-30T00:01:00Z")
+        recovered_environment = environment | {"GOVERNANCE_DISPATCHER_RUN_ID": "7"}
+        with self.identity(), patch.dict(os.environ, recovered_environment), \
+             patch.object(WRITER, "api_json", return_value=recovered), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(recovered)):
+            WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_dispatcher_fence_stops_at_one_full_page_and_400_terminal_heads_use_app_budget(self) -> None:
+        head = "a" * 40
+        source = self.dispatcher_run()
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=source), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(source, total_count=100)):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+        transport = {"direct": 0, "page": 0}
+        def direct(endpoint: str, *, default_token: bool = False) -> object:
+            self.assertFalse(default_token)
+            self.assertEqual(endpoint, "repos/owner/repository/actions/runs/88")
+            transport["direct"] += 1
+            return source
+        def page(endpoint: str, *, default_token: bool = False) -> dict[str, object]:
+            self.assertFalse(default_token)
+            self.assertIn("actions/workflows/66/runs?", endpoint)
+            self.assertIn("branch=master", endpoint)
+            self.assertIn("created=%3E%3D2026-08-30T00%3A00%3A00Z", endpoint)
+            self.assertIn("per_page=100", endpoint)
+            transport["page"] += 1
+            return self.dispatcher_page(source)
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", side_effect=direct), \
+             patch.object(WRITER, "object_page", side_effect=page), \
+             patch.object(WRITER, "checks") as checks:
+            for _ in range(400):
+                WRITER.reject_newer_dispatcher_barrier(head)
+        self.assertEqual(transport, {"direct": 400, "page": 400})
+        self.assertLess(sum(transport.values()), 5_000)
+        checks.assert_not_called()
+
+    def test_early_writer_refuses_new_pending_before_and_after_newer_barrier(self) -> None:
+        head = "a" * 40
+        current_dispatcher = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        newer_dispatcher = self.dispatcher_run(7, status="queued", created_at="2026-08-30T00:01:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "early",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+            "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER, "api_json", return_value=current_dispatcher), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(current_dispatcher, newer_dispatcher)), \
+             patch.object(WRITER, "command") as command:
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.write_check(head, state="in_progress", description="pending", details_url="https://github.com/owner/repository/actions/runs/99")
+        command.assert_not_called()
+
+    def test_terminal_patch_refuses_newer_dispatcher_barrier_for_all_writer(self) -> None:
+        head = "a" * 40
+        prefix = f"krr-governance/v1/{head}/"
+        existing = {
+            "id": 202, "name": WRITER.CHECK_NAME, "head_sha": head,
+            "external_id": prefix + "dispatcher-88", "updated_at": "now", "app": {"id": 42},
+            "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/88",
+        }
+        current_dispatcher = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        newer_dispatcher = self.dispatcher_run(7, status="queued", created_at="2026-08-30T00:01:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+            "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "ensure_writer_run_is_active"), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+             patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER, "api_json", return_value=current_dispatcher), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(current_dispatcher, newer_dispatcher)), \
+             patch.object(WRITER, "command") as command:
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.write_check(head, state="success", description="success", details_url=existing["details_url"], existing=existing)
+        command.assert_not_called()
+
+    def test_dispatcher_input_is_bound_to_one_default_branch_run(self) -> None:
+        run = self.dispatcher_run()
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
              patch.object(WRITER, "api_json", return_value=run) as api:
             self.assertEqual(WRITER.trusted_dispatcher_source(88), WRITER.DispatcherSource(88, "issues", 1))
         self.assertTrue(api.call_args.kwargs["default_token"])
-        for field, value in (("event", "push"), ("head_sha", "e" * 40), ("path", ".github/workflows/pr-governance.yml.evil@master"), ("run_attempt", 2), ("run_attempt", 0), ("run_attempt", True), ("run_attempt", "1")):
+        for field, value in (("event", "push"), ("head_sha", "e" * 40), ("head_branch", "evil"), ("workflow_id", 0), ("path", ".github/workflows/pr-governance.yml.evil@master"), ("run_attempt", 2), ("run_attempt", 0), ("run_attempt", True), ("run_attempt", "1"), ("created_at", "2026-08-30T00:00:00+00:00")):
             invalid = {**run, field: value}
-            with self.subTest(field=field), self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40}), \
+            with self.subTest(field=field), self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
                  patch.object(WRITER, "api_json", return_value=invalid):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.trusted_dispatcher_source(88)
+
+    def test_dispatcher_run_accepts_the_live_plain_workflow_path(self) -> None:
+        run = self.dispatcher_run() | {"path": ".github/workflows/pr-governance.yml"}
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "api_json", return_value=run):
+            self.assertEqual(WRITER.trusted_dispatcher_source(88), WRITER.DispatcherSource(88, "issues", 1))
+
+    def test_dispatcher_fence_lists_only_the_exact_default_branch_workflow(self) -> None:
+        run = self.dispatcher_run()
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(run)) as page:
+            self.assertEqual(
+                set(WRITER.dispatcher_generations(66, WRITER.dispatcher_created_at(run["created_at"]))), {88},
+            )
+        self.assertEqual(
+            page.call_args.args[0],
+            "repos/owner/repository/actions/workflows/66/runs?branch=master&created=%3E%3D2026-08-30T00%3A00%3A00Z&per_page=100",
+        )
+        self.assertFalse(page.call_args.kwargs["default_token"])
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "object_page", return_value=self.dispatcher_page(run | {"workflow_id": 67})):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.dispatcher_generations(66, WRITER.dispatcher_created_at(run["created_at"]))
 
     def test_writer_and_sensor_attempt_boundaries_reject_bool_zero_string_and_retry(self) -> None:
         head = "a" * 40
@@ -201,8 +471,9 @@ class StatusWriterUnitTest(unittest.TestCase):
             "repository": {"full_name": "owner/repository"}, "status": "in_progress", "run_attempt": 1,
         }
         with self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_SHA": head}), \
-             patch.object(WRITER, "api_json", return_value=writer_run):
+             patch.object(WRITER, "api_json", return_value=writer_run) as api:
             WRITER.ensure_writer_run_is_active()
+        self.assertFalse(api.call_args.kwargs.get("default_token", False))
         for attempt in (0, True, "1", 2):
             with self.subTest(writer_attempt=attempt), self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_SHA": head}), \
                  patch.object(WRITER, "api_json", return_value=writer_run | {"run_attempt": attempt}):
@@ -344,9 +615,443 @@ class StatusWriterUnitTest(unittest.TestCase):
                 self.assertEqual(WRITER.main(), 1)
                 source.assert_not_called()
 
+    def test_early_scope_rejects_more_than_forty_targets_before_api_reads(self) -> None:
+        targets = json.dumps(list(range(1, 42)), separators=(",", ":"))
+        with self.identity(), patch.dict(os.environ, {
+            "GOVERNANCE_SCOPE": "early", "GOVERNANCE_TARGET_NUMBERS": targets,
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": "[]", "GOVERNANCE_CONTINUATION_INDEX": "0",
+        }), patch.object(WRITER, "trusted_dispatcher_source") as source:
+            self.assertEqual(WRITER.main(), 1)
+        source.assert_not_called()
+
+    def test_all_scope_requires_the_exact_canonical_continuation_slice(self) -> None:
+        numbers = tuple(range(1, 302))
+        snapshot = self.snapshot(numbers)
+        manifest = json.dumps([[number, 10_000 + number] for number in numbers], separators=(",", ":"))
+        expected = tuple(range(151, 301))
+        base = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[1]",
+            "GOVERNANCE_CHECK_MANIFEST": manifest, "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(expected), separators=(",", ":")),
+            "GOVERNANCE_CONTINUATION_INDEX": "2",
+        }
+        for batch in (
+            expected[:-1], (150,) + expected[:-1], tuple(reversed(expected)),
+        ):
+            with self.subTest(batch=batch[:2]), self.identity(), patch.dict(os.environ, base | {"GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(batch), separators=(",", ":"))}), \
+                 patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+                 patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+                 patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+                 patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+                 patch.object(WRITER, "process") as process:
+                self.assertEqual(WRITER.main(), 1)
+            process.assert_not_called()
+
+    def test_four_all_segments_revalidate_and_terminalize_six_hundred_non_drafts(self) -> None:
+        """Run four production all-writer processes through only a fake transport."""
+        preserved = tuple(range(1, 41))
+        terminal_numbers = tuple(range(41, 601))
+        all_numbers = (*preserved, *terminal_numbers)
+        default_head = "d" * 40
+        heads = {number: f"{number:040x}"[-40:] for number in all_numbers}
+        bodies = {number: f"Fixes #{number}" for number in all_numbers}
+        pulls: dict[int, dict[str, object]] = {}
+        checks: dict[int, dict[str, object]] = {}
+        check_number_by_id: dict[int, int] = {}
+        sensor_runs: list[dict[str, object]] = []
+        ci_runs: list[dict[str, object]] = []
+        release_runs: list[dict[str, object]] = []
+        head_runs: dict[str, dict[str, object]] = {}
+        source = self.dispatcher_run(88, event="issues", status="in_progress")
+        writer_runs: dict[int, dict[str, object]] = {}
+        clock = [0.0]
+        current_segment = [0]
+        transport = {
+            index: {
+                "app": [], "default": [], "write": [], "graphql": [], "rebind": [],
+                "manifest": [], "dispatcher_source": [], "prior_writer": [], "registration": [], "await": [],
+            }
+            for index in range(1, 6)
+        }
+        source_reads = {index: 0 for index in range(1, 6)}
+        snapshots = {index: 0 for index in range(1, 6)}
+        check_read_count = {index: 0 for index in range(1, 6)}
+        sleep_calls = {index: [] for index in range(1, 6)}
+        terminal_patches: list[int] = []
+        check_reads: dict[int, int] = {}
+        drift_check_id = [0]
+
+        def writer_run(identifier: int, segment: int, status: str = "in_progress") -> dict[str, object]:
+            return {
+                "id": identifier, "name": "PR governance status writer",
+                "path": ".github/workflows/pr-governance-status-writer.yml@master",
+                "event": "workflow_dispatch", "display_title": f"source=88 scope=all segment={segment}",
+                "head_sha": default_head, "head_branch": "master",
+                "repository": {"full_name": "owner/repository"}, "run_attempt": 1,
+                "status": status, "conclusion": "success" if status == "completed" else None,
+                "actor": {"login": "krr-governance[bot]", "type": "Bot"},
+                "triggering_actor": {"login": "krr-governance[bot]", "type": "Bot"},
+            }
+
+        def page_chunks(values: list[dict[str, object]]) -> list[dict[str, object]]:
+            return [
+                {"workflow_runs": values[index:index + 100]}
+                for index in range(0, len(values), 100)
+            ] or [{"workflow_runs": []}]
+
+        def record(kind: str, count: int = 1) -> None:
+            transport[current_segment[0]][kind].extend([clock[0]] * count)
+
+        def response(arguments: list[str], payload: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+
+        def sleep(delay: float) -> None:
+            self.assertEqual(delay, WRITER.ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS)
+            sleep_calls[current_segment[0]].append(delay)
+            clock[0] += delay
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def workflow_overhead(kind: str, count: int, start: float, duration: float) -> None:
+            self.assertIn(kind, {"registration", "await"})
+            self.assertGreater(count, 0)
+            self.assertGreater(duration, 0.0)
+            for item in range(count):
+                transport[current_segment[0]][kind].append(start + duration * item / count)
+
+        with self.identity():
+            invalidation = WRITER.dispatcher_invalidation_url(
+                WRITER.DispatcherSource(88, "issues", 1), 0,
+            )
+            for number in all_numbers:
+                pull = {
+                    "number": number, "state": "open", "draft": False, "body": bodies[number],
+                    "base": {
+                        "sha": default_head, "ref": "master",
+                        "repo": {"full_name": "owner/repository", "default_branch": "master"},
+                    },
+                    "head": {
+                        "sha": heads[number], "ref": f"pr-{number}",
+                        "repo": {"full_name": "owner/repository"},
+                    },
+                }
+                pulls[number] = pull
+                common = {
+                    "run_number": number, "run_attempt": 1, "event": "pull_request",
+                    "head_sha": heads[number], "status": "completed", "conclusion": "success",
+                    "repository": {"full_name": "owner/repository"},
+                    "pull_requests": [{"number": number, "base": pull["base"], "head": pull["head"]}],
+                }
+                sensor = {
+                    **common, "id": 1_000 + number, "name": "PR governance review sensor",
+                    "path": ".github/workflows/pr-governance-review-events.yml@master",
+                }
+                ci = {
+                    **common, "id": 2_000 + number, "name": "CI", "workflow_id": 44,
+                    "path": ".github/workflows/test-and-build.yml@master",
+                }
+                release = {
+                    **common, "id": 3_000 + number, "name": "release-preflight", "workflow_id": 45,
+                    "path": ".github/workflows/release-preflight.yml@master",
+                }
+                sensor_runs.append(sensor)
+                ci_runs.append(ci)
+                release_runs.append(release)
+                head_runs[heads[number]] = {"total_count": 3, "workflow_runs": [sensor, ci, release]}
+                identifier = 10_000 + number
+                check_number_by_id[identifier] = number
+                if number in preserved:
+                    early_query = {
+                        "source_run_id": str(1_000 + number), "ci_workflow_id": "44",
+                        "ci_run_id": str(2_000 + number), "ci_run_number": str(number),
+                        "ci_run_attempt": "1", "ci_status": "completed", "ci_conclusion": "success",
+                        "release_workflow_id": "45", "release_run_id": str(3_000 + number),
+                        "release_run_number": str(number), "release_run_attempt": "1",
+                        "release_status": "completed", "release_conclusion": "success",
+                        "pr_base_sha": default_head, "pr_head_sha": heads[number],
+                        "pr_body_sha256": WRITER.pr_body_sha256(bodies[number]),
+                    }
+                    checks[identifier] = {
+                        "id": identifier, "name": WRITER.CHECK_NAME, "head_sha": heads[number],
+                        "external_id": f"krr-governance/v1/{heads[number]}/writer-71",
+                        "updated_at": f"early-{number}", "app": {"id": 42},
+                        "status": "completed", "conclusion": "success",
+                        "details_url": "https://github.com/owner/repository/actions/runs/71?" + WRITER.urlencode(early_query),
+                    }
+                else:
+                    checks[identifier] = {
+                        "id": identifier, "name": WRITER.CHECK_NAME, "head_sha": heads[number],
+                        "external_id": f"krr-governance/v1/{heads[number]}/dispatcher-88",
+                        "updated_at": f"pending-{number}", "app": {"id": 42},
+                        "status": "in_progress", "conclusion": None, "details_url": invalidation,
+                    }
+
+            pull_pages = [
+                [pulls[number] for number in all_numbers[start:start + 100]]
+                for start in range(0, len(all_numbers), 100)
+            ]
+
+            def run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                environment = kwargs.get("env")
+                self.assertIsInstance(environment, dict)
+                assert isinstance(environment, dict)
+                segment = current_segment[0]
+                app_token = f"app-read-{segment}"
+                write_token = f"check-write-{segment}"
+                if arguments[0] == sys.executable:
+                    self.assertEqual(environment, {"GH_TOKEN": app_token, "PATH": os.environ["PATH"]})
+                    if arguments[1].endswith("verify_push_issue.py"):
+                        record("app", 2)
+                    elif arguments[1].endswith("verify_pr_ready.py"):
+                        record("app", 3)
+                        record("graphql", 2)
+                    else:
+                        self.fail(f"unexpected verifier command: {arguments}")
+                    return subprocess.CompletedProcess(arguments, 0, "", "")
+
+                self.assertEqual(arguments[:2], ["gh", "api"])
+                api_arguments = arguments[2:]
+                endpoint = next(
+                    (item for item in api_arguments if isinstance(item, str) and item.startswith("repos/")),
+                    None,
+                )
+                self.assertIsNotNone(endpoint)
+                assert isinstance(endpoint, str)
+                write = "--method" in api_arguments
+                if write:
+                    self.assertEqual(environment, {"GH_TOKEN": write_token, "PATH": os.environ["PATH"]})
+                    self.assertIn("PATCH", api_arguments)
+                    record("write")
+                    identifier = int(endpoint.rsplit("/", 1)[1])
+                    number = check_number_by_id[identifier]
+                    self.assertIn(number, terminal_numbers)
+                    self.assertEqual(checks[identifier]["status"], "in_progress")
+                    details = next(
+                        item.split("=", 1)[1]
+                        for item in api_arguments
+                        if isinstance(item, str) and item.startswith("details_url=")
+                    )
+                    checks[identifier] = checks[identifier] | {
+                        "updated_at": f"terminal-{number}", "status": "completed",
+                        "conclusion": "success", "details_url": details,
+                    }
+                    terminal_patches.append(number)
+                    return response(arguments, checks[identifier])
+
+                token = environment.get("GH_TOKEN")
+                if token == "default-read":
+                    self.assertEqual(endpoint, "repos/owner/repository/actions/runs/88")
+                    record("default")
+                    record("dispatcher_source")
+                    source_reads[segment] += 1
+                else:
+                    self.assertEqual(environment, {"GH_TOKEN": app_token, "PATH": os.environ["PATH"]})
+                    if endpoint in {"repos/owner/repository", "repos/owner/repository/git/ref/heads/master"}:
+                        record("rebind")
+                    page_count = 1
+                    if "--paginate" in api_arguments:
+                        if endpoint.startswith("repos/owner/repository/pulls?state=open"):
+                            page_count = len(pull_pages)
+                            snapshots[segment] += 1
+                        elif endpoint.startswith("repos/owner/repository/actions/workflows/44/runs?"):
+                            page_count = len(page_chunks(ci_runs))
+                        elif endpoint.startswith("repos/owner/repository/actions/workflows/45/runs?"):
+                            page_count = len(page_chunks(release_runs))
+                        elif endpoint.endswith("runs?event=pull_request&per_page=100"):
+                            page_count = len(page_chunks(sensor_runs))
+                        elif endpoint.endswith("runs?event=pull_request_review&per_page=100"):
+                            page_count = 1
+                        elif endpoint.endswith("runs?event=pull_request_review_comment&per_page=100"):
+                            page_count = 1
+                        else:
+                            self.fail(f"unexpected paginated endpoint: {endpoint}")
+                    record("app", page_count)
+                    if endpoint.startswith("repos/owner/repository/actions/runs/"):
+                        identifier = int(endpoint.rsplit("/", 1)[1])
+                        if identifier in writer_runs and str(identifier) != WRITER.WRITER_RUN_ID:
+                            record("prior_writer")
+
+                if endpoint == "repos/owner/repository":
+                    payload: object = {"default_branch": "master"}
+                elif endpoint == "repos/owner/repository/git/ref/heads/master":
+                    payload = {"object": {"sha": default_head}}
+                elif endpoint == "repos/owner/repository/actions/runs/88":
+                    payload = source
+                elif endpoint.startswith("repos/owner/repository/actions/runs/"):
+                    payload = writer_runs[int(endpoint.rsplit("/", 1)[1])]
+                elif endpoint.startswith("repos/owner/repository/pulls?state=open"):
+                    payload = pull_pages
+                elif endpoint.startswith("repos/owner/repository/pulls/"):
+                    payload = pulls[int(endpoint.rsplit("/", 1)[1])]
+                elif endpoint == "repos/owner/repository/actions/workflows/test-and-build.yml":
+                    payload = {"id": 44}
+                elif endpoint == "repos/owner/repository/actions/workflows/release-preflight.yml":
+                    payload = {"id": 45}
+                elif endpoint.startswith("repos/owner/repository/actions/workflows/44/runs?"):
+                    payload = page_chunks(ci_runs)
+                elif endpoint.startswith("repos/owner/repository/actions/workflows/45/runs?"):
+                    payload = page_chunks(release_runs)
+                elif endpoint.endswith("runs?event=pull_request&per_page=100"):
+                    payload = page_chunks(sensor_runs)
+                elif endpoint.endswith("runs?event=pull_request_review&per_page=100"):
+                    payload = [{"workflow_runs": []}]
+                elif endpoint.endswith("runs?event=pull_request_review_comment&per_page=100"):
+                    payload = [{"workflow_runs": []}]
+                elif endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
+                    payload = self.dispatcher_page(source)
+                elif endpoint.startswith("repos/owner/repository/actions/runs?head_sha="):
+                    head = endpoint.split("head_sha=", 1)[1].split("&", 1)[0]
+                    payload = head_runs[head]
+                elif endpoint.startswith("repos/owner/repository/check-runs/"):
+                    identifier = int(endpoint.rsplit("/", 1)[1])
+                    check_read_count[segment] += 1
+                    if check_read_count[segment] <= len(all_numbers):
+                        record("manifest")
+                    check_reads[identifier] = check_reads.get(identifier, 0) + 1
+                    value = checks[identifier]
+                    if identifier == drift_check_id[0] and check_reads[identifier] == 3:
+                        payload = value | {"updated_at": "newer-check-fingerprint"}
+                    else:
+                        payload = value
+                else:
+                    self.fail(f"unexpected API endpoint: {endpoint}")
+                return response(arguments, payload)
+
+            manifest = json.dumps(
+                [[number, 10_000 + number] for number in all_numbers], separators=(",", ":"),
+            )
+            common_environment = {
+                "GITHUB_ACTIONS": "true", "GITHUB_SHA": default_head, "GITHUB_REF_NAME": "master",
+                "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all",
+                "GOVERNANCE_TARGET_NUMBERS": json.dumps(list(preserved), separators=(",", ":")),
+                "GOVERNANCE_PRESERVED_TARGET_NUMBERS": json.dumps(list(preserved), separators=(",", ":")),
+                "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71", "GOVERNANCE_CHECK_MANIFEST": manifest,
+                "GOVERNANCE_TERMINAL_ORDER_NUMBERS": json.dumps(list(terminal_numbers), separators=(",", ":")),
+                "KRR_GOVERNANCE_CHECK_APP_ID": "42", "KRR_GOVERNANCE_APP_BOT_LOGIN": "krr-governance[bot]",
+                "DEFAULT_READ_TOKEN": "default-read",
+            }
+            durations: list[float] = []
+            original_last_write = WRITER._last_check_write_at
+            self.addCleanup(setattr, WRITER, "_last_check_write_at", original_last_write)
+            with patch.object(WRITER.subprocess, "run", side_effect=run), \
+                patch.object(WRITER.time, "sleep", side_effect=sleep), \
+                patch.object(WRITER.time, "monotonic", side_effect=monotonic):
+                for segment in range(1, 5):
+                    current_segment[0] = segment
+                    check_read_count[segment] = 0
+                    workflow_overhead("registration", 60, clock[0], 300.0)
+                    clock[0] += 300.0
+                    writer_identifier = 98 + segment
+                    writer_runs[writer_identifier] = writer_run(writer_identifier, segment)
+                    expected = terminal_numbers[(segment - 1) * 150:segment * 150]
+                    start = clock[0]
+                    before = len(terminal_patches)
+                    WRITER._last_check_write_at = None  # Separate workflow-dispatch process.
+                    with self.subTest(segment=segment), patch.object(WRITER, "WRITER_RUN_ID", str(writer_identifier)), patch.dict(os.environ, common_environment | {
+                        "GH_TOKEN": f"app-read-{segment}", "CHECK_WRITE_TOKEN": f"check-write-{segment}",
+                        "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(expected), separators=(",", ":")),
+                        "GOVERNANCE_CONTINUATION_INDEX": str(segment),
+                        "GOVERNANCE_COMPLETED_WRITER_RUN_IDS": json.dumps(list(range(99, writer_identifier)), separators=(",", ":")),
+                    }):
+                        self.assertEqual(WRITER.main(), 0)
+                    durations.append(clock[0] - start)
+                    workflow_overhead("await", 114, start, 3_420.0)
+                    clock[0] = max(clock[0], start + 3_420.0)
+                    writer_runs[writer_identifier] = writer_run(writer_identifier, segment, "completed")
+                    self.assertEqual(terminal_patches[before:], list(expected))
+                    self.assertEqual(source_reads[segment], 1)
+                    self.assertEqual(snapshots[segment], 1)
+                    self.assertEqual(len(WRITER._bound_check_runs), len(all_numbers))
+                    self.assertEqual(
+                        WRITER._bound_check_runs[(heads[preserved[0]], f"krr-governance/v1/{heads[preserved[0]]}/writer-71")],
+                        10_000 + preserved[0],
+                    )
+                    self.assertEqual(
+                        WRITER._bound_check_runs[(heads[expected[0]], f"krr-governance/v1/{heads[expected[0]]}/dispatcher-88")],
+                        10_000 + expected[0],
+                    )
+                    self.assertEqual(len(transport[segment]["default"]), 1)
+                    self.assertGreater(len(transport[segment]["app"]), 0)
+                    self.assertEqual(len(transport[segment]["write"]), len(expected))
+                    self.assertEqual(len(transport[segment]["manifest"]), len(all_numbers))
+                    self.assertEqual(len(transport[segment]["dispatcher_source"]), 1)
+                    self.assertEqual(len(transport[segment]["prior_writer"]), segment - 1)
+                    self.assertEqual(len(transport[segment]["rebind"]), 2 * len(expected))
+                    self.assertEqual(len(sleep_calls[segment]), len(expected))
+
+                self.assertEqual(terminal_patches, list(terminal_numbers))
+                self.assertEqual(len(set(terminal_patches)), len(terminal_numbers))
+                self.assertEqual(len(terminal_patches) + len(preserved), len(all_numbers))
+                self.assertTrue(all(
+                    checks[10_000 + number]["status"] == "completed"
+                    and checks[10_000 + number]["conclusion"] == "success"
+                    for number in all_numbers
+                ))
+
+                # A new fingerprint at the final fence returns False from the
+                # production finalizer, so main must fail without publishing a
+                # replacement terminal state.
+                for number in terminal_numbers:
+                    identifier = 10_000 + number
+                    checks[identifier] = checks[identifier] | {
+                        "updated_at": f"retry-{number}", "status": "in_progress",
+                        "conclusion": None, "details_url": invalidation,
+                    }
+                check_reads.clear()
+                drift_check_id[0] = 10_000 + terminal_numbers[0]
+                current_segment[0] = 5
+                WRITER._last_check_write_at = None
+                before_drift = len(terminal_patches)
+                writer_runs[103] = writer_run(103, 1)
+                with patch.object(WRITER, "WRITER_RUN_ID", "103"), patch.dict(os.environ, common_environment | {
+                    "GH_TOKEN": "app-read-5", "CHECK_WRITE_TOKEN": "check-write-5",
+                    "GOVERNANCE_COMPLETED_WRITER_RUN_IDS": "[]",
+                    "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(terminal_numbers[:150]), separators=(",", ":")),
+                    "GOVERNANCE_CONTINUATION_INDEX": "1",
+                }):
+                    self.assertEqual(WRITER.main(), 1)
+                self.assertEqual(len(terminal_patches), before_drift)
+
+        def rolling_maximum(timestamps: list[float]) -> int:
+            return max(
+                (
+                    sum(window_end - 3_600 < value <= window_end for value in timestamps)
+                    for window_end in timestamps
+                ),
+                default=0,
+            )
+
+        installation_rest = [
+            value
+            for segment in range(1, 5)
+            for value in (
+                *transport[segment]["app"], *transport[segment]["default"], *transport[segment]["write"],
+                *transport[segment]["registration"], *transport[segment]["await"],
+            )
+        ]
+        graphql = [
+            value for segment in range(1, 5) for value in transport[segment]["graphql"]
+        ]
+        self.assertEqual(rolling_maximum(installation_rest), 3_801)
+        self.assertLessEqual(rolling_maximum(installation_rest), 4_500)
+        self.assertEqual(rolling_maximum(graphql), 300)
+        self.assertLessEqual(rolling_maximum(graphql), 4_500)
+        self.assertEqual(durations, [3_225.0, 3_225.0, 3_225.0, 2_365.0])
+        self.assertTrue(all(duration < 3_600 for duration in durations))
+        self.assertTrue(all(duration <= 3_420.0 for duration in durations))
+        self.assertEqual(sum(durations), 12_040.0)
+        self.assertEqual(clock[0], 14_880.0)
+        # 81m all-open invalidation plus its bounded 15m priority/drain hand-off
+        # still leaves the four registered/awaited writer segments below Actions' 6h job cap.
+        self.assertLess(81 * 60 + 15 * 60 + clock[0], 6 * 3_600)
+
     def test_production_manifest_binds_exact_ids_in_preserved_event_unrelated_order(self) -> None:
         """The all writer receives the dispatcher POST IDs, never a name-only lookup."""
         snapshot = self.snapshot((1, 72, 73))
+        scoped_snapshot = WRITER.OpenSnapshot(
+            (1, 73), snapshot.claimants,
+            tuple(item for item in snapshot.pull_requests if item["number"] != 72),
+        )
         source = WRITER.DispatcherSource(88, "issues", 1)
         environment = {
             "GITHUB_ACTIONS": "true",
@@ -356,11 +1061,13 @@ class StatusWriterUnitTest(unittest.TestCase):
             "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
             # preserved source, related claimant, then unrelated snapshot PR.
             "GOVERNANCE_CHECK_MANIFEST": "[[72,701],[73,702],[1,703]]",
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": "[73,1]",
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": "[73,1]", "GOVERNANCE_CONTINUATION_INDEX": "1",
         }
         with self.identity(), patch.dict(os.environ, environment), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=source), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "observed_invalidations", return_value=(scoped_snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=None):
             self.assertEqual(WRITER.main(), 0)
@@ -375,6 +1082,10 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_production_main_uses_manifest_ids_for_preserved_and_terminal_dispatcher_generations(self) -> None:
         snapshot = self.snapshot((1, 72, 73))
+        scoped_snapshot = WRITER.OpenSnapshot(
+            (1, 73), snapshot.claimants,
+            tuple(item for item in snapshot.pull_requests if item["number"] != 72),
+        )
         heads = {item["number"]: item["head_sha"] for item in snapshot.pull_requests}
         base = "b" * 40
         early_query = {
@@ -388,7 +1099,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             702: {"id": 702, "name": WRITER.CHECK_NAME, "head_sha": heads[73], "external_id": f"krr-governance/v1/{heads[73]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
             703: {"id": 703, "name": WRITER.CHECK_NAME, "head_sha": heads[1], "external_id": f"krr-governance/v1/{heads[1]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
         }
-        dispatcher = {"id": 88, "name": WRITER.DISPATCHER_NAME, "path": ".github/workflows/pr-governance.yml@master", "event": "issues", "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress"}
+        dispatcher = {"id": 88, "name": WRITER.DISPATCHER_NAME, "path": ".github/workflows/pr-governance.yml@master", "event": "issues", "head_sha": "d" * 40, "head_branch": "master", "workflow_id": 66, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress", "conclusion": None, "created_at": "2026-08-30T00:00:00Z"}
         writer = {"id": 99, "name": "PR governance status writer", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress"}
         reads: list[int] = []; terminal_ids: list[int] = []
         def api(endpoint: str, *, default_token: bool = False) -> object:
@@ -410,20 +1121,24 @@ class StatusWriterUnitTest(unittest.TestCase):
             WRITER.write_check(heads[number], state="failure", description="fixture", details_url="https://github.com/owner/repository/actions/runs/88", existing=value)
             return None
         environment = {
-            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
             "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[72,73]",
             "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[72]", "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
             "GOVERNANCE_CHECK_MANIFEST": "[[72,701],[73,702],[1,703]]",
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": "[73,1]",
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": "[73,1]", "GOVERNANCE_CONTINUATION_INDEX": "1",
         }
         with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER, "open_snapshot", return_value=snapshot), \
              patch.object(WRITER, "api_json", side_effect=api), patch.object(WRITER, "command", side_effect=write), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
-             patch.object(WRITER, "process", side_effect=terminal), patch.object(WRITER, "pace_check_write"):
+             patch.object(WRITER, "observed_invalidations", return_value=(scoped_snapshot, frozenset())), \
+             patch.object(WRITER, "process", side_effect=terminal), patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER, "reject_newer_dispatcher_barrier"):
             self.assertEqual(WRITER.main(), 0)
         self.assertEqual(terminal_ids, [702, 703])
-        self.assertIn(701, reads)
-        self.assertEqual(reads.count(702), 3)
-        self.assertEqual(reads.count(703), 3)
+        self.assertNotIn(701, reads)
+        self.assertEqual(reads.count(702), 2)
+        self.assertEqual(reads.count(703), 2)
 
     def test_production_manifest_rejects_reordered_or_duplicate_ids_before_revalidation(self) -> None:
         snapshot = self.snapshot((1, 72, 73))
@@ -433,6 +1148,8 @@ class StatusWriterUnitTest(unittest.TestCase):
             "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all",
             "GOVERNANCE_TARGET_NUMBERS": "[72,73]", "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[72]",
             "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": "[73,1]",
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": "[73,1]", "GOVERNANCE_CONTINUATION_INDEX": "1",
         }
         for manifest in ("[[72,701],[73,702]]", "[[72,701],[73,702],[1,703],[74,704]]", "[[72,701],[1,703],[73,702]]", "[[72,701],[73,701],[1,703]]"):
             with self.subTest(manifest=manifest), self.identity(), patch.dict(os.environ, base | {"GOVERNANCE_CHECK_MANIFEST": manifest}), \
@@ -474,10 +1191,41 @@ class StatusWriterUnitTest(unittest.TestCase):
             {"default_branch": "master"},
             {"object": {"sha": "e" * 40}},
         ]
-        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40}), \
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
              patch.object(WRITER, "api_json", side_effect=responses):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.rebind_trusted_default_writer()
+
+    def test_terminal_rebind_uses_app_read_transport_and_fails_closed(self) -> None:
+        environment = {
+            "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read",
+        }
+        for mode in ("success", "branch-changed", "ref-advanced", "transport-failure"):
+            with self.subTest(mode=mode):
+                seen: list[dict[str, str]] = []
+                def run(arguments, **kwargs):
+                    request_environment = kwargs.get("env")
+                    self.assertEqual(request_environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+                    seen.append(request_environment)
+                    endpoint = arguments[-1]
+                    if endpoint == "repos/owner/repository":
+                        if mode == "transport-failure":
+                            return subprocess.CompletedProcess(arguments, 1, "", "sensitive upstream body")
+                        branch = "release" if mode == "branch-changed" else "master"
+                        return subprocess.CompletedProcess(arguments, 0, json.dumps({"default_branch": branch}), "")
+                    if endpoint == "repos/owner/repository/git/ref/heads/master":
+                        head = "e" * 40 if mode == "ref-advanced" else "d" * 40
+                        return subprocess.CompletedProcess(arguments, 0, json.dumps({"object": {"sha": head}}), "")
+                    self.fail(f"unexpected rebind transport: {arguments}")
+
+                with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER.subprocess, "run", side_effect=run):
+                    if mode == "success":
+                        WRITER.rebind_trusted_default_writer()
+                    else:
+                        with self.assertRaises(WRITER.GovernanceError):
+                            WRITER.rebind_trusted_default_writer()
+                self.assertEqual(len(seen), 2 if mode in {"success", "ref-advanced"} else 1)
 
     def test_later_invalidator_details_fingerprint_blocks_terminal_patch(self) -> None:
         head = "a" * 40
@@ -491,7 +1239,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         with patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), patch.object(WRITER, "check_run", return_value=later):
             self.assertTrue(WRITER.check_changed_since(head, WRITER.check_fingerprint(baseline)))
 
-    def test_main_finalizes_each_pr_before_processing_the_next(self) -> None:
+    def test_main_skips_final_evidence_for_non_success_decisions(self) -> None:
         snapshot = self.snapshot((72, 73))
         first = WRITER.PendingDecision(72, "a" * 40, "b" * 40, (), "failure", "failed", None, None, None, "c" * 64)
         second = WRITER.PendingDecision(73, "c" * 40, "d" * 40, (), "failure", "failed", None, None, None, "c" * 64)
@@ -509,10 +1257,11 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
-             patch.object(WRITER, "process", side_effect=process), patch.object(WRITER, "final_evidence_for_pr", side_effect=final), \
+             patch.object(WRITER, "process", side_effect=process), patch.object(WRITER, "final_evidence_for_pr", side_effect=final) as final_evidence, \
              patch.object(WRITER, "finalize_decision", side_effect=finalize):
             self.assertEqual(WRITER.main(), 0)
-        self.assertEqual(calls, ["process-72", "evidence-a", "finalize-72", "process-73", "evidence-c", "finalize-73"])
+        self.assertEqual(calls, ["process-72", "finalize-72", "process-73", "finalize-73"])
+        final_evidence.assert_not_called()
 
     def test_main_continues_after_one_pr_fails(self) -> None:
         with patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), patch.object(WRITER, "REPOSITORY", "owner/repository"), \
@@ -583,7 +1332,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         open_snapshot.assert_called_once_with()
         self.assertEqual(process.call_count, 300)
 
-    def test_event_reserves_100_terminal_write_budget(self) -> None:
+    def test_nonproduction_event_budget_remains_bounded(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, 99, "failure", "bad", None, None, None, "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
@@ -594,11 +1343,92 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "process", return_value=decision) as process, \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "finalize_decision", return_value=False) as finalize:
-            self.assertEqual(WRITER.main(), 0)
-        self.assertEqual(process.call_count, 300)
+            self.assertEqual(WRITER.main(), 1)
+        self.assertEqual(process.call_count, 101)
         self.assertEqual(finalize.call_count, 100)
 
-    def test_all_open_event_priority_keeps_the_source_inside_the_first_100_terminal_writes(self) -> None:
+    def test_event_sourced_all_segment_terminalizes_all_one_hundred_fifty_successes(self) -> None:
+        numbers = tuple(range(1, 151))
+        snapshot = self.snapshot(numbers)
+        manifest = json.dumps([[number, 10_000 + number] for number in numbers], separators=(",", ":"))
+        environment = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[1]",
+            "GOVERNANCE_CHECK_MANIFEST": manifest,
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_CONTINUATION_INDEX": "1",
+        }
+        finalized: list[int] = []
+
+        def decision(number: int, *_args, **_kwargs):
+            return WRITER.PendingDecision(
+                number, f"{number:040x}"[-40:], "b" * 40, (number,), "success", "ok",
+                77, (), "64", "c" * 64,
+            )
+
+        def finalize(value, *_args):
+            finalized.append(value.number)
+            return True
+
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", side_effect=decision) as process, \
+             patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "finalize_decision", side_effect=finalize):
+            self.assertEqual(WRITER.main(), 0)
+        self.assertEqual(process.call_count, 150)
+        self.assertEqual(finalized, list(numbers))
+
+    def test_all_segment_budget_exhaustion_fails_closed_instead_of_skipping_tail(self) -> None:
+        numbers = tuple(range(1, 151))
+        snapshot = self.snapshot(numbers)
+        manifest = json.dumps([[number, 10_000 + number] for number in numbers], separators=(",", ":"))
+        environment = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[1]",
+            "GOVERNANCE_CHECK_MANIFEST": manifest,
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_CONTINUATION_INDEX": "1",
+        }
+        exhausted = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "failure", "bad", None, None, None, "c" * 64)
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", return_value=exhausted) as process, \
+             patch.object(WRITER, "finalize_decision", return_value=True) as finalize:
+            self.assertEqual(WRITER.main(), 1)
+        self.assertEqual(process.call_count, 76)
+        self.assertEqual(finalize.call_count, 75)
+
+    def test_all_segment_fails_closed_when_a_manifested_terminal_is_not_published(self) -> None:
+        numbers = tuple(range(1, 151))
+        snapshot = self.snapshot(numbers)
+        manifest = json.dumps([[number, 10_000 + number] for number in numbers], separators=(",", ":"))
+        environment = {
+            "GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[1]",
+            "GOVERNANCE_CHECK_MANIFEST": manifest,
+            "GOVERNANCE_TERMINAL_ORDER_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_TERMINAL_BATCH_NUMBERS": json.dumps(list(numbers), separators=(",", ":")),
+            "GOVERNANCE_CONTINUATION_INDEX": "1",
+        }
+        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (1,), "failure", "bad", None, None, None, "c" * 64)
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", return_value=decision) as process, \
+             patch.object(WRITER, "finalize_decision", return_value=False) as finalize:
+            self.assertEqual(WRITER.main(), 1)
+        self.assertEqual(process.call_count, 1)
+        finalize.assert_called_once()
+
+    def test_all_open_event_priority_leads_the_local_terminal_queue(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 201)))
         finalized: list[int] = []
 
@@ -618,7 +1448,7 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "process", side_effect=decision) as process, \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "finalize_decision", side_effect=finalize):
-            self.assertEqual(WRITER.main(), 0)
+            self.assertEqual(WRITER.main(), 1)
         self.assertEqual(process.call_args_list[0].args[0], 150)
         self.assertEqual(process.call_args_list[1].args[0], 149)
         self.assertEqual(finalized[:2], [150, 149])
@@ -628,9 +1458,7 @@ class StatusWriterUnitTest(unittest.TestCase):
     def test_carry_precedes_fresh_targets_and_converges_with_any_dispatcher_gaps(self) -> None:
         numbers = tuple(range(1, 451))
         remaining = frozenset(numbers)
-        # Each writer can safely terminalize only 50 event targets when every
-        # target needs a POST+PATCH.  A new dispatcher may have arbitrary
-        # skipped IDs, but carry is recorded on every unprocessed head.
+        # carryがあるheadは、後続dispatcherでも新規headより先に並ぶ。
         for _dispatcher_id in (7, 8, 91, 1042, 1043, 99999, 100003, 100004, 900000):
             ordered = WRITER.governance_order(self.snapshot(numbers), remaining)
             self.assertEqual(ordered[:len(remaining)], tuple(sorted(remaining)))
@@ -648,7 +1476,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(ordered[:5], (204, 205, 201, 202, 203))
         self.assertEqual(set(ordered[5:]), set(drafts))
 
-    def test_300_ready_pr_main_stays_within_split_token_transport_budgets(self) -> None:
+    def test_300_ready_pr_fails_closed_when_terminal_reservation_is_exhausted(self) -> None:
         numbers = tuple(range(1, 301))
         snapshot = WRITER.OpenSnapshot(numbers, {"64": frozenset(numbers)}, tuple({"number": number, "isDraft": False, "body": "Fixes #64"} for number in numbers))
         evidence = WRITER.EvidenceSnapshot({}, {}, {})
@@ -666,7 +1494,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             self.assertEqual(environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
             self.assertEqual(command[0], sys.executable)
             if command[1].endswith("verify_push_issue.py"):
-                transport["app_rest"] += 3  # PR range, changed paths, referenced Issue.
+                transport["app_rest"] += 2  # pinned range and referenced Issue.
             elif command[1].endswith("verify_pr_ready.py"):
                 transport["app_rest"] += 3  # PR, comments/reactions and cached closer inputs.
                 transport["graphql"] += 2  # review threads and reviews.
@@ -684,40 +1512,351 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "rebind_trusted_default_writer"), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=evidence) as final_evidence, \
              patch.dict(os.environ, {"GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read", "CHECK_WRITE_TOKEN": "check-write", "KRR_GOVERNANCE_CHECK_APP_ID": "42", "GOVERNANCE_DISPATCHER_RUN_ID": "88"}):
-            self.assertEqual(WRITER.main(), 0)
+            self.assertEqual(WRITER.main(), 1)
         # The dispatcher owns event invalidation.  The writer emits one
         # terminal status per PR, never a duplicate pending status.
         self.assertEqual(post.call_count, 200)
         self.assertEqual(final_evidence.call_count, 200)
         self.assertEqual(check_run_fence.call_count, 200)
-        self.assertEqual(baseline.call_count, 300)
-        # The real writer API calls are bounded separately: final source
-        # pulls/status fences use DEFAULT_READ_TOKEN, while verifier evidence
-        # uses the App read token; GraphQL has its own point budget.
-        # Conservative real-transport accounting.  The App installation token
-        # carries verifier/evidence traffic; only terminal source/fence reads
-        # use github.token.  Keeping the boundaries separate is essential:
-        # the latter has the lower Actions rate ceiling.
-        transport["app_rest"] += 2408
-        transport["default_rest"] += 906
+        self.assertEqual(baseline.call_count, 201)
+        # terminalの実経路はsingle final evidence、check fence、closer、
+        # writer/dispatcher/write fenceの合計9 App read/成功headである。
+        observed_terminal_app_reads = 9 * post.call_count
+        self.assertEqual(observed_terminal_app_reads, 1_800)
+        max_terminal_app_reads = 9 * 400
+        self.assertLessEqual(observed_terminal_app_reads, max_terminal_app_reads)
+        self.assertLess(max_terminal_app_reads, 4_500)
+        # Keep the small fixed dispatcher/bootstrap metadata allowance and
+        # reserve the complete 400-success-terminal worst case. The only
+        # default-token operation is the one-time trusted source binding.
+        transport["app_rest"] += 100 + observed_terminal_app_reads
+        transport["default_rest"] += 1
         transport["graphql"] += 1200
         self.assertLess(transport["app_rest"], 4500)
         self.assertLess(transport["default_rest"], 950)
         self.assertLess(transport["graphql"], 2500)
 
-    def test_initial_pr_read_uses_app_token_but_final_closer_uses_default_token(self) -> None:
+    def test_terminal_dispatcher_fence_uses_app_read_transport_fails_closed_and_recovers(self) -> None:
+        """Fence reads must not spend the lower-rate default workflow token."""
+        head = "a" * 40
+        current = self.dispatcher_run(88, status="completed", conclusion="success")
+        newer_failed = self.dispatcher_run(
+            7, status="completed", conclusion="failure", created_at="2026-08-30T00:01:00Z",
+        )
+        recovered = self.dispatcher_run(
+            7, status="completed", conclusion="success", created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+            "GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read",
+        }
+
+        def exercise(mode: str) -> list[dict[str, str]]:
+            seen: list[dict[str, str]] = []
+            def run(arguments, **kwargs):
+                command = arguments
+                request_environment = kwargs.get("env")
+                self.assertEqual(request_environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+                seen.append(request_environment)
+                endpoint = command[-1]
+                if endpoint.endswith("/actions/runs/88"):
+                    if mode == "source-http-400":
+                        return subprocess.CompletedProcess(command, 1, "", "sensitive upstream body")
+                    if mode == "source-invalid-json":
+                        return subprocess.CompletedProcess(command, 0, "{", "")
+                    return subprocess.CompletedProcess(command, 0, json.dumps(current), "")
+                if "actions/workflows/66/runs?" in endpoint:
+                    if mode == "page-http-400":
+                        return subprocess.CompletedProcess(command, 1, "", "sensitive upstream body")
+                    if mode == "page-invalid-json":
+                        return subprocess.CompletedProcess(command, 0, "{", "")
+                    if mode == "page-cap":
+                        return subprocess.CompletedProcess(command, 0, json.dumps(self.dispatcher_page(current, total_count=100)), "")
+                    return subprocess.CompletedProcess(command, 0, json.dumps(self.dispatcher_page(current)), "")
+                self.fail(f"unexpected dispatcher fence transport: {command}")
+
+            with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER.subprocess, "run", side_effect=run):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.reject_newer_dispatcher_barrier(head)
+            return seen
+
+        for mode in ("source-http-400", "source-invalid-json", "page-http-400", "page-invalid-json", "page-cap"):
+            with self.subTest(mode=mode):
+                self.assertGreaterEqual(len(exercise(mode)), 1)
+
+        phase = {"source": current, "page": self.dispatcher_page(current, newer_failed)}
+        seen: list[dict[str, str]] = []
+        def recover_transport(arguments, **kwargs):
+            request_environment = kwargs.get("env")
+            self.assertEqual(request_environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+            seen.append(request_environment)
+            endpoint = arguments[-1]
+            if endpoint.endswith("/actions/runs/88") or endpoint.endswith("/actions/runs/7"):
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(phase["source"]), "")
+            if "actions/workflows/66/runs?" in endpoint:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(phase["page"]), "")
+            self.fail(f"unexpected dispatcher fence transport: {arguments}")
+
+        with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER.subprocess, "run", side_effect=recover_transport):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+            phase["source"] = recovered
+            phase["page"] = self.dispatcher_page(recovered)
+            os.environ["GOVERNANCE_DISPATCHER_RUN_ID"] = "7"
+            WRITER.reject_newer_dispatcher_barrier(head)
+        self.assertEqual(len(seen), 4)
+
+    def test_400_distinct_terminal_failures_finalize_with_only_app_reads(self) -> None:
+        """Exercise the real finalize/read fence path; fake only HTTP transport."""
+        numbers = tuple(range(1, 401))
+        checks: dict[str, dict[str, object]] = {}
+        for number in numbers:
+            head = f"{number:040x}"[-40:]
+            checks[head] = {
+                "id": number, "name": WRITER.CHECK_NAME, "head_sha": head,
+                "external_id": f"krr-governance/v1/{head}/dispatcher-88", "updated_at": "initial",
+                "app": {"id": 42}, "status": "in_progress", "conclusion": None,
+                "details_url": "https://github.com/owner/repository/actions/runs/88",
+            }
+        dispatcher = self.dispatcher_run(88, status="completed", conclusion="success")
+        writer = {
+            "id": 99, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": "d" * 40,
+            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+        }
+        app_reads = 0
+        terminal_read_tokens: set[str] = set()
+        write_calls = 0
+
+        def run(arguments, **kwargs):
+            nonlocal app_reads, write_calls
+            command = arguments
+            api_arguments = command[2:]
+            endpoint = next((item for item in api_arguments if isinstance(item, str) and item.startswith("repos/")), None)
+            self.assertIsNotNone(endpoint)
+            assert endpoint is not None
+            environment = kwargs.get("env")
+            if "--method" in api_arguments:
+                self.assertEqual(environment, {"GH_TOKEN": "check-write", "PATH": os.environ["PATH"]})
+                self.assertIn("PATCH", api_arguments)
+                identifier = int(endpoint.rsplit("/", 1)[1])
+                current = next(value for value in checks.values() if value["id"] == identifier)
+                details = next(item.split("=", 1)[1] for item in api_arguments if item.startswith("details_url="))
+                current.update({"updated_at": f"terminal-{identifier}", "status": "completed", "conclusion": "failure", "details_url": details})
+                write_calls += 1
+                return subprocess.CompletedProcess(command, 0, json.dumps(current), "")
+            self.assertEqual(environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+            terminal_read_tokens.add(environment["GH_TOKEN"])
+            app_reads += 1
+            if endpoint == "repos/owner/repository":
+                payload: object = {"default_branch": "master"}
+            elif endpoint == "repos/owner/repository/git/ref/heads/master":
+                payload = {"object": {"sha": "d" * 40}}
+            elif endpoint == "repos/owner/repository/actions/runs/99":
+                payload = writer
+            elif endpoint == "repos/owner/repository/actions/runs/88":
+                payload = dispatcher
+            elif endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
+                payload = self.dispatcher_page(dispatcher)
+            elif endpoint.startswith("repos/owner/repository/check-runs/"):
+                identifier = int(endpoint.rsplit("/", 1)[1])
+                payload = next(value for value in checks.values() if value["id"] == identifier)
+            elif endpoint.startswith("repos/owner/repository/commits/") and "/check-runs?" in endpoint:
+                head = endpoint.split("/commits/", 1)[1].split("/check-runs?", 1)[0]
+                payload = [{"check_runs": [checks[head]]}]
+            else:
+                self.fail(f"unexpected terminal transport: {command}")
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_SCOPE": "all", "GOVERNANCE_DISPATCHER_RUN_ID": "88",
+            "GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read", "CHECK_WRITE_TOKEN": "check-write",
+            "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER.subprocess, "run", side_effect=run):
+            for number in numbers:
+                head = f"{number:040x}"[-40:]
+                baseline = WRITER.check_fingerprint(checks[head])
+                decision = WRITER.PendingDecision(
+                    number, head, "b" * 40, baseline, "failure", "fixture", None, None, None, "c" * 64,
+                )
+                self.assertTrue(WRITER.finalize_decision(decision, {}, WRITER.EvidenceSnapshot({}, {}, {})))
+        self.assertEqual(write_calls, 400)
+        self.assertEqual(terminal_read_tokens, {"app-read"})
+        # check-changed, rebind(repo/ref), governance/write baseline,
+        # writer-active, dispatcher(source/index), and final Check Run reread.
+        self.assertEqual(app_reads, 3_600)
+        self.assertLess(app_reads, 4_500)
+        # success時は終端直前のcloser readだけを各headに追加する。
+        # 先行snapshot/evidenceの固定100 readを含めても上限未満である。
+        success_worst_case_reads = app_reads + len(numbers) + 100
+        self.assertEqual(success_worst_case_reads, 4_100)
+        self.assertLess(success_worst_case_reads, 4_500)
+
+    def test_event_sourced_terminal_success_segments_include_final_evidence_with_only_app_reads(self) -> None:
+        """Run the success terminal fence without replacing any read helper."""
+        numbers = tuple(range(1, 401))
+        default_head = "d" * 40
+        checks: dict[str, dict[str, object]] = {}
+        pulls: dict[int, dict[str, object]] = {}
+        run_pages: dict[str, dict[str, object]] = {}
+        expected_generations: dict[str, tuple[WRITER.Generation, WRITER.Generation]] = {}
+        for number in numbers:
+            head = f"{number:040x}"[-40:]
+            checks[head] = {
+                "id": number, "name": WRITER.CHECK_NAME, "head_sha": head,
+                "external_id": f"krr-governance/v1/{head}/dispatcher-88", "updated_at": "initial",
+                "app": {"id": 42}, "status": "in_progress", "conclusion": None,
+                "details_url": "https://github.com/owner/repository/actions/runs/88",
+            }
+            pull_request = {
+                "number": number, "state": "open", "draft": False, "body": "Fixes #64",
+                "base": {"sha": default_head, "ref": "master", "repo": {"full_name": "owner/repository", "default_branch": "master"}},
+                "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+            }
+            pulls[number] = pull_request
+            common = {
+                "run_number": number, "run_attempt": 1, "event": "pull_request", "head_sha": head,
+                "status": "completed", "conclusion": "success", "repository": {"full_name": "owner/repository"},
+                "pull_requests": [{"number": number, "base": pull_request["base"], "head": pull_request["head"]}],
+            }
+            sensor_run = {
+                **common, "id": 1_000 + number, "name": "PR governance review sensor",
+                "path": ".github/workflows/pr-governance-review-events.yml@master",
+            }
+            ci_run = {
+                **common, "id": 2_000 + number, "name": "CI", "workflow_id": 44,
+                "path": ".github/workflows/test-and-build.yml@master",
+            }
+            release_run = {
+                **common, "id": 3_000 + number, "name": "release-preflight", "workflow_id": 45,
+                "path": ".github/workflows/release-preflight.yml@master",
+            }
+            run_pages[head] = {"total_count": 3, "workflow_runs": [sensor_run, ci_run, release_run]}
+            expected_generations[head] = (
+                WRITER.Generation("CI", ".github/workflows/test-and-build.yml", 44, 2_000 + number, number, 1, "completed", "success"),
+                WRITER.Generation("release-preflight", ".github/workflows/release-preflight.yml", 45, 3_000 + number, number, 1, "completed", "success"),
+            )
+        dispatcher = self.dispatcher_run(88, status="completed", conclusion="success")
+        writer = {
+            "id": 99, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": default_head,
+            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+        }
+        app_reads = 0
+        read_tokens: set[str] = set()
+        write_calls = 0
+
+        def run(arguments, **kwargs):
+            nonlocal app_reads, write_calls
+            command = arguments
+            api_arguments = command[2:]
+            endpoint = next((item for item in api_arguments if isinstance(item, str) and item.startswith("repos/")), None)
+            self.assertIsNotNone(endpoint)
+            assert endpoint is not None
+            environment = kwargs.get("env")
+            if "--method" in api_arguments:
+                self.assertEqual(environment, {"GH_TOKEN": "check-write", "PATH": os.environ["PATH"]})
+                self.assertIn("PATCH", api_arguments)
+                identifier = int(endpoint.rsplit("/", 1)[1])
+                current = next(value for value in checks.values() if value["id"] == identifier)
+                details = next(item.split("=", 1)[1] for item in api_arguments if item.startswith("details_url="))
+                current.update({"updated_at": f"terminal-{identifier}", "status": "completed", "conclusion": "success", "details_url": details})
+                write_calls += 1
+                return subprocess.CompletedProcess(command, 0, json.dumps(current), "")
+            self.assertEqual(environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+            read_tokens.add(environment["GH_TOKEN"])
+            app_reads += 1
+            if endpoint == "repos/owner/repository":
+                payload: object = {"default_branch": "master"}
+            elif endpoint == "repos/owner/repository/git/ref/heads/master":
+                payload = {"object": {"sha": default_head}}
+            elif endpoint == "repos/owner/repository/actions/runs/99":
+                payload = writer
+            elif endpoint == "repos/owner/repository/actions/runs/88":
+                payload = dispatcher
+            elif endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
+                payload = self.dispatcher_page(dispatcher)
+            elif endpoint.startswith("repos/owner/repository/actions/runs?head_sha="):
+                head = endpoint.split("head_sha=", 1)[1].split("&", 1)[0]
+                payload = run_pages[head]
+            elif endpoint.startswith("repos/owner/repository/pulls/"):
+                payload = pulls[int(endpoint.rsplit("/", 1)[1])]
+            elif endpoint.startswith("repos/owner/repository/check-runs/"):
+                identifier = int(endpoint.rsplit("/", 1)[1])
+                payload = next(value for value in checks.values() if value["id"] == identifier)
+            elif endpoint.startswith("repos/owner/repository/commits/") and "/check-runs?" in endpoint:
+                head = endpoint.split("/commits/", 1)[1].split("/check-runs?", 1)[0]
+                payload = [{"check_runs": [checks[head]]}]
+            else:
+                self.fail(f"unexpected success terminal transport: {command}")
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": default_head, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_SCOPE": "all", "GOVERNANCE_DISPATCHER_RUN_ID": "88",
+            "GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read", "CHECK_WRITE_TOKEN": "check-write",
+            "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        initial = WRITER.EvidenceSnapshot({}, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45}, {})
+        segment_reads: list[int] = []
+        segment_writes: list[int] = []
+        with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER.subprocess, "run", side_effect=run):
+            WRITER._bound_check_runs.clear()
+            for start in range(0, len(numbers), 150):
+                before_reads = app_reads
+                before_writes = write_calls
+                for number in numbers[start:start + 150]:
+                    head = f"{number:040x}"[-40:]
+                    evidence = WRITER.final_evidence_for_pr(head, initial)
+                    baseline = WRITER.check_fingerprint(checks[head])
+                    decision = WRITER.PendingDecision(
+                        number, head, default_head, baseline, "success", "fixture", 1_000 + number,
+                        expected_generations[head], "64", WRITER.pr_body_sha256("Fixes #64"),
+                    )
+                    self.assertTrue(WRITER.finalize_decision(decision, {"64": frozenset({number})}, evidence))
+                segment_reads.append(app_reads - before_reads)
+                segment_writes.append(write_calls - before_writes)
+        self.assertEqual(write_calls, 400)
+        self.assertEqual(read_tokens, {"app-read"})
+        # final evidence, check fence, closer, and write fence(6)。
+        # successは終端直前にdefault repo/refを各headで再確認するため、
+        # 2 read/headのrebindを明示的に含む。
+        self.assertEqual(app_reads, 4_400)
+        self.assertLess(app_reads, 4_500)
+        self.assertEqual(segment_reads, [1_650, 1_650, 1_100])
+        self.assertLessEqual(max(segment_reads), 1_650)
+        self.assertEqual(segment_writes, [150, 150, 100])
+        # full snapshot/manifest rereadを100 REST、verifierを5 REST/headと
+        # 保守的に加算しても、installation共有limitのrolling window内に収まる。
+        segment_seconds = 150 * WRITER.ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS
+        segment_rest_and_writes = 600 + 200 + (6 * 150) + 1_650 + 150
+        self.assertEqual(segment_seconds, 3_225)
+        self.assertLess(segment_seconds, 3_600)
+        self.assertLessEqual(segment_rest_and_writes, 4_500)
+        self.assertLessEqual(segment_rest_and_writes * 4, 4_500 * 4)
+        self.assertLess(4 * segment_seconds, 6 * 3_600)
+
+    def test_initial_and_final_closer_reads_use_the_app_token(self) -> None:
         current = self.pull(72)
+        current["base"]["repo"]["default_branch"] = "master"  # type: ignore[index]
         calls: list[bool] = []
         def api(_endpoint: str, *, default_token: bool = False):
             calls.append(default_token)
             return current
-        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), patch.object(WRITER, "api_json", side_effect=api):
+        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "b" * 40}), patch.object(WRITER, "api_json", side_effect=api):
             self.assertEqual(WRITER.pull(72)["number"], 72)
             self.assertTrue(WRITER.final_closer_is_unique(
                 72, "64", "b" * 40, "a" * 40, WRITER.pr_body_sha256("Fixes #64"),
                 {"64": frozenset({72})},
             ))
-        self.assertEqual(calls, [False, True])
+        self.assertEqual(calls, [False, False])
 
     def test_check_baseline_uses_the_app_read_path_before_default_fence(self) -> None:
         value = {"id": 12, "name": WRITER.CHECK_NAME, "head_sha": "a" * 40, "external_id": WRITER.check_external_id("a" * 40), "updated_at": "now", "app": {"id": 42}}
@@ -737,24 +1876,60 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(len(calls), 5)
         self.assertEqual(evidence.workflow_ids, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45})
 
-    def test_final_evidence_is_bounded_to_three_head_specific_requests(self) -> None:
+    def test_final_evidence_uses_one_complete_head_specific_repository_page(self) -> None:
         calls: list[str] = []
-        def pages(endpoint: str):
+        def api(endpoint: str, *, default_token: bool = False):
+            self.assertFalse(default_token)
             calls.append(endpoint)
-            return [{"workflow_runs": []}]
+            return {"total_count": 0, "workflow_runs": []}
         initial = WRITER.EvidenceSnapshot({}, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45}, {})
-        with self.identity(), patch.object(WRITER, "object_pages", side_effect=pages):
+        with self.identity(), patch.object(WRITER, "api_json", side_effect=api):
             WRITER.final_evidence_for_pr("a" * 40, initial)
-        self.assertEqual(len(calls), 3)
-        self.assertTrue(all("head_sha=" + "a" * 40 in endpoint for endpoint in calls))
+        self.assertEqual(calls, ["repos/owner/repository/actions/runs?head_sha=" + "a" * 40 + "&per_page=100"])
 
-    def test_final_evidence_keeps_a_run_beyond_the_first_100_head_matches(self) -> None:
-        older = [{"id": number, "event": "pull_request"} for number in range(1, 101)]
-        newer = {"id": 101, "event": "pull_request"}
+    def test_final_evidence_rejects_a_full_or_incomplete_head_page(self) -> None:
+        older = [{"id": number, "head_sha": "a" * 40} for number in range(1, 101)]
         initial = WRITER.EvidenceSnapshot({}, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45}, {})
-        with self.identity(), patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": older}, {"workflow_runs": [newer]}]):
+        for page in (
+            {"total_count": 100, "workflow_runs": older},
+            {"total_count": 98, "workflow_runs": older[:99]},
+            {"total_count": 1, "workflow_runs": [{"id": 1, "head_sha": "b" * 40}]},
+        ):
+            with self.subTest(page=page), self.identity(), patch.object(WRITER, "api_json", return_value=page):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.final_evidence_for_pr("a" * 40, initial)
+
+    def test_final_evidence_partitions_only_trusted_sensor_and_ci_workflows(self) -> None:
+        sensor = self.generation(700)
+        sensor.update({"name": "PR governance review sensor", "path": ".github/workflows/pr-governance-review-events.yml@master", "workflow_id": 43})
+        ci = self.generation(900)
+        release = self.generation(901)
+        release.update({"name": "release-preflight", "path": ".github/workflows/release-preflight.yml@master", "workflow_id": 45})
+        unrelated = {"id": 999, "head_sha": "a" * 40, "workflow_id": 999, "event": "push", "path": ".github/workflows/unrelated.yml@master"}
+        initial = WRITER.EvidenceSnapshot({}, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45}, {})
+        page = {"total_count": 4, "workflow_runs": [sensor, ci, release, unrelated]}
+        with self.identity(), patch.object(WRITER, "api_json", return_value=page):
             evidence = WRITER.final_evidence_for_pr("a" * 40, initial)
-        self.assertIn(newer, evidence.workflow_runs[".github/workflows/test-and-build.yml"])
+        self.assertEqual(evidence.sensor_runs["pull_request"], (sensor,))
+        self.assertEqual(evidence.workflow_runs[".github/workflows/test-and-build.yml"], (ci,))
+        self.assertEqual(evidence.workflow_runs[".github/workflows/release-preflight.yml"], (release,))
+
+    def test_final_closer_requires_current_default_branch_and_same_repository(self) -> None:
+        current = self.pull(72)
+        current["base"]["sha"] = "d" * 40  # type: ignore[index]
+        current["base"]["repo"]["default_branch"] = "master"  # type: ignore[index]
+        digest = WRITER.pr_body_sha256("Fixes #64")
+        changes = (
+            ("base ref", lambda value: value["base"].update({"ref": "release"})),
+            ("default branch", lambda value: value["base"]["repo"].update({"default_branch": "release"})),
+            ("base head", lambda value: value["base"].update({"sha": "e" * 40})),
+            ("head repository", lambda value: value["head"].update({"repo": {"full_name": "fork/repository"}})),
+        )
+        for label, mutate in changes:
+            changed = json.loads(json.dumps(current))
+            mutate(changed)
+            with self.subTest(label=label), self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40}), patch.object(WRITER, "pull", return_value=changed):
+                self.assertFalse(WRITER.final_closer_is_unique(72, "64", "d" * 40, "a" * 40, digest, {"64": frozenset({72})}))
 
     def test_final_head_pages_choose_the_101st_rerun_and_sensor(self) -> None:
         older_ci = self.generation(900, 1)
@@ -1017,14 +2192,140 @@ class StatusWriterUnitTest(unittest.TestCase):
             72, "a" * 40, "b" * 40, (101,), "success", "ok", 77, generations, "64",
             WRITER.pr_body_sha256("Fixes #64"),
         )
-        with self.identity(), patch.object(WRITER, "final_closer_is_unique", side_effect=[True, False]), \
+        with self.identity(), patch.object(WRITER, "final_closer_is_unique", return_value=False) as closer, \
              patch.object(WRITER, "sensor", return_value=77), \
              patch.object(WRITER, "generation", side_effect=generations), \
              patch.object(WRITER, "check_fence", return_value=(False, 0, False)), \
              patch.object(WRITER, "rebind_trusted_default_writer"), \
-             patch.object(WRITER, "write_governance_check", return_value=(102,)) as post:
+            patch.object(WRITER, "write_governance_check", return_value=(102,)) as post:
             self.assertTrue(WRITER.finalize_decision(decision, {"64": frozenset({72})}, WRITER.EvidenceSnapshot({}, {}, {})))
         self.assertEqual(post.call_args.args[1], "failure")
+        closer.assert_called_once()
+
+    def test_finalize_success_rebinds_default_ref_after_late_closer_before_terminal_patch(self) -> None:
+        """A default-ref advance after the closer fence must suppress success PATCH."""
+        default_head = "d" * 40
+        advanced_head = "e" * 40
+        head = "a" * 40
+        base = {
+            "sha": default_head, "ref": "master",
+            "repo": {"full_name": "owner/repository", "default_branch": "master"},
+        }
+        pull_request = {
+            "number": 72, "state": "open", "draft": False, "body": "Fixes #64",
+            "base": base, "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+        }
+        common_run = {
+            "run_number": 8, "run_attempt": 1, "event": "pull_request", "head_sha": head,
+            "status": "completed", "conclusion": "success", "repository": {"full_name": "owner/repository"},
+            "pull_requests": [{"number": 72, "base": base, "head": pull_request["head"]}],
+        }
+        sensor_run = {
+            **common_run, "id": 77, "name": "PR governance review sensor",
+            "path": ".github/workflows/pr-governance-review-events.yml@master",
+        }
+        ci_run = {
+            **common_run, "id": 900, "name": "CI", "workflow_id": 44,
+            "path": ".github/workflows/test-and-build.yml@master",
+        }
+        release_run = {
+            **common_run, "id": 901, "name": "release-preflight", "workflow_id": 45,
+            "path": ".github/workflows/release-preflight.yml@master",
+        }
+        evidence = WRITER.EvidenceSnapshot(
+            {"pull_request": (sensor_run,), "pull_request_review": (), "pull_request_review_comment": ()},
+            {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45},
+            {".github/workflows/test-and-build.yml": (ci_run,), ".github/workflows/release-preflight.yml": (release_run,)},
+        )
+        generations = (
+            WRITER.Generation("CI", ".github/workflows/test-and-build.yml", 44, 900, 8, 1, "completed", "success"),
+            WRITER.Generation("release-preflight", ".github/workflows/release-preflight.yml", 45, 901, 8, 1, "completed", "success"),
+        )
+        check = {
+            "id": 101, "name": WRITER.CHECK_NAME, "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/dispatcher-88", "updated_at": "initial",
+            "app": {"id": 42}, "status": "in_progress", "conclusion": None,
+            "details_url": "https://github.com/owner/repository/actions/runs/88",
+        }
+        decision = WRITER.PendingDecision(
+            72, head, default_head, (
+                101, "initial", "in_progress", None,
+                "https://github.com/owner/repository/actions/runs/88", f"krr-governance/v1/{head}/dispatcher-88",
+            ), "success", "fixture", 77,
+            generations, "64", WRITER.pr_body_sha256("Fixes #64"),
+        )
+        dispatcher = self.dispatcher_run(88, status="completed", conclusion="success")
+        writer = {
+            "id": 99, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": default_head,
+            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+        }
+        calls: list[str] = []
+        terminal_patches: list[list[str]] = []
+
+        def run(arguments, **kwargs):
+            api_arguments = arguments[2:]
+            endpoint = next(
+                (item for item in api_arguments if isinstance(item, str) and item.startswith("repos/")), None
+            )
+            self.assertIsNotNone(endpoint)
+            assert endpoint is not None
+            environment = kwargs.get("env")
+            if "--method" in api_arguments:
+                self.assertEqual(environment, {"GH_TOKEN": "check-write", "PATH": os.environ["PATH"]})
+                self.assertEqual(api_arguments[api_arguments.index("--method") + 1], "PATCH")
+                self.assertEqual(endpoint, "repos/owner/repository/check-runs/101")
+                terminal_patches.append(api_arguments)
+                details = next(item.split("=", 1)[1] for item in api_arguments if item.startswith("details_url="))
+                check.update({"updated_at": "terminal", "status": "completed", "conclusion": "success", "details_url": details})
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(check), "")
+            self.assertEqual(environment, {"GH_TOKEN": "app-read", "PATH": os.environ["PATH"]})
+            if endpoint == "repos/owner/repository/pulls/72":
+                calls.append("closer")
+                payload: object = pull_request
+            elif endpoint == "repos/owner/repository":
+                calls.append("default-branch")
+                payload = {"default_branch": "master"}
+            elif endpoint == "repos/owner/repository/git/ref/heads/master":
+                calls.append("default-ref")
+                payload = {"object": {"sha": advanced_head}}
+            elif endpoint == "repos/owner/repository/actions/runs/99":
+                calls.append("writer")
+                payload = writer
+            elif endpoint == "repos/owner/repository/actions/runs/88":
+                calls.append("dispatcher")
+                payload = dispatcher
+            elif endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
+                calls.append("dispatcher-page")
+                payload = self.dispatcher_page(dispatcher)
+            elif endpoint.startswith("repos/owner/repository/check-runs/"):
+                calls.append("check-by-id")
+                payload = check
+            elif endpoint.startswith("repos/owner/repository/commits/") and "/check-runs?" in endpoint:
+                calls.append("check-page")
+                payload = [{"check_runs": [check]}]
+            else:
+                self.fail(f"unexpected late-closer race transport: {arguments}")
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": default_head, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_SCOPE": "all", "GOVERNANCE_DISPATCHER_RUN_ID": "88",
+            "GH_TOKEN": "app-read", "DEFAULT_READ_TOKEN": "default-read", "CHECK_WRITE_TOKEN": "check-write",
+            "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        WRITER._bound_check_runs.clear()
+        self.addCleanup(WRITER._bound_check_runs.clear)
+        failed_closed = False
+        with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER, "pace_check_write"), \
+             patch.object(WRITER.subprocess, "run", side_effect=run):
+            try:
+                WRITER.finalize_decision(decision, {"64": frozenset({72})}, evidence)
+            except WRITER.GovernanceError:
+                failed_closed = True
+        self.assertEqual((failed_closed, terminal_patches), (True, []))
+        self.assertLess(calls.index("closer"), calls.index("default-ref"))
 
     def test_deferred_draft_reuses_the_dispatcher_pending_check_without_a_write(self) -> None:
         current = self.pull(72, draft=True)
@@ -1091,7 +2392,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 )
         command.assert_not_called()
 
-    def test_schedule_reserves_two_writes_for_each_missing_terminal_check(self) -> None:
+    def test_missing_terminal_checks_fail_closed_when_the_reservation_is_exhausted(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "success", "ok", 77, (), "64", "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "spoofed"}), \
@@ -1102,10 +2403,10 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "finalize_decision", return_value=True) as finalize:
-            self.assertEqual(WRITER.main(), 0)
+            self.assertEqual(WRITER.main(), 1)
         self.assertEqual(finalize.call_count, 200)
 
-    def test_event_writer_reserves_300_dispatcher_writes_and_ignores_count_spoofing(self) -> None:
+    def test_local_event_writer_fails_closed_after_its_terminal_reservation(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (102, "pending"), "success", "ok", 77, (), "64", "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "not-a-number"}), \
@@ -1116,7 +2417,7 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "finalize_decision", return_value=True) as finalize:
-            self.assertEqual(WRITER.main(), 0)
+            self.assertEqual(WRITER.main(), 1)
         self.assertEqual(finalize.call_count, 100)
 
     def test_exceptional_terminal_decisions_cannot_exceed_their_reserved_write_budget(self) -> None:
@@ -1135,7 +2436,7 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_production_first_check_write_waits_before_timestamping(self) -> None:
         WRITER._last_check_write_at = None
-        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "early"}), \
              patch.object(WRITER.time, "monotonic", return_value=108.1) as monotonic, \
              patch.object(WRITER.time, "sleep") as sleep:
             WRITER.pace_check_write()
@@ -1145,13 +2446,21 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_production_check_writes_are_monotonically_paced(self) -> None:
         WRITER._last_check_write_at = 100.0
-        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "early"}), \
              patch.object(WRITER.time, "monotonic", side_effect=[100.0, 108.1, 108.1, 116.2]), \
              patch.object(WRITER.time, "sleep") as sleep:
             WRITER.pace_check_write()
             WRITER.pace_check_write()
         self.assertEqual(sleep.call_args_list, [unittest.mock.call(8.1)] * 2)
         self.assertEqual(WRITER._last_check_write_at, 116.2)
+
+    def test_production_all_segment_check_writes_use_the_shared_installation_interval(self) -> None:
+        WRITER._last_check_write_at = None
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all"}), \
+             patch.object(WRITER.time, "monotonic", return_value=116.2), \
+             patch.object(WRITER.time, "sleep") as sleep:
+            WRITER.pace_check_write()
+        sleep.assert_called_once_with(21.5)
 
 
 if __name__ == "__main__":

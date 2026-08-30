@@ -1014,23 +1014,89 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
 
         closer_calls = [node for node in calls if named_call(node, "final_closer_is_unique")]
-        self.assertGreaterEqual(len(closer_calls), 2)
-        self.assertTrue(any(
-            len(node.args) == 6
-            and all(decision_attribute(argument, attribute) for argument, attribute in zip(
-                node.args[:5], ("number", "issue", "base", "head", "body_sha256"), strict=True,
-            ))
-            and isinstance(node.args[5], ast.Name) and node.args[5].id == "claimants"
-            for node in closer_calls
+        # The final shared evidence/sensor/CI fence is complete before this
+        # one closer reread. Duplicate earlier checks would only widen the
+        # stale-evidence window.
+        self.assertEqual(len(closer_calls), 1)
+        closer = closer_calls[0]
+        self.assertEqual(len(closer.args), 6)
+        self.assertTrue(all(
+            decision_attribute(argument, attribute) for argument, attribute in zip(
+                closer.args[:5], ("number", "issue", "base", "head", "body_sha256"), strict=True,
+            )
         ))
+        self.assertIsInstance(closer.args[5], ast.Name)
+        assert isinstance(closer.args[5], ast.Name)
+        self.assertEqual(closer.args[5].id, "claimants")
         fence_lines = [node.lineno for node in calls if named_call(node, "check_fence")]
-        write_lines = [node.lineno for node in calls if named_call(node, "write_governance_check")]
-        self.assertTrue(fence_lines)
-        self.assertTrue(write_lines)
+        self.assertEqual(len(fence_lines), 1)
+        self.assertLess(fence_lines[0], closer.lineno)
+
+        parents = {
+            child: parent
+            for parent in ast.walk(finalize)
+            for child in ast.iter_child_nodes(parent)
+        }
+        def nearest_parent(node: ast.AST, kind: type[ast.AST]) -> ast.AST | None:
+            current = parents.get(node)
+            while current is not None:
+                if isinstance(current, kind):
+                    return current
+                current = parents.get(current)
+            return None
+        success_guard = next(
+            (
+                parent for parent in ast.walk(finalize)
+                if isinstance(parent, ast.If)
+                and isinstance(parent.test, ast.BoolOp)
+                and any(node is closer for node in ast.walk(parent.test))
+            ),
+            None,
+        )
+        self.assertIsNotNone(success_guard)
+        assert isinstance(success_guard, ast.If)
         self.assertTrue(any(
-            fence_line < closer.lineno < write_line
-            for fence_line in fence_lines for closer in closer_calls for write_line in write_lines
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name) and node.left.id == "state"
+            and len(node.ops) == len(node.comparators) == 1
+            and isinstance(node.ops[0], ast.Eq)
+            and isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value == "success"
+            for node in ast.walk(success_guard.test)
         ))
+        rebinds = [node for node in calls if named_call(node, "rebind_trusted_default_writer")]
+        self.assertEqual(len(rebinds), 2)
+        terminal_try = next((node for node in finalize.body if isinstance(node, ast.Try)), None)
+        self.assertIsInstance(terminal_try, ast.Try)
+        assert isinstance(terminal_try, ast.Try)
+        terminal_rebinds = [
+            node for node in rebinds
+            if nearest_parent(node, ast.Try) is terminal_try
+            and nearest_parent(node, ast.ExceptHandler) is None
+        ]
+        self.assertEqual(len(terminal_rebinds), 1)
+        terminal_rebind = terminal_rebinds[0]
+        # Directly under try, not inside a state guard: every terminal state
+        # must bind the current default ref immediately before its PATCH path.
+        self.assertIsNone(nearest_parent(terminal_rebind, ast.If))
+        self.assertGreater(terminal_rebind.lineno, closer.lineno)
+        terminal_writes = [
+            node for node in calls if named_call(node, "write_governance_check")
+            and nearest_parent(node, ast.Try) is terminal_try
+            and nearest_parent(node, ast.ExceptHandler) is None
+        ]
+        self.assertEqual(len(terminal_writes), 1)
+        self.assertLess(terminal_rebind.lineno, terminal_writes[0].lineno)
+        fallback_rebinds = [
+            node for node in rebinds
+            if isinstance(nearest_parent(node, ast.ExceptHandler), ast.ExceptHandler)
+        ]
+        self.assertEqual(len(fallback_rebinds), 1)
+        fallback_parent = nearest_parent(fallback_rebinds[0], ast.ExceptHandler)
+        self.assertIsInstance(fallback_parent, ast.ExceptHandler)
+        assert isinstance(fallback_parent, ast.ExceptHandler)
+        self.assertIsInstance(fallback_parent.type, ast.Name)
+        assert isinstance(fallback_parent.type, ast.Name)
+        self.assertEqual(fallback_parent.type.id, "GovernanceError")
 
     def test_new_branch_without_upstream_uses_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

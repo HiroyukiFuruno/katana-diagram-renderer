@@ -34,7 +34,17 @@ class GovernanceOverflowContractTest(unittest.TestCase):
         self.assertIn('urlencode({"dispatcher_run_id": str(source.identifier), "carry_pending": str(carry_pending)})', self.writer)
         self.assertIn("Bind the writer scope to current App invalidations from one dispatcher.", self.writer)
         self.assertIn("Draft pull request cannot carry a terminal governance decision.", self.writer)
-        self.assertIn('terminal_write_budget = 400 if dispatcher_source.event == "schedule" else 100', self.writer)
+        # Terminal writes are split into four bounded, ordered segments.  The
+        # segment boundary is part of the dispatch contract, not an old
+        # single-run request budget.
+        self.assertIn(
+            'terminal_write_budget = 150 if scope == "all" and os.environ.get("GITHUB_ACTIONS") == "true"',
+            self.writer,
+        )
+        self.assertIn('re.fullmatch(r"[1-4]", raw_continuation_index)', self.writer)
+        self.assertIn("len(terminal_order) > 600", self.writer)
+        self.assertIn("start = (continuation_index - 1) * 150", self.writer)
+        self.assertIn("terminal_batch != expected_terminal_batch", self.writer)
 
         snapshot = WRITER.OpenSnapshot(
             (72, 73), {},
