@@ -1303,7 +1303,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("required_status_checks/contexts", activate)
         self.assertIn("required_status_checks/contexts", release)
         self.assertNotIn("actions/checkout", self.workflow)
-        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true') && steps.barrier-source.outcome == 'success'"
+        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true') && steps.barrier-source.outcome == 'success'"
         self.assertEqual(self.workflow.count(marker_condition), 3)
         marker_steps = self.workflow[self.workflow.index("Create periodic affected-head barrier marker write token"):self.workflow.index("Create affected-head barrier branch-protection token")]
         self.assertIn("has_preinvalidate_targets", marker_steps)
@@ -1472,6 +1472,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("required_status_checks/contexts", activate_step)
         self.assertIn('mutate("POST")', activate_step)
         self.assertIn('if matches==[(context,app_id)]', activate_step)
+        self.assertIn(
+            "steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true'",
+            activate_step,
+        )
 
         # Zero-target reconciliation must not manufacture a fresh marker or
         # mutate branch protection; priority is the only additional trigger.
@@ -2251,7 +2255,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 fake = directory / "gh"
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
-                    "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                    "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
                     "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n",
@@ -2263,9 +2267,16 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "",
                     "EVENT_TARGETS": json.dumps(list(range(1, total + 1)), separators=(",", ":")),
                     "EVENT_PRIORITY_TARGETS": json.dumps(list(range(1, total + 1)), separators=(",", ":")),
-                    "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pages, separators=(",", ":")),
+                    "GITHUB_OUTPUT": str(output),
+                    "PULLS_FILE": str(directory / "pulls.json"),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
+                pulls_json = json.dumps(pages, separators=(",", ":"))
+                (directory / "pulls.json").write_text(pulls_json, encoding="utf-8")
+                if total == 600:
+                    self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
+                self.assertNotIn("PULLS", environment)
+                self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in environment.items()))
                 result = subprocess.run(
                     [sys.executable, "-c", self._workflow_program(resolver)],
                     env=environment, capture_output=True, text=True, check=False,
@@ -2318,7 +2329,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             fake = directory / "gh"
             fake.write_text(
                 "#!/bin/sh\ncase \"$*\" in\n"
-                "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
                 "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
                 "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                 "  *) exit 91 ;;\nesac\n",
@@ -2330,9 +2341,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 "EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "",
                 "EVENT_TARGETS": json.dumps(list(heads), separators=(",", ":")),
                 "EVENT_PRIORITY_TARGETS": json.dumps(list(heads), separators=(",", ":")),
-                "GITHUB_OUTPUT": str(resolver_output), "PULLS": json.dumps(pages, separators=(",", ":")),
+                "GITHUB_OUTPUT": str(resolver_output), "PULLS_FILE": str(directory / "pulls.json"),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
+            pulls_json = json.dumps(pages, separators=(",", ":"))
+            (directory / "pulls.json").write_text(pulls_json, encoding="utf-8")
+            self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
+            self.assertNotIn("PULLS", resolver_environment)
+            self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in resolver_environment.items()))
             result = subprocess.run(
                 [sys.executable, "-c", self._workflow_program(resolver)],
                 env=resolver_environment, capture_output=True, text=True, check=False,
@@ -2422,6 +2438,298 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 [next(item.split("=", 1)[1] for item in post if item.startswith("head_sha=")) for post in posts],
                 [heads[number] for number in range(1, total + 1)],
             )
+
+    def test_oversized_all_invalidation_keeps_affected_prechunk_and_holds_barrier(self) -> None:
+        """602 unique heads finish discovery before oversized all-open invalidation fails closed."""
+        resolver = re.search(
+            r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(resolver); assert resolver is not None
+        hold = re.search(
+            r"- name: Hold global merge barrier for an oversized governed snapshot.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(hold); assert hold is not None
+        activation = self.workflow.index("- name: Activate complete affected-head merge barrier")
+        hold_position = self.workflow.index("- name: Hold global merge barrier for an oversized governed snapshot")
+        dispatcher = self.workflow.index("- name: Create dispatcher App token after priority preinvalidation")
+        self.assertLess(activation, hold_position)
+        self.assertLess(hold_position, dispatcher)
+        self.assertIn("invalidation_head_cap_exceeded == 'true'", self.workflow[hold_position:])
+
+        total = 602
+
+        def pull(number: int) -> dict[str, object]:
+            return {
+                "number": number,
+                "state": "open",
+                "body": "Fixes #64",
+                "draft": False,
+                "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": f"{number:040x}", "repo": {"full_name": "owner/repository"}},
+            }
+
+        pages = [[pull(number) for number in range(start, min(start + 100, total + 1))] for start in range(1, total + 1, 100)]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            output = directory / "output"
+            pulls_file = directory / "pulls.json"
+            pulls_json = json.dumps(pages, separators=(",", ":"))
+            pulls_file.write_text(pulls_json, encoding="utf-8")
+            fake = directory / "gh"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                "  *) exit 91 ;;\nesac\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository",
+                "DEFAULT_BRANCH": "master",
+                "EVENT_NAME": "pull_request_target",
+                "EVENT_TARGETS": "[1]",
+                "EVENT_PRIORITY_TARGETS": "[1]",
+                "GITHUB_OUTPUT": str(output),
+                "PULLS_FILE": str(pulls_file),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
+            self.assertNotIn("PULLS", environment)
+            self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in environment.items()))
+            result = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(resolver)],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            targets = json.loads(values["targets"])
+            snapshots = json.loads(values["target_snapshots"])
+            self.assertEqual(targets, list(range(1, total + 1)))
+            self.assertEqual([entry[0] for entry in snapshots], targets)
+            self.assertEqual(len(snapshots), total)
+            self.assertEqual(json.loads(values["preinvalidate_targets"]), [1])
+            self.assertEqual(json.loads(values["preinvalidate_chunk_1"]), [1])
+            self.assertEqual(json.loads(values["preinvalidate_chunk_1_snapshots"])[0][0], 1)
+            self.assertEqual(json.loads(values["preinvalidate_chunk_2"]), [])
+            self.assertEqual(json.loads(values["preinvalidate_chunk_2_snapshots"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(2, total + 1)))
+            self.assertEqual(json.loads(values["all_invalidation_target_snapshots"]), [[number, f"{number:040x}", False] for number in range(2, total + 1)])
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
+
+        hold_program = self._workflow_program(hold)
+        base_environment = {
+            "BARRIER_SOURCE_OUTCOME": "success",
+            "BARRIER_TOKEN_OUTCOME": "success",
+            "BARRIER_ACTIVATE_OUTCOME": "success",
+        }
+        for active, message in (("false", "before the affected-head barrier was active"), ("true", "head cap exceeded")):
+            with self.subTest(active=active):
+                hold_environment = base_environment | {"BARRIER_ACTIVE": active}
+                with patch.dict(os.environ, hold_environment, clear=True):
+                    with self.assertRaisesRegex(SystemExit, message):
+                        exec(hold_program, {"__name__": "__main__"})
+                self.assertEqual(hold_environment["BARRIER_ACTIVE"], active)
+
+    def test_nonpriority_workflow_run_oversized_snapshot_seeds_barrier_and_stops_before_dispatch(self) -> None:
+        """A non-priority CI workflow_run still binds the cap barrier for 602 heads."""
+        source_resolver = re.search(
+            r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        current_resolver = re.search(
+            r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        marker = re.search(
+            r"- name: Publish periodic static affected-head barrier App marker.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        hold = re.search(
+            r"- name: Hold global merge barrier for an oversized governed snapshot.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        for match in (source_resolver, current_resolver, marker, hold):
+            self.assertIsNotNone(match)
+        assert source_resolver is not None and current_resolver is not None and marker is not None and hold is not None
+
+        marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true') && steps.barrier-source.outcome == 'success'"
+        self.assertEqual(self.workflow.count(marker_condition), 3)
+        activation_match = re.search(
+            r"^      - name: Activate complete affected-head merge barrier\n(?P<body>.*?)(?=^      - name: )",
+            self.workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(activation_match); assert activation_match is not None
+        self.assertIn(
+            "PRIORITY: ${{ steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true' }}",
+            activation_match.group("body"),
+        )
+
+        total = 602
+        heads = {number: f"{number:040x}" for number in range(1, total + 1)}
+        pages = [[
+            {
+                "number": number,
+                "state": "open",
+                "body": "Fixes #64",
+                "draft": False,
+                "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": heads[number], "repo": {"full_name": "owner/repository"}},
+            }
+            for number in range(start, min(start + 100, total + 1))
+        ] for start in range(1, total + 1, 100)]
+        run = {
+            "name": "CI",
+            "path": ".github/workflows/test-and-build.yml@master",
+            "event": "pull_request",
+            "status": "completed",
+            "id": 9,
+            "run_number": 1,
+            "run_attempt": 1,
+            "head_sha": heads[1],
+            "repository": {"full_name": "owner/repository"},
+            "pull_requests": [{
+                "number": 1,
+                "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": heads[1], "repo": {"full_name": "owner/repository"}},
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            pulls_file = directory / "pulls.json"
+            pulls_json = json.dumps(pages, separators=(",", ":"))
+            pulls_file.write_text(pulls_json, encoding="utf-8")
+            source_output = directory / "source-output"
+            current_output = directory / "current-output"
+            marker_output = directory / "marker-output"
+            fake = directory / "gh"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
+                "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                "  *) exit 91 ;;\nesac\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            base_environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository",
+                "DEFAULT_BRANCH": "master",
+                "EVENT_NAME": "workflow_run",
+                "WORKFLOW_RUN_ID": "9",
+                "RUN": json.dumps(run, separators=(",", ":")),
+                "PULLS_FILE": str(pulls_file),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
+            self.assertNotIn("PULLS", base_environment)
+            self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in base_environment.items()))
+            source_environment = base_environment | {"GITHUB_OUTPUT": str(source_output)}
+            result = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(source_resolver)],
+                env=source_environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            source_values = dict(line.split("=", 1) for line in source_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(json.loads(source_values["event_targets"]), list(range(1, total + 1)))
+            self.assertEqual(json.loads(source_values["priority_targets"]), [])
+            current_environment = base_environment | {
+                "GITHUB_OUTPUT": str(current_output),
+                "EVENT_TARGETS": source_values["event_targets"],
+                "EVENT_PRIORITY_TARGETS": source_values["priority_targets"],
+            }
+            result = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(current_resolver)],
+                env=current_environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in current_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(json.loads(values["targets"]), list(range(1, total + 1)))
+            self.assertEqual(len(json.loads(values["target_snapshots"])), total)
+            self.assertEqual(json.loads(values["priority_targets"]), [])
+            self.assertEqual(json.loads(values["preinvalidate_targets"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(1, total + 1)))
+            self.assertEqual(len(json.loads(values["all_invalidation_target_snapshots"])), total)
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
+
+            marker_calls: list[list[str]] = []
+
+            def marker_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                marker_calls.append(arguments)
+                self.assertEqual(kwargs.get("env"), {"GH_TOKEN": "marker-write" if len(marker_calls) == 1 else "marker-read", "PATH": os.environ["PATH"]})
+                if len(marker_calls) == 1:
+                    return subprocess.CompletedProcess([], 0, json.dumps({
+                        "id": 501,
+                        "name": "KRR / PR governance affected-head barrier",
+                        "head_sha": "a" * 40,
+                        "external_id": "krr-governance-affected-head-barrier/v1/" + "a" * 40 + "/scheduler-9",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "details_url": "https://github.com/owner/repository/actions/runs/9?barrier_marker=periodic",
+                        "app": {"id": 4_766_933},
+                    }), "")
+                return subprocess.CompletedProcess([], 0, json.dumps({
+                    "id": 501,
+                    "name": "KRR / PR governance affected-head barrier",
+                    "head_sha": "a" * 40,
+                    "external_id": "krr-governance-affected-head-barrier/v1/" + "a" * 40 + "/scheduler-9",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "details_url": "https://github.com/owner/repository/actions/runs/9?barrier_marker=periodic",
+                    "app": {"id": 4_766_933},
+                }), "")
+
+            marker_environment = base_environment | {
+                "GITHUB_OUTPUT": str(marker_output),
+                "GITHUB_SERVER_URL": "https://github.com",
+                "DEFAULT_HEAD": "a" * 40,
+                "DISPATCHER_RUN_ID": "9",
+                "CHECK_APP_ID": "4766933",
+                "CHECK_WRITE_TOKEN": "marker-write",
+                "CHECK_READ_TOKEN": "marker-read",
+                "INVALIDATION_HEAD_CAP_EXCEEDED": values["invalidation_head_cap_exceeded"],
+            }
+            with patch.dict(os.environ, marker_environment, clear=True), patch("subprocess.run", side_effect=marker_run):
+                exec(self._workflow_program(marker), {"__name__": "__main__"})
+            self.assertEqual(len(marker_calls), 2)
+            self.assertEqual(marker_environment["INVALIDATION_HEAD_CAP_EXCEEDED"], "true")
+
+        hold_program = self._workflow_program(hold)
+        for active, message in (("false", "before the affected-head barrier was active"), ("true", "head cap exceeded")):
+            with self.subTest(active=active):
+                with patch.dict(os.environ, {
+                    "BARRIER_SOURCE_OUTCOME": "success",
+                    "BARRIER_TOKEN_OUTCOME": "success",
+                    "BARRIER_ACTIVATE_OUTCOME": "success",
+                    "BARRIER_ACTIVE": active,
+                }, clear=True):
+                    with self.assertRaisesRegex(SystemExit, message):
+                        exec(hold_program, {"__name__": "__main__"})
 
     def test_terminal_writer_segments_are_contiguous_bounded_and_fail_closed(self) -> None:
         """A 600-target manifest is partitioned into at most four ordered 150 slices."""
