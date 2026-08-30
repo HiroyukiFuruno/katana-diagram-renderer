@@ -422,6 +422,36 @@ class VerifyPushIssueTest(unittest.TestCase):
             issue=self.issue(body=body),
         )
 
+    def test_lockfile_only_update_requires_the_real_origin_manifest(self) -> None:
+        for manifest in ("N/A", "n/a", "NA", "na", " ", "package.json"):
+            with self.subTest(manifest=manifest):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifest: {manifest}
+- Lockfiles: Cargo.lock
+- Verification: just check passed
+"""
+                with self.assertRaisesRegex(subject.ContractViolation, "依存manifest"):
+                    self.validate(
+                        changed_paths=["Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+
+    def test_lockfile_only_update_keeps_real_origin_manifest_case_sensitive(self) -> None:
+        body = """## 依存更新証跡
+- 上流公開版: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API移行: 移行不要
+- 依存manifest: cargo.toml
+- lockfile: Cargo.lock
+- 検証証跡: just check 成功
+"""
+        with self.assertRaisesRegex(subject.ContractViolation, "依存manifest"):
+            self.validate(
+                changed_paths=["Cargo.lock"],
+                issue=self.issue(body=body),
+            )
+
     def test_pr_range_validates_github_metadata_without_git_or_pr_checkout(self) -> None:
         base_sha = "a" * 40
         head_sha = "b" * 40
@@ -989,8 +1019,10 @@ class VerifyPushIssueTest(unittest.TestCase):
         self.assertNotIn("actions/checkout", workflow)
         self.assertIn('event_name == "pull_request_target"', workflow)
         self.assertIn('f"repos/{repository}/pulls/{source_number_value}"', workflow)
-        self.assertIn('current_base_repository.get("full_name") != repository', workflow)
-        self.assertIn('current_head_repository.get("full_name") != repository', workflow)
+        self.assertIn("source_is_local = (", workflow)
+        self.assertIn('current_base_repository.get("full_name") == repository', workflow)
+        self.assertIn('current_head_repository.get("full_name") == repository', workflow)
+        self.assertIn("or not source_is_local:", workflow)
         self.assertIn("scripts/hooks/verify_push_issue.py", writer)
         self.assertIn('"--pr-base-sha", base', writer)
         self.assertIn('"--pr-head-sha", head', writer)

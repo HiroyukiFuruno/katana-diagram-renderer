@@ -67,9 +67,17 @@ gh pr view "$pr_url" --json isDraft --jq '.isDraft'
 pr_number="$(gh pr view "$pr_url" --json number --jq '.number')"
 pr_json="$(gh api "repos/<owner>/<repo>/pulls/$pr_number")"
 head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
-body_type="$(jq -r '.body | type' <<<"$pr_json")"
-[ "$body_type" = "string" ] || { echo "PR body must be a string" >&2; exit 1; }
-body_sha256="$(jq -j '.body' <<<"$pr_json" | shasum -a 256 | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+body_sha256="$(python3 -c '
+import hashlib, json, sys
+value = json.load(sys.stdin)
+body = value.get("body")
+if not isinstance(body, str) or "\x00" in body or any(0xD800 <= ord(char) <= 0xDFFF for char in body):
+    raise SystemExit("current PR body is not valid text")
+try:
+    print(hashlib.sha256(body.encode("utf-8", "strict")).hexdigest())
+except UnicodeEncodeError:
+    raise SystemExit("current PR body is not strict UTF-8")
+' <<<"$pr_json")" || exit 1
 gh pr comment "$pr_url" --body "<!-- krr-review phase=initial head=$head_sha body-sha256=$body_sha256 -->"$'\n@codex review'
 ```
 
@@ -80,9 +88,17 @@ gh pr comment "$pr_url" --body "<!-- krr-review phase=initial head=$head_sha bod
 ```bash
 pr_json="$(gh api "repos/<owner>/<repo>/pulls/$pr_number")"
 head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
-body_type="$(jq -r '.body | type' <<<"$pr_json")"
-[ "$body_type" = "string" ] || { echo "PR body must be a string" >&2; exit 1; }
-body_sha256="$(jq -j '.body' <<<"$pr_json" | shasum -a 256 | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+body_sha256="$(python3 -c '
+import hashlib, json, sys
+value = json.load(sys.stdin)
+body = value.get("body")
+if not isinstance(body, str) or "\x00" in body or any(0xD800 <= ord(char) <= 0xDFFF for char in body):
+    raise SystemExit("current PR body is not valid text")
+try:
+    print(hashlib.sha256(body.encode("utf-8", "strict")).hexdigest())
+except UnicodeEncodeError:
+    raise SystemExit("current PR body is not strict UTF-8")
+' <<<"$pr_json")" || exit 1
 gh pr comment "$pr_url" --body "<!-- krr-review phase=final head=$head_sha body-sha256=$body_sha256 -->"$'\n@codex review'
 ```
 

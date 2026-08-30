@@ -469,6 +469,78 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(values, expected)
 
+    def test_pull_request_target_retarget_revalidates_prior_governed_claimants(self) -> None:
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        base, head = "b" * 40, "a" * 40
+        governed = {
+            "number": 72,
+            "state": "open",
+            "body": "Fixes #64",
+            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+            "head": {"repo": {"full_name": "owner/repository"}},
+        }
+        retargeted = {
+            "number": 73,
+            "state": "open",
+            "base": {"sha": base, "ref": "release/v1", "repo": {"full_name": "owner/repository"}},
+            "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'/pulls/73'*) printf '%s' \"${SOURCE}\" ;;\n"
+                "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *) exit 91 ;;\nesac\n",
+                encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            base_environment = os.environ | {
+                "EVENT_NAME": "pull_request_target", "PR_ACTION": "edited", "PR_NUMBER": "73", "PR_HEAD_SHA": head,
+                "PR_BASE_SHA": base, "PR_BODY": "Fixes #65", "PR_PREVIOUS_BODY": "Fixes #64",
+                "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                "PULLS": json.dumps([[governed, {**retargeted, "body": "Fixes #65"}]]), "SOURCE": json.dumps(retargeted),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            environment = base_environment | {"PR_PREVIOUS_BASE_REF": "master"}
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["event_targets"], "[72]")
+            self.assertEqual(values["priority_targets"], "[72]")
+
+            missing_output = directory / "output-missing"
+            missing = base_environment | {
+                "GITHUB_OUTPUT": str(missing_output),
+                "PR_PREVIOUS_BASE_REF": "",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=missing, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in missing_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["event_targets"], "[]")
+            self.assertEqual(values["priority_targets"], "[]")
+
+            nondefault_output = directory / "output-nondefault"
+            nondefault = base_environment | {
+                "GITHUB_OUTPUT": str(nondefault_output),
+                "PR_PREVIOUS_BASE_REF": "release/v0",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=nondefault, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in nondefault_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["event_targets"], "[]")
+            self.assertEqual(values["priority_targets"], "[]")
+
+            for previous_base in ("../master", "/master"):
+                with self.subTest(previous_base=previous_base):
+                    malformed_output = directory / f"output-{len(previous_base)}"
+                    malformed = base_environment | {
+                        "GITHUB_OUTPUT": str(malformed_output),
+                        "PR_PREVIOUS_BASE_REF": previous_base,
+                    }
+                    result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=malformed, capture_output=True, text=True, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+
     def test_priority_snapshot_accepts_all_related_closers(self) -> None:
         resolver = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         current = re.search(r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)

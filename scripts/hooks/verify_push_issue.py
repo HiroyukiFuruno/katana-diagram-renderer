@@ -64,6 +64,16 @@ _LOCKFILE_NAMES = {
     "go.sum",
     "Gemfile.lock",
 }
+_LOCKFILE_ORIGIN_MANIFESTS = {
+    "Cargo.lock": "Cargo.toml",
+    "bun.lock": "package.json",
+    "package-lock.json": "package.json",
+    "pnpm-lock.yaml": "package.json",
+    "yarn.lock": "package.json",
+    "poetry.lock": "pyproject.toml",
+    "go.sum": "go.mod",
+    "Gemfile.lock": "Gemfile",
+}
 _EVIDENCE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("上流公開版", ("上流公開版", "Upstream release")),
     ("API移行", ("API移行", "API migration")),
@@ -254,6 +264,7 @@ def dependency_evidence_errors(
         body,
     ):
         errors.append("依存更新証跡の見出し")
+    evidence_values: dict[str, str] = {}
     for display_name, labels in _EVIDENCE_FIELDS:
         label_pattern = "|".join(re.escape(label) for label in labels)
         match = re.search(
@@ -267,6 +278,25 @@ def dependency_evidence_errors(
             "tbd",
         }:
             errors.append(display_name)
+        elif display_name not in evidence_values:
+            evidence_values[display_name] = match.group("value").strip()
+
+    if lockfiles and not manifests:
+        origin_paths = sorted(
+            {
+                str(PurePosixPath(lockfile).with_name(_LOCKFILE_ORIGIN_MANIFESTS[PurePosixPath(lockfile).name]))
+                for lockfile in lockfiles
+            }
+        )
+        manifest_value = evidence_values.get("依存manifest", "")
+        for origin_path in origin_paths:
+            if re.search(
+                rf"(?<![A-Za-z0-9_./-]){re.escape(origin_path)}(?![A-Za-z0-9_./-])",
+                manifest_value,
+            ) is None:
+                errors.append("依存manifest")
+                break
+
     for path in [*manifests, *lockfiles]:
         if path not in body:
             errors.append(path)
