@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -532,6 +533,27 @@ def _check_error(check: Mapping[str, object]) -> str | None:
     return f"CI check が未完了または失敗しています: {name}"
 
 
+def _status_check_rollup_errors(status_rollup: object) -> list[str]:
+    """Validate the non-governance CI evidence from one immutable API read."""
+
+    if not isinstance(status_rollup, Sequence) or isinstance(
+        status_rollup, (str, bytes)
+    ):
+        raise TypeError("statusCheckRollup must be a sequence")
+    errors: list[str] = []
+    for check in status_rollup:
+        if not isinstance(check, Mapping):
+            raise TypeError("status check must be an object")
+        if _is_self_check(check):
+            continue
+        error = _check_error(check)
+        if error is not None:
+            errors.append(error)
+    if not any(not _is_self_check(check) for check in status_rollup):
+        errors.append("CI check を取得できません")
+    return errors
+
+
 def readiness_errors(
     pull_request: Mapping[str, object],
     threads: Sequence[Mapping[str, object]],
@@ -556,21 +578,7 @@ def readiness_errors(
         errors.append("Draft PR でのみ readiness gate を実行できます")
 
     status_rollup = pull_request["statusCheckRollup"]
-    if not isinstance(status_rollup, Sequence) or isinstance(status_rollup, (str, bytes)):
-        raise TypeError("statusCheckRollup must be a sequence")
-    for check in status_rollup:
-        if not isinstance(check, Mapping):
-            raise TypeError("status check must be an object")
-        if _is_self_check(check):
-            continue
-        error = _check_error(check)
-        if error is not None:
-            errors.append(error)
-    if not any(
-        not _is_self_check(check)
-        for check in status_rollup
-    ):
-        errors.append("CI check を取得できません")
+    errors.extend(_status_check_rollup_errors(status_rollup))
 
     unresolved = [thread for thread in threads if thread.get("isResolved") is not True]
     if unresolved:
@@ -734,7 +742,7 @@ def _verify_final_readiness_snapshot_unchanged(
         "--repo",
         repository,
         "--json",
-        "baseRefOid,headRefOid,body,updatedAt",
+        "baseRefOid,headRefOid,body,updatedAt,statusCheckRollup",
     )
     if not isinstance(payload, dict):
         raise TypeError("pull request final snapshot response must be an object")
@@ -754,6 +762,11 @@ def _verify_final_readiness_snapshot_unchanged(
         raise ValueError("pull request body changed during readiness check")
     if current_updated_at != initial_updated_at:
         raise ValueError("pull request updatedAt changed during readiness check")
+    final_ci_errors = _status_check_rollup_errors(payload.get("statusCheckRollup"))
+    if final_ci_errors:
+        raise ValueError(
+            "CI status changed during readiness check: " + "; ".join(final_ci_errors)
+        )
 
     current_issues = issue_contract.referenced_issue_snapshot(
         repository=repository,
@@ -1018,9 +1031,150 @@ def _comment_reactions(
     return reactions
 
 
+def _latch_source_run_id(details_url: object, repository: str) -> str | None:
+    """Accept only the canonical Actions run or job URL for this repository."""
+
+    if not isinstance(details_url, str):
+        return None
+    expected_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    expected = urlparse(expected_url)
+    parsed = urlparse(details_url)
+    try:
+        expected_port = expected.port
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    if (
+        expected.scheme != "https"
+        or expected.netloc != expected.hostname
+        or expected_port is not None
+        or expected.path not in {"", "/"}
+        or expected.params
+        or expected.query
+        or expected.fragment
+        or parsed.scheme != expected.scheme
+        or parsed.netloc != expected.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed_port is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    owner, name = repository.split("/", 1)
+    path = parsed.path.split("/")
+    expected_prefix = ["", owner, name, "actions", "runs"]
+    if path[:5] != expected_prefix or len(path) not in {6, 8}:
+        return None
+    run_id = path[5]
+    if re.fullmatch(r"[1-9][0-9]*", run_id) is None:
+        return None
+    if len(path) == 8 and (
+        path[6] != "job" or re.fullmatch(r"[1-9][0-9]*", path[7]) is None
+    ):
+        return None
+    return run_id
+
+
+def _latest_sensor_generation(
+    *,
+    repository: str,
+    pull_request: int,
+    base_branch: str,
+    base_sha: str,
+    head: str,
+) -> Mapping[str, object] | None:
+    """Return one unambiguous latest sensor run for the fixed PR boundary."""
+
+    candidates: list[Mapping[str, object]] = []
+    for event_name in (
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+    ):
+        payload = _gh_json(
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{repository}/actions/workflows/"
+            f"pr-governance-review-events.yml/runs?event={event_name}&per_page=100",
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(page, Mapping) for page in payload
+        ):
+            raise TypeError("sensor workflow run pagination response is invalid")
+        for page in payload:
+            if page.get("truncated") is True:
+                raise TypeError("sensor workflow run page is truncated")
+            values = page.get("workflow_runs")
+            if not isinstance(values, list) or not all(
+                isinstance(value, Mapping) for value in values
+            ):
+                raise TypeError("sensor workflow run page is invalid")
+            for value in values:
+                runs_pr = value.get("pull_requests")
+                repo = value.get("repository")
+                path = value.get("path", "")
+                if (
+                    value.get("name") == "PR governance review sensor"
+                    and value.get("event") == event_name
+                    and type(value.get("id")) is int
+                    and value["id"] > 0
+                    and type(value.get("run_number")) is int
+                    and value["run_number"] > 0
+                    and type(value.get("run_attempt")) is int
+                    and value["run_attempt"] == 1
+                    and value.get("head_sha", "").lower() == head.lower()
+                    and isinstance(repo, Mapping)
+                    and repo.get("full_name") == repository
+                    and isinstance(runs_pr, list)
+                    and len(runs_pr) == 1
+                    and isinstance(runs_pr[0], Mapping)
+                    and runs_pr[0].get("number") == pull_request
+                    and isinstance(runs_pr[0].get("base"), Mapping)
+                    and runs_pr[0]["base"].get("sha", "").lower() == base_sha.lower()
+                    and runs_pr[0]["base"].get("ref") == base_branch
+                    and isinstance(runs_pr[0]["base"].get("repo"), Mapping)
+                    and runs_pr[0]["base"]["repo"].get("full_name") == repository
+                    and isinstance(runs_pr[0].get("head"), Mapping)
+                    and runs_pr[0]["head"].get("sha", "").lower() == head.lower()
+                    and isinstance(runs_pr[0]["head"].get("repo"), Mapping)
+                    and runs_pr[0]["head"]["repo"].get("full_name") == repository
+                    and isinstance(path, str)
+                    and path.split("@", 1)[0]
+                    == ".github/workflows/pr-governance-review-events.yml"
+                    and (
+                        "@" not in path
+                        or (
+                            re.fullmatch(r"[A-Za-z0-9._/-]+", path.split("@", 1)[1])
+                            is not None
+                            and not path.split("@", 1)[1].startswith("/")
+                            and "//" not in path.split("@", 1)[1]
+                            and not any(
+                                part in {".", ".."}
+                                for part in path.split("@", 1)[1].split("/")
+                            )
+                        )
+                    )
+                ):
+                    candidates.append(value)
+    if not candidates:
+        return None
+    key = max((value["run_number"], value["id"]) for value in candidates)
+    latest = [
+        value
+        for value in candidates
+        if (value["run_number"], value["id"]) == key
+    ]
+    return latest[0] if len(latest) == 1 else None
+
+
 def _governance_check_error(
     repository: str, pull_request: int, base_branch: object, base_sha: str, head: str,
     evidence: dict[str, object] | None = None,
+    *,
+    exclude_trusted_governance_check: bool = False,
 ) -> str | None:
     """Require exactly one terminal trusted Check Run and its Actions evidence."""
     if not isinstance(base_branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch):
@@ -1038,30 +1192,48 @@ def _governance_check_error(
     if latch_apps != [15368]:
         return "branch protection review latch App binding is not exact"
     app_id = trusted_apps[0]
-    raw_pages = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_TRUSTED_CHECK.replace(' ', '%20')}&app_id={app_id}&filter=all&per_page=100")
-    if not isinstance(raw_pages, list) or not all(isinstance(page, Mapping) for page in raw_pages):
-        raise TypeError("check-runs pagination response must contain page objects")
-    runs: list[Mapping[str, object]] = []
-    for page in raw_pages:
-        page_runs = page.get("check_runs")
-        if not isinstance(page_runs, list) or not all(isinstance(run, Mapping) for run in page_runs):
-            raise TypeError("check-runs page must contain an array")
-        runs.extend(page_runs)
-    matches = [run for run in runs if isinstance(run, Mapping) and run.get("name") == _TRUSTED_CHECK and run.get("head_sha", "").lower() == head.lower() and isinstance(run.get("app"), Mapping) and run["app"].get("id") == app_id]
-    if len(matches) != 1:
-        return "trusted Check Run must have exactly one matching App/head run"
-    run = matches[0]
-    if run.get("status") != "completed" or run.get("conclusion") != "success":
-        return "trusted Check Run is not completed successfully"
-    external_id = run.get("external_id")
-    details = run.get("details_url")
-    if external_id != f"krr-governance/v1/{head.lower()}":
-        return "trusted Check Run external_id is invalid"
-    if not isinstance(details, str):
-        return "trusted Check Run details_url lacks exact source_run_id evidence"
-    source_ids = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
-    if len(source_ids) != 1 or re.fullmatch(r"[1-9][0-9]*", source_ids[0]) is None:
-        return "trusted Check Run details_url lacks exact source_run_id evidence"
+    run: Mapping[str, object] | None = None
+    source_ids: list[str] = []
+    if not exclude_trusted_governance_check:
+        raw_pages = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_TRUSTED_CHECK.replace(' ', '%20')}&app_id={app_id}&filter=all&per_page=100")
+        if not isinstance(raw_pages, list) or not all(isinstance(page, Mapping) for page in raw_pages):
+            raise TypeError("check-runs pagination response must contain page objects")
+        runs: list[Mapping[str, object]] = []
+        for page in raw_pages:
+            page_runs = page.get("check_runs")
+            if not isinstance(page_runs, list) or not all(isinstance(run, Mapping) for run in page_runs):
+                raise TypeError("check-runs page must contain an array")
+            runs.extend(page_runs)
+        matches = [item for item in runs if item.get("name") == _TRUSTED_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == app_id]
+        if len(matches) != 1:
+            return "trusted Check Run must have exactly one matching App/head run"
+        run = matches[0]
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            return "trusted Check Run is not completed successfully"
+        external_id = run.get("external_id")
+        details = run.get("details_url")
+        if external_id != f"krr-governance/v1/{head.lower()}":
+            return "trusted Check Run external_id is invalid"
+        if not isinstance(details, str):
+            return "trusted Check Run details_url lacks exact source_run_id evidence"
+        source_ids = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
+        if len(source_ids) != 1 or re.fullmatch(r"[1-9][0-9]*", source_ids[0]) is None:
+            return "trusted Check Run details_url lacks exact source_run_id evidence"
+    else:
+        latest = _latest_sensor_generation(
+            repository=repository,
+            pull_request=pull_request,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            head=head,
+        )
+        if (
+            latest is None
+            or latest.get("status") != "completed"
+            or latest.get("conclusion") != "success"
+        ):
+            return "trusted source Actions run is not the latest sensor generation"
+        source_ids = [str(latest["id"])]
     latch_payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_LATCH_CHECK.replace(' ', '%20')}&app_id=15368&filter=all&per_page=100")
     if not isinstance(latch_payload, list) or not all(isinstance(page, Mapping) for page in latch_payload):
         raise TypeError("latch Check Run pagination response must contain page objects")
@@ -1069,11 +1241,10 @@ def _governance_check_error(
     if not all(isinstance(item, Mapping) for item in latch_runs):
         raise TypeError("latch Check Run page must contain an array")
     latch_candidates = [item for item in latch_runs if item.get("name") == _LATCH_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == 15368]
-    same_source = []
+    same_source: list[Mapping[str, object]] = []
     for item in latch_candidates:
-        details = item.get("details_url")
-        ids = re.findall(r"/actions/runs/([1-9][0-9]*)/?$", urlparse(details).path) if isinstance(details, str) else []
-        if len(ids) == 1 and ids[0] == source_ids[0] and not urlparse(details).query:
+        source_id = _latch_source_run_id(item.get("details_url"), repository)
+        if source_id == source_ids[0]:
             same_source.append(item)
     if len(same_source) != 1:
         return "review latch Check Run for the trusted source must have exactly one matching run"
@@ -1084,9 +1255,11 @@ def _governance_check_error(
     if not isinstance(source, Mapping):
         return "trusted source Actions run response is invalid"
     if (
-        source.get("id") != int(source_ids[0])
+        type(source.get("id")) is not int
+        or source.get("id") != int(source_ids[0])
         or source.get("name") != "PR governance review sensor"
         or source.get("event") not in {"pull_request", "pull_request_review", "pull_request_review_comment"}
+        or type(source.get("run_attempt")) is not int
         or source.get("run_attempt") != 1
         or source.get("head_sha", "").lower() != head.lower()
         or source.get("status") != "completed"
@@ -1117,48 +1290,29 @@ def _governance_check_error(
         or not isinstance(source_head.get("repo"), Mapping) or source_head["repo"].get("full_name") != repository
     ):
         return "trusted source Actions run PR boundary does not match"
-    latest_candidates: list[Mapping[str, object]] = []
-    for event_name in ("pull_request", "pull_request_review", "pull_request_review_comment"):
-        payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/actions/workflows/pr-governance-review-events.yml/runs?event={event_name}&per_page=100")
-        if not isinstance(payload, list) or not all(isinstance(page, Mapping) for page in payload):
-            raise TypeError("sensor workflow run pagination response is invalid")
-        for page in payload:
-            values = page.get("workflow_runs")
-            if not isinstance(values, list) or not all(isinstance(value, Mapping) for value in values):
-                raise TypeError("sensor workflow run page is invalid")
-            for value in values:
-                runs_pr = value.get("pull_requests")
-                repo = value.get("repository")
-                path = value.get("path", "")
-                if (
-                    value.get("name") == "PR governance review sensor"
-                    and value.get("event") == event_name
-                    and value.get("run_attempt") == 1
-                    and value.get("head_sha", "").lower() == head.lower()
-                    and isinstance(repo, Mapping) and repo.get("full_name") == repository
-                    and isinstance(runs_pr, list) and len(runs_pr) == 1
-                    and isinstance(runs_pr[0], Mapping) and runs_pr[0].get("number") == pull_request
-                    and isinstance(runs_pr[0].get("base"), Mapping)
-                    and runs_pr[0]["base"].get("sha", "").lower() == base_sha.lower()
-                    and runs_pr[0]["base"].get("ref") == base_branch
-                    and isinstance(runs_pr[0]["base"].get("repo"), Mapping)
-                    and runs_pr[0]["base"]["repo"].get("full_name") == repository
-                    and isinstance(runs_pr[0].get("head"), Mapping)
-                    and runs_pr[0]["head"].get("sha", "").lower() == head.lower()
-                    and isinstance(runs_pr[0]["head"].get("repo"), Mapping)
-                    and runs_pr[0]["head"]["repo"].get("full_name") == repository
-                    and isinstance(path, str) and path.split("@", 1)[0] == ".github/workflows/pr-governance-review-events.yml"
-                ):
-                    latest_candidates.append(value)
-    if not latest_candidates:
+    latest = _latest_sensor_generation(
+        repository=repository,
+        pull_request=pull_request,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        head=head,
+    )
+    if latest is None:
         return "trusted source Actions run is not the latest sensor generation"
-    latest = max(latest_candidates, key=lambda value: (value.get("run_number", 0), value.get("id", 0)))
-    if latest.get("id") != int(source_ids[0]):
+    if (
+        latest.get("id") != int(source_ids[0])
+        or latest.get("status") != "completed"
+        or latest.get("conclusion") != "success"
+    ):
         return "trusted source Actions run is not the latest sensor generation"
     if evidence is not None:
         evidence.update({
             "protection": tuple(sorted((str(item.get("context")), item.get("app_id")) for item in checks if isinstance(item, Mapping))),
-            "check": tuple(run.get(key) for key in ("id", "name", "head_sha", "external_id", "status", "conclusion", "details_url")),
+            "check": (
+                ("excluded", app_id, head.lower())
+                if run is None
+                else tuple(run.get(key) for key in ("id", "name", "head_sha", "external_id", "status", "conclusion", "details_url"))
+            ),
             "latch": tuple(latch.get(key) for key in ("id", "name", "head_sha", "status", "conclusion", "details_url")),
             "source": tuple(source.get(key) for key in ("id", "name", "path", "event", "run_attempt", "head_sha", "status", "conclusion")),
             "source_pr": (source_pr.get("number"), source_base.get("sha"), source_base.get("ref"), source_base["repo"].get("full_name"), source_head.get("sha"), source_head["repo"].get("full_name")),
@@ -1173,6 +1327,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--expected-base-sha")
     parser.add_argument("--expected-head-sha")
     parser.add_argument("--open-pull-snapshot")
+    parser.add_argument(
+        "--exclude-trusted-governance-check",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     draft_group = parser.add_mutually_exclusive_group()
     draft_group.add_argument(
         "--require-draft", dest="require_draft", action="store_true", default=True
@@ -1183,6 +1342,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if (arguments.expected_base_sha is None) != (arguments.expected_head_sha is None):
         parser.error("--expected-base-sha and --expected-head-sha must be provided together")
+    if arguments.exclude_trusted_governance_check and arguments.require_draft:
+        parser.error("--exclude-trusted-governance-check requires --allow-ready")
     expected_boundary = _expected_boundary(
         arguments.expected_base_sha, arguments.expected_head_sha
     )
@@ -1231,7 +1392,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     governance_evidence: dict[str, object] = {}
     if not arguments.require_draft:
         governance_error = _governance_check_error(
-            repository, arguments.pr, pull_request.get("baseRefName"), base, head, governance_evidence
+            repository,
+            arguments.pr,
+            pull_request.get("baseRefName"),
+            base,
+            head,
+            governance_evidence,
+            exclude_trusted_governance_check=arguments.exclude_trusted_governance_check,
         )
         if governance_error is not None:
             errors.append(governance_error)
@@ -1298,7 +1465,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not arguments.require_draft:
         final_governance_evidence: dict[str, object] = {}
         governance_error = _governance_check_error(
-            repository, arguments.pr, pull_request.get("baseRefName"), base, head, final_governance_evidence
+            repository,
+            arguments.pr,
+            pull_request.get("baseRefName"),
+            base,
+            head,
+            final_governance_evidence,
+            exclude_trusted_governance_check=arguments.exclude_trusted_governance_check,
         )
         if governance_error is not None or final_governance_evidence != governance_evidence:
             raise ValueError("governance evidence changed during readiness check")

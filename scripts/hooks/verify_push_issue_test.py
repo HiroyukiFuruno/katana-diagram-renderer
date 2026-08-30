@@ -434,20 +434,14 @@ class VerifyPushIssueTest(unittest.TestCase):
             "commits": [
                 {"sha": head_sha, "commit": {"message": "feat: contract\n\nRefs #64"}}
             ],
+            "files": [{"filename": "scripts/hooks/pre-push.sh"}],
         }
-        files = [[{"filename": "scripts/hooks/pre-push.sh"}]]
 
         def gh_json(*arguments: str) -> object:
             if arguments == (
                 f"repos/HiroyukiFuruno/katana-render-runtime/compare/{base_sha}...{head_sha}",
             ):
                 return compare
-            if arguments == (
-                "--paginate",
-                "--slurp",
-                "repos/HiroyukiFuruno/katana-render-runtime/pulls/72/files?per_page=100",
-            ):
-                return files
             raise AssertionError(f"unexpected GitHub API request: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
@@ -465,6 +459,45 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
 
         self.assertEqual(references, {64})
+
+    def test_pr_range_binds_changed_paths_to_the_same_immutable_base_and_head(self) -> None:
+        base_sha = "a" * 40
+        head_sha = "b" * 40
+        comparison = {
+            "base_commit": {"sha": base_sha},
+            "merge_base_commit": {"sha": base_sha},
+            "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
+            "commits": [
+                {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
+            ],
+            "files": [{"filename": "scripts/hooks/pre-push.sh"}],
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def gh_json(*arguments: str) -> object:
+            calls.append(arguments)
+            self.assertEqual(
+                arguments,
+                (f"repos/HiroyukiFuruno/katana-render-runtime/compare/{base_sha}...{head_sha}",),
+            )
+            return comparison
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            self.assertEqual(
+                subject.validate_pr_range(
+                    repository="HiroyukiFuruno/katana-render-runtime",
+                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    branch="fix/issue-contract",
+                    issue_loader=lambda number: self.issue(number),
+                ),
+                {64},
+            )
+        self.assertEqual(len(calls), 2)
 
     def test_pr_range_rejects_zero_referenced_issues(self) -> None:
         base_sha = "a" * 40
@@ -720,12 +753,10 @@ class VerifyPushIssueTest(unittest.TestCase):
                 {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
             ],
         }
-        files = [[{"filename": ".github/workflows/forge-latch.yml"}]]
+        compare["files"] = [{"filename": ".github/workflows/forge-latch.yml"}]
 
         def gh_json(*arguments: str) -> object:
-            if len(arguments) == 1:
-                return compare
-            return files
+            return compare
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             with self.assertRaisesRegex(subject.ContractViolation, "GitHub Actions workflow"):
@@ -752,19 +783,15 @@ class VerifyPushIssueTest(unittest.TestCase):
                 {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
             ],
         }
-        files = [
-            [
-                {
-                    "filename": ".github/workflows/retired.yml",
-                    "previous_filename": ".github/workflows/forge-latch.yml",
-                }
-            ]
+        compare["files"] = [
+            {
+                "filename": ".github/workflows/retired.yml",
+                "previous_filename": ".github/workflows/forge-latch.yml",
+            }
         ]
 
         def gh_json(*arguments: str) -> object:
-            if len(arguments) == 1:
-                return compare
-            return files
+            return compare
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             with self.assertRaisesRegex(subject.ContractViolation, "GitHub Actions workflow"):
@@ -798,10 +825,9 @@ class VerifyPushIssueTest(unittest.TestCase):
 
         for action, changed_file in cases.items():
             with self.subTest(action=action):
+                compare["files"] = [changed_file]
                 def gh_json(*arguments: str) -> object:
-                    if len(arguments) == 1:
-                        return compare
-                    return [[changed_file]]
+                    return compare
 
                 with patch.object(subject, "_gh_json", side_effect=gh_json):
                     with self.assertRaisesRegex(
@@ -834,12 +860,11 @@ class VerifyPushIssueTest(unittest.TestCase):
                 },
                 {"sha": head_sha, "commit": {"message": "fix: unlinked"}},
             ],
+            "files": [{"filename": "scripts/hooks/pre-push.sh"}],
         }
 
         def gh_json(*arguments: str) -> object:
-            if len(arguments) == 1:
-                return compare
-            return [[{"filename": "scripts/hooks/pre-push.sh"}]]
+            return compare
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             with self.assertRaisesRegex(subject.ContractViolation, "Issue参照"):
@@ -866,12 +891,11 @@ class VerifyPushIssueTest(unittest.TestCase):
             "commits": [
                 {"sha": head_sha, "commit": {"message": "fix: contract\n\nRefs #64"}}
             ],
+            "files": [{"filename": "scripts/hooks/pre-push.sh"}],
         }
 
         def gh_json(*arguments: str) -> object:
-            if len(arguments) == 1:
-                return compare
-            return [[{"filename": "scripts/hooks/pre-push.sh"}]]
+            return compare
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             self.assertEqual(
@@ -912,19 +936,18 @@ class VerifyPushIssueTest(unittest.TestCase):
                     issue_loader=lambda number: self.issue(number),
                 )
 
-    def test_pr_changed_paths_fails_closed_at_github_files_limit(self) -> None:
-        pages = [
-            [
-                {"filename": f"fixtures/{page}-{entry}.txt"}
-                for entry in range(100)
-            ]
-            for page in range(30)
-        ]
-        with patch.object(subject, "_gh_json", return_value=pages):
-            with self.assertRaisesRegex(subject.ContractViolation, "3,000件上限"):
+    def test_pr_changed_paths_fails_closed_at_github_compare_files_limit(self) -> None:
+        base_sha, head_sha = "a" * 40, "b" * 40
+        compare = {
+            "base_commit": {"sha": base_sha},
+            "files": [{"filename": f"fixtures/{entry}.txt"} for entry in range(300)],
+        }
+        with patch.object(subject, "_gh_json", return_value=compare):
+            with self.assertRaisesRegex(subject.ContractViolation, "300件上限"):
                 subject._pr_changed_paths(
                     repository="HiroyukiFuruno/katana-render-runtime",
-                    pr_number=72,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
                 )
 
     def test_trusted_default_advance_rejects_workflow_but_allows_nonworkflow_change(self) -> None:

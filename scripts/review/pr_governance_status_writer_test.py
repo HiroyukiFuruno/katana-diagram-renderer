@@ -44,10 +44,34 @@ class StatusWriterUnitTest(unittest.TestCase):
             "pull_requests": [{"number": 72, "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}}],
         }
 
+    @staticmethod
+    def snapshot(numbers: tuple[int, ...], claimants: dict[str, frozenset[int]] | None = None, *, drafts: frozenset[int] = frozenset()) -> object:
+        return WRITER.OpenSnapshot(
+            numbers,
+            {} if claimants is None else claimants,
+            tuple({"number": number, "isDraft": number in drafts, "head_sha": f"{number:040x}"[-40:]} for number in numbers),
+        )
+
     def test_canonical_issue_requires_exactly_one_closer(self) -> None:
         self.assertEqual(WRITER.canonical_issue("Fixes #64"), "64")
         self.assertIsNone(WRITER.canonical_issue("Fixes #64; closes #65"))
         self.assertIsNone(WRITER.canonical_issue("No closer"))
+
+    def test_full_url_closer_must_target_the_current_repository(self) -> None:
+        with self.identity():
+            self.assertEqual(
+                WRITER.canonical_issue("Fixes https://github.com/owner/repository/issues/64"),
+                "64",
+            )
+            self.assertIsNone(
+                WRITER.canonical_issue("Fixes https://github.com/other/repository/issues/64")
+            )
+            self.assertEqual(
+                WRITER.canonical_issue(
+                    "Fixes #64; fixes https://github.com/other/repository/issues/65"
+                ),
+                "64",
+            )
 
     def test_workflow_path_accepts_github_at_default_branch_not_arbitrary_suffix(self) -> None:
         expected = ".github/workflows/test-and-build.yml"
@@ -120,14 +144,32 @@ class StatusWriterUnitTest(unittest.TestCase):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.trusted_dispatcher_source(88)
 
-    def test_observed_pending_checks_override_a_smaller_dispatch_input(self) -> None:
+    def test_observed_invalidations_returns_only_exact_current_carry_markers(self) -> None:
         snapshot = WRITER.OpenSnapshot(
             (72, 73), {},
-            ({"number": 72, "head_sha": "a" * 40}, {"number": 73, "head_sha": "b" * 40}),
+            ({"number": 72, "isDraft": False, "head_sha": "a" * 40}, {"number": 73, "isDraft": False, "head_sha": "b" * 40}),
         )
-        pending = {"status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/88"}
-        with self.identity(), patch.object(WRITER, "check_run", return_value=pending):
-            self.assertEqual(WRITER.observed_invalidations(snapshot, WRITER.DispatcherSource(88, "issues", 1)), 2)
+        source = WRITER.DispatcherSource(88, "issues", 1)
+        with self.identity():
+            carry = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 1)}
+            fresh = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 0)}
+        terminal = {"status": "completed", "conclusion": "success", "details_url": WRITER.dispatcher_invalidation_url(source, 1)}
+        with self.identity(), patch.object(WRITER, "check_run", side_effect=[carry, fresh]):
+            self.assertEqual(WRITER.observed_invalidations(snapshot, source), frozenset({72}))
+        with self.identity(), patch.object(WRITER, "check_run", return_value=terminal):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, source)
+        draft_snapshot = WRITER.OpenSnapshot(
+            (72,), {}, ({"number": 72, "isDraft": True, "head_sha": "a" * 40},)
+        )
+        with self.identity(), patch.object(WRITER, "check_run", return_value=carry):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(draft_snapshot, source)
+        # A writer-owned pending URL is not a dispatcher carry marker.
+        for invalid in (None, fresh | {"details_url": "https://github.com/owner/repository/actions/runs/99"}):
+            with self.subTest(invalid=invalid), self.identity(), patch.object(WRITER, "check_run", return_value=invalid):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.observed_invalidations(snapshot, source)
 
     def test_terminal_rebind_rejects_default_branch_advance(self) -> None:
         responses = [
@@ -152,7 +194,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             self.assertTrue(WRITER.check_changed_since(head, WRITER.check_fingerprint(baseline)))
 
     def test_main_finalizes_each_pr_before_processing_the_next(self) -> None:
-        snapshot = WRITER.OpenSnapshot((72, 73), {}, ())
+        snapshot = self.snapshot((72, 73))
         first = WRITER.PendingDecision(72, "a" * 40, "b" * 40, (), "failure", "failed", None, None, None)
         second = WRITER.PendingDecision(73, "c" * 40, "d" * 40, (), "failure", "failed", None, None, None)
         calls: list[str] = []
@@ -167,7 +209,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             return True
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
-             patch.object(WRITER, "open_snapshot", return_value=snapshot), patch.object(WRITER, "observed_invalidations", return_value=0), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=process), patch.object(WRITER, "final_evidence_for_pr", side_effect=final), \
              patch.object(WRITER, "finalize_decision", side_effect=finalize):
@@ -179,8 +221,8 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "SERVER_URL", "https://github.com"), \
              patch.object(WRITER, "WRITER_RUN_ID", "99"), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
-             patch.object(WRITER, "open_snapshot", return_value=WRITER.OpenSnapshot((72, 73), {"64": frozenset({72, 73})}, ())), \
-             patch.object(WRITER, "observed_invalidations", return_value=0), \
+             patch.object(WRITER, "open_snapshot", return_value=self.snapshot((72, 73), {"64": frozenset({72, 73})})), \
+             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=[WRITER.GovernanceError("bad"), None]) as process:
             self.assertEqual(WRITER.main(), 1)
@@ -202,15 +244,22 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(snapshot.claimants["65"], frozenset({250}))
         self.assertEqual(command.call_count, 1)
 
-    def test_snapshot_rejects_missing_body_or_duplicate_pr_without_partial_decision(self) -> None:
+    def test_snapshot_normalizes_missing_body_but_rejects_duplicate_pr(self) -> None:
         valid = {"number": 72, "state": "open", "draft": False, "body": "Fixes #64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}}
-        for pages in (
-            [[{"number": 72, "state": "open", "body": None}]],
-            [[valid], [valid]],
-        ):
-            with self.subTest(pages=pages), self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), patch.object(WRITER, "command", return_value=json.dumps(pages)):
-                with self.assertRaises(WRITER.GovernanceError):
-                    WRITER.open_snapshot()
+        bodyless = {
+            "number": 71, "state": "open", "draft": False, "body": None,
+            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+            "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+        }
+        complete = {**valid, "head": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}}}
+        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), patch.object(WRITER, "command", return_value=json.dumps([[bodyless, complete]])):
+            snapshot = WRITER.open_snapshot()
+        self.assertEqual(snapshot.numbers, (71, 72))
+        self.assertEqual(snapshot.pull_requests[0]["body"], "")
+        self.assertEqual(snapshot.claimants["64"], frozenset({72}))
+        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), patch.object(WRITER, "command", return_value=json.dumps([[complete], [complete]])):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.open_snapshot()
 
     def test_snapshot_excludes_fork_claimant_from_local_canonical_issue(self) -> None:
         local = {"number": 72, "state": "open", "draft": False, "body": "Fixes #64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}}
@@ -227,9 +276,9 @@ class StatusWriterUnitTest(unittest.TestCase):
                 WRITER.open_snapshot()
 
     def test_300_pr_main_processes_all_after_one_failure_with_one_snapshot(self) -> None:
-        snapshot = WRITER.OpenSnapshot(tuple(range(1, 301)), {"64": frozenset(range(1, 301))}, ())
+        snapshot = self.snapshot(tuple(range(1, 301)), {"64": frozenset(range(1, 301))})
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), patch.object(WRITER, "open_snapshot", return_value=snapshot) as open_snapshot, \
-             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), patch.object(WRITER, "observed_invalidations", return_value=0), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=[WRITER.GovernanceError("one failed"), *([None] * 299)]) as process:
             self.assertEqual(WRITER.main(), 1)
@@ -237,11 +286,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(process.call_count, 300)
 
     def test_event_reserves_100_terminal_write_budget(self) -> None:
-        snapshot = WRITER.OpenSnapshot(tuple(range(1, 301)), {}, ())
+        snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, 99, "failure", "bad", None, None, None)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision) as process, \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -249,6 +299,29 @@ class StatusWriterUnitTest(unittest.TestCase):
             self.assertEqual(WRITER.main(), 0)
         self.assertEqual(process.call_count, 300)
         self.assertEqual(finalize.call_count, 100)
+
+    def test_carry_precedes_fresh_targets_and_converges_with_any_dispatcher_gaps(self) -> None:
+        numbers = tuple(range(1, 451))
+        remaining = frozenset(numbers)
+        # Each writer can safely terminalize only 50 event targets when every
+        # target needs a POST+PATCH.  A new dispatcher may have arbitrary
+        # skipped IDs, but carry is recorded on every unprocessed head.
+        for _dispatcher_id in (7, 8, 91, 1042, 1043, 99999, 100003, 100004, 900000):
+            ordered = WRITER.governance_order(self.snapshot(numbers), remaining)
+            self.assertEqual(ordered[:len(remaining)], tuple(sorted(remaining)))
+            completed = frozenset(ordered[:50])
+            remaining = remaining - completed
+        self.assertEqual(remaining, frozenset())
+
+    def test_200_permanent_drafts_do_not_starve_carried_or_fresh_terminal_targets(self) -> None:
+        numbers = tuple(range(1, 406))
+        drafts = frozenset((*range(1, 201), *range(206, 406)))
+        snapshot = self.snapshot(numbers, drafts=drafts)
+        # PR #204/#205 were previously budget-deferred.  They must run first,
+        # then fresh terminal PR #201-#203, before any of 400 Draft targets.
+        ordered = WRITER.governance_order(snapshot, frozenset({204, 205}))
+        self.assertEqual(ordered[:5], (204, 205, 201, 202, 203))
+        self.assertEqual(set(ordered[5:]), set(drafts))
 
     def test_300_ready_pr_main_stays_within_split_token_transport_budgets(self) -> None:
         numbers = tuple(range(1, 301))
@@ -276,7 +349,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 self.fail(f"unexpected verifier command: {command}")
             return Result()
         with self.identity(), patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), patch.object(WRITER, "observed_invalidations", return_value=0), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=evidence), patch.object(WRITER, "pull", side_effect=current), \
              patch.object(WRITER, "write_governance_check", side_effect=range(1, 1000)) as post, patch.object(WRITER.subprocess, "run", side_effect=verifier_transport), \
              patch.object(WRITER, "check_baseline", return_value=0) as baseline, \
@@ -473,6 +546,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 self.assertEqual(WRITER.contract(72, "b" * 40, "a" * 40, "branch", False, "/tmp/snapshot.json"), "success")
             self.assertEqual([value[1] for value in captured], [{"GH_TOKEN": "read-token", "PATH": os.environ["PATH"]}] * 2)
             self.assertNotIn("--open-pull-snapshot", captured[0][0])
+            self.assertIn("--exclude-trusted-governance-check", captured[1][0])
             self.assertEqual(captured[1][0][-2:], ["--open-pull-snapshot", "/tmp/snapshot.json"])
         finally:
             for key, value in previous.items():
@@ -551,6 +625,26 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(post.call_count, 2)
         sensor.assert_not_called(); generation.assert_not_called()
 
+    def test_bodyless_pr_defers_one_fail_closed_decision_to_the_budgeted_writer(self) -> None:
+        current = self.pull(72)
+        current["body"] = None
+        with self.identity(), patch.object(WRITER, "pull", return_value=current), \
+             patch.object(WRITER, "check_baseline", return_value=(101,)), \
+             patch.object(WRITER, "write_governance_check", return_value=(102,)) as post:
+            decision = WRITER.process(72, {}, "/tmp/snapshot.json", defer_terminal=True)
+        self.assertEqual(decision.state if decision is not None else None, "failure")
+        self.assertEqual(decision.description if decision is not None else None, "Trusted PR governance failed closed.")
+        post.assert_not_called()
+
+    def test_deferred_draft_reuses_the_dispatcher_pending_check_without_a_write(self) -> None:
+        current = self.pull(72, draft=True)
+        with self.identity(), patch.object(WRITER, "pull", return_value=current), \
+             patch.object(WRITER, "check_baseline", return_value=(101,)), \
+             patch.object(WRITER, "contract", return_value="pending"), \
+             patch.object(WRITER, "write_governance_check") as post:
+            self.assertIsNone(WRITER.process(72, {"64": frozenset({72})}, "/tmp/snapshot.json", defer_terminal=True))
+        post.assert_not_called()
+
     def test_same_head_rerun_before_final_success_returns_pending(self) -> None:
         current = self.pull(72)
         previous = (WRITER.Generation("CI", "x", 44, 1, 1, 1, "completed", "success"), WRITER.Generation("release-preflight", "y", 45, 2, 1, 1, "completed", "success"))
@@ -608,11 +702,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         command.assert_not_called()
 
     def test_schedule_reserves_two_writes_for_each_missing_terminal_check(self) -> None:
-        snapshot = WRITER.OpenSnapshot(tuple(range(1, 301)), {}, ())
+        snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "success", "ok", 77, (), "64")
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "spoofed"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -621,11 +716,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(finalize.call_count, 200)
 
     def test_event_writer_reserves_300_dispatcher_writes_and_ignores_count_spoofing(self) -> None:
-        snapshot = WRITER.OpenSnapshot(tuple(range(1, 301)), {}, ())
+        snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (102, "pending"), "success", "ok", 77, (), "64")
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "not-a-number"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -634,11 +730,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(finalize.call_count, 100)
 
     def test_exceptional_terminal_decisions_cannot_exceed_their_reserved_write_budget(self) -> None:
-        snapshot = WRITER.OpenSnapshot(tuple(range(1, 301)), {}, ())
+        snapshot = self.snapshot(tuple(range(1, 301)))
         decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "failure", "bad", None, None, None)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \

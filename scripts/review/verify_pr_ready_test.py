@@ -1356,6 +1356,32 @@ class VerifyPrReadyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "updatedAt changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
+    def test_rechecks_ci_status_rollup_immediately_before_success(self) -> None:
+        pull_request, threads, comments, reactions = successful_state()
+        final_snapshot = deepcopy(pull_request)
+        final_snapshot["statusCheckRollup"] = [
+            {
+                "__typename": "CheckRun",
+                "name": "CI",
+                "status": "IN_PROGRESS",
+                "conclusion": None,
+            }
+        ]
+
+        with patch.object(
+            subject, "_gh_json", side_effect=[pull_request, final_snapshot]
+        ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
+            subject, "_review_threads", return_value=threads
+        ), patch.object(subject, "_comment_reactions", return_value=reactions), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "CI status changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
     def test_rejects_body_change_after_initial_closing_contract(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
         changed_pull_request = dict(pull_request)
@@ -1433,7 +1459,12 @@ class VerifyPrReadyTest(unittest.TestCase):
         check = justfile[check_start:check_end]
         self.assertIn("verify_push_issue.py --pr-number \"$pr\" --pr-base-sha \"$base_sha\" --pr-head-sha \"$head_sha\"", check)
         self.assertIn("baseRefOid,headRefOid,headRefName,isDraft", check)
-        self.assertIn('"require-draft" if fields[4] else "allow-ready"', check)
+        self.assertIn('"require-draft" if fields[5] else "allow-ready"', check)
+        self.assertIn('gh repo view --json nameWithOwner', check)
+        self.assertIn('gh api graphql -f query=', check)
+        self.assertIn('target{__typename ... on Commit {oid}}', check)
+        self.assertIn('target.get("__typename") == "Commit"', check)
+        self.assertIn('--trusted-default-sha "$trusted_default_sha"', check)
         self.assertIn("verify_pr_ready.py --pr \"$pr\" --repository \"$repository\" \"--$readiness_mode\" --expected-base-sha \"$base_sha\" --expected-head-sha \"$head_sha\"", check)
         self.assertLess(check.index("verify_push_issue.py"), check.index("verify_pr_ready.py"))
 
@@ -1589,6 +1620,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
         source: dict[str, object] | None = None,
         source_history: list[dict[str, object]] | None = None,
         source_history_pages: list[list[dict[str, object]]] | None = None,
+        exclude_trusted_governance_check: bool = False,
     ) -> str | None:
         check_pages = pages if pages is not None else [{"check_runs": [self._run()]}]
         latch_check_pages = (
@@ -1619,8 +1651,13 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             if "/check-runs?" in endpoint:
                 if "review" in endpoint and "latch" in endpoint:
                     return latch_check_pages
+                if exclude_trusted_governance_check:
+                    raise AssertionError("internal mode must not read the trusted Check Run")
                 return check_pages
-            if endpoint == f"repos/{self.repository}/actions/runs/{self.source_run_id}":
+            if endpoint in {
+                f"repos/{self.repository}/actions/runs/{self.source_run_id}",
+                f"repos/{self.repository}/actions/runs/{source_run['id']}",
+            }:
                 return source_run
             if endpoint.startswith(
                 f"repos/{self.repository}/actions/workflows/"
@@ -1647,9 +1684,12 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                 self.branch,
                 self.base,
                 self.head,
+                exclude_trusted_governance_check=exclude_trusted_governance_check,
             )
 
-    def _allow_ready(self, sources: list[dict[str, object]]) -> int:
+    def _allow_ready(
+        self, sources: list[dict[str, object]], *, exclude_trusted_governance_check: bool = False
+    ) -> int:
         pull = {
             "isDraft": False,
             "baseRefOid": self.base,
@@ -1680,6 +1720,8 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             if "/check-runs?" in endpoint:
                 if "review" in endpoint and "latch" in endpoint:
                     return [{"check_runs": [self._latch_run()]}]
+                if exclude_trusted_governance_check:
+                    raise AssertionError("internal mode must not read the trusted Check Run")
                 return [{"check_runs": [self._run()]}]
             if endpoint == f"repos/{self.repository}/actions/runs/{self.source_run_id}":
                 if not source_queue:
@@ -1709,7 +1751,18 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             subject, "readiness_errors", return_value=[]
         ), patch.object(subject, "_verify_final_readiness_snapshot_unchanged"):
             return subject.main(
-                ["--pr", str(self.pull_request), "--repository", self.repository, "--allow-ready"]
+                [
+                    "--pr",
+                    str(self.pull_request),
+                    "--repository",
+                    self.repository,
+                    "--allow-ready",
+                    *(
+                        ["--exclude-trusted-governance-check"]
+                        if exclude_trusted_governance_check
+                        else []
+                    ),
+                ]
             )
 
     def test_draft_gate_does_not_require_trusted_or_latch_check_runs(self) -> None:
@@ -1767,6 +1820,28 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertIsNone(self._gate(source=self._source(event=event)))
         self.assertEqual(self._allow_ready([self._source(), self._source()]), 0)
+
+    def test_internal_writer_mode_excludes_only_the_trusted_check_output(self) -> None:
+        self.assertIsNone(self._gate(exclude_trusted_governance_check=True))
+        self.assertEqual(
+            self._allow_ready(
+                [self._source(), self._source()],
+                exclude_trusted_governance_check=True,
+            ),
+            0,
+        )
+
+    def test_internal_writer_mode_requires_allow_ready(self) -> None:
+        with self.assertRaises(SystemExit):
+            subject.main(
+                [
+                    "--pr",
+                    str(self.pull_request),
+                    "--repository",
+                    self.repository,
+                    "--exclude-trusted-governance-check",
+                ]
+            )
 
     def test_governance_check_rejects_missing_invalid_or_ambiguous_trusted_check_runs(self) -> None:
         invalid_runs: dict[str, list[dict[str, object]]] = {
@@ -1841,6 +1916,104 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             self._gate(latch_pages=[{"check_runs": [older_latch, self._latch_run()]}])
         )
 
+    def test_latch_url_accepts_exact_run_and_job_urls_only(self) -> None:
+        run_url = f"https://github.com/{self.repository}/actions/runs/{self.source_run_id}"
+        self.assertEqual(
+            subject._latch_source_run_id(run_url, self.repository),
+            str(self.source_run_id),
+        )
+        self.assertEqual(
+            subject._latch_source_run_id(
+                f"{run_url}/job/123", self.repository
+            ),
+            str(self.source_run_id),
+        )
+        for url in (
+            f"https://github.com/other/repo/actions/runs/{self.source_run_id}",
+            f"https://evil.example/{self.repository}/actions/runs/{self.source_run_id}",
+            f"https://github.com@evil.example/{self.repository}/actions/runs/{self.source_run_id}",
+            f"https://github.com:443/{self.repository}/actions/runs/{self.source_run_id}",
+            f"{run_url}?next=1",
+            f"{run_url}#fragment",
+            f"{run_url}/job/0",
+            f"{run_url}/extra",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(subject._latch_source_run_id(url, self.repository))
+
+    def test_latch_url_uses_the_configured_github_server_exactly(self) -> None:
+        url = f"https://ghe.example/{self.repository}/actions/runs/{self.source_run_id}"
+        with patch.dict(subject.os.environ, {"GITHUB_SERVER_URL": "https://ghe.example"}):
+            self.assertEqual(
+                subject._latch_source_run_id(url, self.repository),
+                str(self.source_run_id),
+            )
+            self.assertIsNone(
+                subject._latch_source_run_id(
+                    f"https://github.com/{self.repository}/actions/runs/{self.source_run_id}",
+                    self.repository,
+                )
+            )
+
+    def test_latch_job_url_accepts_only_the_current_trusted_source(self) -> None:
+        current = {
+            **self._latch_run(),
+            "details_url": (
+                f"https://github.com/{self.repository}/actions/runs/"
+                f"{self.source_run_id}/job/456"
+            ),
+        }
+        old = {
+            **self._latch_run(),
+            "id": 202,
+            "details_url": f"https://github.com/{self.repository}/actions/runs/900/job/456",
+        }
+        self.assertIsNone(self._gate(latch_pages=[{"check_runs": [old, current]}]))
+
+    def test_internal_mode_binds_latch_to_the_unique_latest_sensor_generation(self) -> None:
+        old = self._source()
+        latest = self._source(event="pull_request_review_comment")
+        latest.update({"id": 902, "run_number": 2})
+        latch = {
+            **self._latch_run(),
+            "details_url": f"https://github.com/{self.repository}/actions/runs/902/job/456",
+        }
+        self.assertIsNone(
+            self._gate(
+                source=latest,
+                source_history=[old, latest],
+                latch_pages=[{"check_runs": [latch]}],
+                exclude_trusted_governance_check=True,
+            )
+        )
+
+    def test_internal_mode_rejects_ambiguous_latest_sensor_generation(self) -> None:
+        latest_a = self._source(event="pull_request_review")
+        latest_b = self._source(event="pull_request_review_comment")
+        latest_a.update({"id": 902, "run_number": 2})
+        latest_b.update({"id": 902, "run_number": 2})
+        self.assertIsNotNone(
+            self._gate(
+                source_history=[latest_a, latest_b],
+                exclude_trusted_governance_check=True,
+            )
+        )
+
+    def test_sensor_history_fails_closed_on_a_truncated_page(self) -> None:
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[{"workflow_runs": [], "truncated": True}],
+        ):
+            with self.assertRaisesRegex(TypeError, "sensor workflow run page is truncated"):
+                subject._latest_sensor_generation(
+                    repository=self.repository,
+                    pull_request=self.pull_request,
+                    base_branch=self.branch,
+                    base_sha=self.base,
+                    head=self.head,
+                )
+
     def test_governance_check_rejects_mismatched_source_run_identity(self) -> None:
         variants: dict[str, dict[str, object]] = {}
         for field, value in (
@@ -1908,6 +2081,11 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                 self.assertIsNotNone(
                     self._gate(source_history_pages=[[self._source()], [newer]])
                 )
+
+    def test_governance_check_rejects_a_non_success_latest_snapshot_for_the_same_run(self) -> None:
+        stale = self._source()
+        stale.update({"status": "completed", "conclusion": "failure"})
+        self.assertIsNotNone(self._gate(source_history=[stale]))
 
     def test_allow_ready_rejects_source_base_change_between_initial_and_final_evidence(self) -> None:
         changed = deepcopy(self._source())

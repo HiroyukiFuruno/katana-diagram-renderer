@@ -64,6 +64,7 @@ GitHub のブランチ保護（branch protection）では、少なくとも次�
 
 cleanup は `scripts/release/cleanup_release_state.py` が担当する。
 GitHub Release が未公開、対象 branch が未統合、worktree が dirty または locked、対象が default branch のいずれかなら削除せず失敗する。
+local release branch tip と remote-tracking（remote）release branch tip が共存する場合は、両方が default branch に統合済みであることを worktree 除去・branch 削除の前に検証する。local に未push commit がある場合は、何も削除せず fail-closed で失敗する。
 ローカルで再実行する場合も、対象branchを明示して同じ安全条件を使う。
 
 ```bash

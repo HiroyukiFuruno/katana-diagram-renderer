@@ -462,7 +462,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, sys, time
-          from urllib.parse import urlencode
+          from urllib.parse import parse_qs, urlencode, urlparse
           repository=os.environ["GITHUB_REPOSITORY"]
           token=os.environ.get("CHECK_WRITE_TOKEN", "")
           app_id=os.environ.get("CHECK_APP_ID", "")
@@ -478,9 +478,13 @@ jobs:
               current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False)
               if current.returncode != 0:
                   failures.append(number); continue
-              try: pull=json.loads(current.stdout); head=pull.get("head",{}).get("sha") if isinstance(pull,dict) else None
-              except json.JSONDecodeError: head=None
-              if not isinstance(head,str) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None:
+              try:
+                  pull=json.loads(current.stdout)
+                  head=pull.get("head",{}).get("sha") if isinstance(pull,dict) else None
+                  draft=pull.get("draft") if isinstance(pull,dict) else None
+              except json.JSONDecodeError:
+                  head=draft=None
+              if not isinstance(head,str) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or type(draft) is not bool:
                   failures.append(number); continue
               external_id=f"krr-governance/v1/{head.lower()}"
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
@@ -494,12 +498,27 @@ jobs:
                   runs=[run for run in named if isinstance(run.get("app"),dict) and str(run["app"].get("id"))==app_id]
               except (json.JSONDecodeError, AttributeError): failures.append(number); continue
               if len(runs)>1: failures.append(number); continue
-              details=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+              run=runs[0] if runs else None
+              app=run.get("app") if isinstance(run,dict) else None
+              valid_existing_state=run is None or (run.get("status")=="in_progress" and run.get("conclusion") is None) or (run.get("status")=="completed" and run.get("conclusion") in {"success","failure"})
+              if run is not None and (run.get("head_sha")!=head or run.get("external_id")!=external_id or not valid_existing_state or not isinstance(app,dict) or str(app.get("id"))!=app_id or type(run.get("id")) is not int): failures.append(number); continue
+              server_url=os.environ["GITHUB_SERVER_URL"]
+              dispatcher_run_id=os.environ["GITHUB_RUN_ID"]
+              base_details=f"{server_url}/{repository}/actions/runs/"
+              base_parts=urlparse(base_details)
+              def is_prior_dispatcher_invalidation(details):
+                  if not isinstance(details,str): return False
+                  parts=urlparse(details)
+                  if parts.scheme != base_parts.scheme or parts.netloc != base_parts.netloc or parts.params or parts.fragment:
+                      return False
+                  run_id=parts.path.removeprefix(base_parts.path)
+                  query=parse_qs(parts.query,keep_blank_values=True)
+                  return bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path == base_parts.path + run_id and query.keys() == {"dispatcher_run_id","carry_pending"} and query["dispatcher_run_id"] == [run_id] and query["carry_pending"] in (["0"],["1"])
+              carry_pending=int(draft is False and run is not None and run.get("status")=="in_progress" and run.get("conclusion") is None and is_prior_dispatcher_invalidation(run.get("details_url")))
+              details=base_details + dispatcher_run_id + "?" + urlencode({"dispatcher_run_id":dispatcher_run_id,"carry_pending":str(carry_pending)})
               if not runs:
                   command=["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external_id}","-f","status=in_progress","-f",f"details_url={details}"]
               else:
-                  run=runs[0]; app=run.get("app") if isinstance(run,dict) else None
-                  if run.get("head_sha")!=head or run.get("external_id")!=external_id or not isinstance(app,dict) or str(app.get("id"))!=app_id or type(run.get("id")) is not int: failures.append(number); continue
                   command=["gh","api","--method","PATCH",f"repos/{repository}/check-runs/{run['id']}","-f","status=in_progress","-f",f"details_url={details}"]
               delay=next_write_at-time.monotonic()
               if delay > 0:

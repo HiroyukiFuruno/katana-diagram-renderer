@@ -124,6 +124,27 @@ class CleanupReleaseStateTest(unittest.TestCase):
         local = self.git("branch", "--list", "release/v9.9.9", cwd=self.repository).stdout
         self.assertNotEqual(local.strip(), "")
 
+    def test_refuses_cleanup_when_local_release_tip_is_unpushed(self) -> None:
+        self.create_release_branch(merge=True)
+        self.git("switch", "release/v9.9.9", cwd=self.repository)
+        (self.repository / "unpushed.txt").write_text("unpushed\n", encoding="utf-8")
+        self.git("add", "unpushed.txt", cwd=self.repository)
+        self.git("commit", "-m", "unpushed release change", cwd=self.repository)
+        self.git("switch", "master", cwd=self.repository)
+
+        with self.assertRaisesRegex(subject.CleanupError, "未統合"):
+            self.cleanup()
+
+        self.assertTrue(self.remote_branch_exists("release/v9.9.9"))
+        local = self.git("branch", "--list", "release/v9.9.9", cwd=self.repository).stdout
+        self.assertNotEqual(local.strip(), "")
+        preserved = self.git(
+            "show",
+            "release/v9.9.9:unpushed.txt",
+            cwd=self.repository,
+        ).stdout
+        self.assertEqual(preserved, "unpushed\n")
+
     def test_retains_dirty_linked_worktree(self) -> None:
         self.create_release_branch(merge=True)
         worktree = self.root / "release-worktree"

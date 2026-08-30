@@ -79,7 +79,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 run = {"name": "CI", "path": path, "event": "pull_request", "status": "completed", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}]}
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
-                    "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9\"}' ;;\n"
+                    "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0\"}' ;;\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' '[]' ;;\n"
@@ -282,6 +282,54 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("time.sleep(delay)", program)
         self.assertLess(program.index("next_write_at=time.monotonic()+8.1"), program.index("for number in numbers:"))
 
+    def test_invalidator_reopens_terminal_trusted_checks_but_marks_carry_only_for_pending_dispatcher_state(self) -> None:
+        match = re.search(
+            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = match.group(1)
+        self.assertIn('run.get("status")=="completed" and run.get("conclusion") in {"success","failure"}', program)
+        self.assertIn('run.get("status")=="in_progress" and run.get("conclusion") is None and is_prior_dispatcher_invalidation', program)
+        self.assertIn('draft is False and run is not None', program)
+        self.assertIn('type(draft) is not bool', program)
+        self.assertIn('"carry_pending":str(carry_pending)', program)
+
+    def test_invalidator_resets_a_prior_dispatcher_marker_on_a_draft_to_carry_zero(self) -> None:
+        match = re.search(
+            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = match.group(1).replace("time.sleep(delay)", "None")
+        head = "a" * 40
+        prior = {
+            "id": 101, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
+            "head_sha": head, "external_id": "krr-governance/v1/" + head,
+            "status": "in_progress", "conclusion": None,
+            "details_url": "https://github.com/owner/repository/actions/runs/8?dispatcher_run_id=8&carry_pending=1",
+        }
+        current = {**prior, "details_url": "https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0"}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); fake = directory / "gh"; log = directory / "patch.log"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                f"  *'--method PATCH'*) echo \"$*\" >> '{log}'; printf '%s' '{json.dumps(current)}' ;;\n"
+                f"  *'check-runs/101'*) printf '%s' '{json.dumps(current)}' ;;\n"
+                f"  *'check-runs?'*) printf '%s' '{json.dumps([{'check_runs': [prior]}])}' ;;\n"
+                "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                "  *) exit 91 ;;\nesac\n", encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+                "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "AFFECTED": "[72]",
+                "PULL": json.dumps({"draft": True, "head": {"sha": head}}),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("carry_pending=0", log.read_text(encoding="utf-8"))
+
     def test_writer_drain_handles_historical_and_completed_races_but_fails_closed_otherwise(self) -> None:
         match = re.search(
             r"- name: Drain authoritative writer before invalidation.*?python3 - <<'PY'\n(.*?)\n          PY",
@@ -383,7 +431,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "id": 101, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
             "head_sha": "a" * 40, "external_id": "krr-governance/v1/" + "a" * 40,
             "status": "in_progress", "conclusion": None,
-            "details_url": "https://github.com/owner/repository/actions/runs/9",
+            "details_url": "https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0",
         }
         for response in ({**base, "app": {"id": 7}}, {**base, "id": "101"}, {**base, "app": {"id": True}}):
             with self.subTest(response=response), tempfile.TemporaryDirectory() as temporary:
@@ -402,7 +450,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                     "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "PULLS": json.dumps([[{"number": 72, "state": "open"}]]),
                     "AFFECTED": "[72]",
-                    "PULL": json.dumps({"head": {"sha": "a" * 40}}), "POST": json.dumps(response),
+                    "PULL": json.dumps({"draft": False, "head": {"sha": "a" * 40}}), "POST": json.dumps(response),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
@@ -423,14 +471,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'check-runs?'*) printf '%s' '[]' ;;\n"
-                    "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9\"}' ;;\n"
+                    "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     "  *'/pulls/'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'--method POST'*)\n"
                     f"    echo \"$*\" >> '{log}'\n"
                     f"    count=$(awk 'END {{ print NR }}' '{log}')\n"
                     f"    if [ '{failed}' = \"$count\" ]; then exit 7; fi\n"
-                    "    printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9\"}' ;;\n"
+                    "    printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 )
                 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
@@ -438,7 +486,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
                     "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "PULLS": "[]",
                     "AFFECTED": json.dumps(list(range(1, total + 1))),
-                    "PULL": json.dumps({"head": {"sha": "a" * 40}}),
+                    "PULL": json.dumps({"draft": False, "head": {"sha": "a" * 40}}),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)

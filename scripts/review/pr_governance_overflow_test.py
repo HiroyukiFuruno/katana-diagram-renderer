@@ -13,8 +13,16 @@ class GovernanceOverflowContractTest(unittest.TestCase):
     def test_writer_has_no_matrix_or_256_target_limit(self) -> None:
         self.assertNotIn("matrix:", self.workflow)
         self.assertNotIn("MAX_MATRIX", self.writer)
-        self.assertIn("for number in snapshot.numbers:", self.writer)
+        self.assertIn("for number in governance_order(snapshot, carry):", self.writer)
         self.assertIn("failures += 1", self.writer)
+
+    def test_bounded_terminal_writes_carry_the_tail_to_the_next_dispatcher(self) -> None:
+        self.assertIn("def governance_order(", self.writer)
+        self.assertIn("def dispatcher_invalidation_url(", self.writer)
+        self.assertIn('urlencode({"dispatcher_run_id": str(source.identifier), "carry_pending": str(carry_pending)})', self.writer)
+        self.assertIn("Return exactly the carry targets marked by this dispatcher invalidation.", self.writer)
+        self.assertIn("Draft pull request cannot carry a terminal governance decision.", self.writer)
+        self.assertIn('terminal_write_budget = 400 if dispatcher_source.event == "schedule" else 100', self.writer)
 
     def test_open_pr_and_check_run_api_reads_are_fully_paginated(self) -> None:
         self.assertIn('pulls?state=open&per_page=100', self.writer)

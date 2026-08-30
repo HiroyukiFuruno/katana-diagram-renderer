@@ -302,19 +302,18 @@ def cleanup_release_state(
         audited_remote_sha = _remote_branch_sha(repository, remote, release_branch)
     local_exists = _ref_exists(repository, f"refs/heads/{release_branch}")
     target_worktrees = [tree for tree in _worktrees(repository) if tree.branch == release_branch]
-    target_ref = (
-        f"{remote}/{release_branch}"
-        if remote_exists
-        else release_branch
-        if local_exists
-        else None
-    )
-    if target_ref is not None and not _is_ancestor(
-        repository,
-        target_ref,
-        f"{remote}/{default_branch}",
-    ):
-        raise CleanupError(f"{release_branch}は{default_branch}へ未統合のため保持します")
+    default_ref = f"{remote}/{default_branch}"
+    # local/remote refが共存する場合は、どちらのtipも統合先へ含まれる
+    # ことをmutation前に確認する。localだけ進んだ状態でworktreeやremote
+    # refを先に削除すると、未push commitを失うためfail-closedにする。
+    target_refs = []
+    if remote_exists:
+        target_refs.append(f"{remote}/{release_branch}")
+    if local_exists:
+        target_refs.append(release_branch)
+    for target_ref in target_refs:
+        if not _is_ancestor(repository, target_ref, default_ref):
+            raise CleanupError(f"{release_branch}は{default_branch}へ未統合のため保持します")
 
     for worktree in target_worktrees:
         if worktree.path == repository:

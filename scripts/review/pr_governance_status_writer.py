@@ -34,8 +34,10 @@ DISPATCHER_EVENTS = frozenset({"pull_request_target", "issue_comment", "issues",
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 NUMBER = re.compile(r"[1-9][0-9]*")
 CLOSING = re.compile(
-    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b\s+"
-    r"(?:#|https://github\.com/[^/\s]+/[^/\s]+/issues/)([1-9][0-9]*)\b",
+    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b\s+(?:"
+    r"#(?P<short>[1-9][0-9]*)|"
+    r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)/issues/(?P<full>[1-9][0-9]*)"
+    r")\b",
     re.I,
 )
 _last_check_write_at: float | None = None
@@ -151,6 +153,11 @@ def open_snapshot() -> OpenSnapshot:
             head_repository = head.get("repo") if isinstance(head, dict) else None
             head_sha = head.get("sha") if isinstance(head, dict) else None
             draft = item.get("draft") if isinstance(item, dict) else None
+            # GitHub represents an absent PR description as JSON null.  It is
+            # an invalid closer for that individual PR, not a malformed
+            # repository-wide snapshot which would strand every other head.
+            if body is None:
+                body = ""
             if type(number) is not int or number < 1 or number in seen_all or item.get("state") != "open" or not isinstance(body, str) or not isinstance(draft, bool):
                 raise GovernanceError("Open pull request snapshot is invalid.")
             seen_all.add(number)
@@ -164,7 +171,7 @@ def open_snapshot() -> OpenSnapshot:
                 continue
             numbers.append(number)
             pull_requests.append({"number": number, "isDraft": draft, "body": body, "head_sha": head_sha})
-            for issue in set(CLOSING.findall(body)):
+            for issue in closing_issues(body):
                 claimants.setdefault(issue, set()).add(number)
     return OpenSnapshot(tuple(numbers), {issue: frozenset(values) for issue, values in claimants.items()}, tuple(pull_requests))
 
@@ -197,10 +204,28 @@ def pull(number: int, *, default_token: bool = False) -> dict[str, Any]:
 def canonical_issue(body: object) -> str | None:
     if not isinstance(body, str):
         raise GovernanceError("Pull request body is invalid.")
-    issues = set(CLOSING.findall(body))
+    issues = closing_issues(body)
     if len(issues) != 1:
         return None
     return next(iter(issues))
+
+
+def closing_issues(body: str) -> set[str]:
+    """Return only closing references that target this repository.
+
+    Short ``#123`` forms are necessarily local.  A fully-qualified URL must
+    name ``GITHUB_REPOSITORY``; otherwise an unrelated repository's Issue
+    could poison this repository's canonical-closer fence.
+    """
+    repository = REPOSITORY.casefold()
+    issues: set[str] = set()
+    for match in CLOSING.finditer(body):
+        short, owner, name, full = match.group("short", "owner", "repository", "full")
+        if short is not None:
+            issues.add(short)
+        elif full is not None and f"{owner}/{name}".casefold() == repository:
+            issues.add(full)
+    return issues
 
 
 def workflow_path_matches(value: object, expected: str) -> bool:
@@ -492,23 +517,39 @@ def check_fence(head: str, baseline: tuple[object, ...], sensor_id: int, *, desi
     return newer, terminal_count, exact
 
 
-def observed_invalidations(snapshot: OpenSnapshot, source: DispatcherSource) -> int:
-    """Count only pending Checks synchronously bound to this dispatcher run."""
-    expected_details = f"{SERVER_URL}/{REPOSITORY}/actions/runs/{source.identifier}"
-    count = 0
+def dispatcher_invalidation_url(source: DispatcherSource, carry_pending: int) -> str:
+    if carry_pending not in {0, 1}:
+        raise GovernanceError("Dispatcher carry marker is invalid.")
+    return (
+        f"{SERVER_URL}/{REPOSITORY}/actions/runs/{source.identifier}?"
+        + urlencode({"dispatcher_run_id": str(source.identifier), "carry_pending": str(carry_pending)})
+    )
+
+
+def observed_invalidations(snapshot: OpenSnapshot, source: DispatcherSource) -> frozenset[int]:
+    """Return exactly the carry targets marked by this dispatcher invalidation."""
+    expected_fresh = dispatcher_invalidation_url(source, 0)
+    expected_carry = dispatcher_invalidation_url(source, 1)
+    carry: set[int] = set()
     for pull_request in snapshot.pull_requests:
+        number = pull_request.get("number")
         head = pull_request.get("head_sha")
-        if not isinstance(head, str) or not SHA.fullmatch(head):
+        draft = pull_request.get("isDraft")
+        if type(number) is not int or number < 1 or type(draft) is not bool or not isinstance(head, str) or not SHA.fullmatch(head):
             raise GovernanceError("Open pull request head is invalid.")
         value = check_run(head)
         if value is None:
-            continue
-        if (
-            value.get("status") == "in_progress" and value.get("conclusion") is None
-            and value.get("details_url") == expected_details
-        ):
-            count += 1
-    return count
+            raise GovernanceError("Dispatcher invalidation Check Run is missing.")
+        if value.get("status") != "in_progress" or value.get("conclusion") is not None:
+            raise GovernanceError("Dispatcher invalidation Check Run state is invalid.")
+        details = value.get("details_url")
+        if details not in {expected_fresh, expected_carry}:
+            raise GovernanceError("Dispatcher invalidation Check Run evidence is stale or foreign.")
+        if details == expected_carry:
+            if draft:
+                raise GovernanceError("Draft pull request cannot carry a terminal governance decision.")
+            carry.add(number)
+    return frozenset(carry)
 
 
 def sensor(number: int, base: str, head: str, evidence: EvidenceSnapshot | None = None) -> int:
@@ -723,8 +764,13 @@ def contract(number: int, base: str, head: str, branch: str, draft: bool, snapsh
         return "pending"
     ready = subprocess.run(
         [sys.executable, "scripts/review/verify_pr_ready.py", "--pr", str(number),
-         "--expected-base-sha", base, "--expected-head-sha", head, "--allow-ready", "--open-pull-snapshot", snapshot_path], check=False,
-         env=read_environment(),
+         "--expected-base-sha", base, "--expected-head-sha", head, "--allow-ready",
+         # This writer is producing the trusted Check Run itself.  The
+         # verifier still checks its App binding, latch/source, CI, Issue and
+         # review evidence, but must not require this output to already be
+         # completed/success while it is deliberately in_progress.
+         "--exclude-trusted-governance-check", "--open-pull-snapshot", snapshot_path], check=False,
+        env=read_environment(),
     )
     return "success" if ready.returncode == 0 else "failure"
 
@@ -777,6 +823,11 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
         # A Draft is deliberately non-terminal. It must not require a final
         # review sensor or release-preflight run merely to stay pending.
         if draft:
+            if defer_terminal:
+                # The dispatcher already invalidated this head.  Do not add
+                # an unbudgeted pending mutation while an all-open writer is
+                # deliberately conserving its Check Run write allowance.
+                return None
             if not check_changed_since(head, pending):
                 write_governance_check(head, "pending", "Draft PR governance remains pending.", target_url())
             return
@@ -839,6 +890,14 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
     except NoPostGovernanceError:
         raise
     except GovernanceError:
+        if defer_terminal:
+            # Main owns the terminal-write reservation.  Publishing a
+            # fail-closed result here would let malformed tail PRs bypass the
+            # 100/400 write budget and reintroduce a rate-limit burst.
+            return PendingDecision(
+                number, head, base, pending, "failure",
+                "Trusted PR governance failed closed.", None, None, None,
+            )
         if not check_changed_since(head, pending):
             write_governance_check(
                 head, "failure", "Trusted PR governance failed closed.", target_url(),
@@ -923,6 +982,29 @@ def decision_write_cost(decision: PendingDecision) -> int:
     return 1 if decision.state == "pending" else 2
 
 
+def governance_order(snapshot: OpenSnapshot, carry: frozenset[int]) -> tuple[int, ...]:
+    """Prioritize terminal carry, then fresh terminal work, then Drafts."""
+    numbers = snapshot.numbers
+    if not carry.issubset(numbers):
+        raise GovernanceError("Dispatcher carry target is outside the open snapshot.")
+    drafts: dict[int, bool] = {}
+    for pull_request in snapshot.pull_requests:
+        number = pull_request.get("number")
+        draft = pull_request.get("isDraft")
+        if type(number) is not int or number not in numbers or type(draft) is not bool or number in drafts:
+            raise GovernanceError("Open pull request draft state is invalid.")
+        drafts[number] = draft
+    if set(drafts) != set(numbers):
+        raise GovernanceError("Open pull request draft snapshot is incomplete.")
+    if any(drafts[number] for number in carry):
+        raise GovernanceError("Draft pull request cannot carry a terminal governance decision.")
+    return (
+        tuple(number for number in numbers if number in carry)
+        + tuple(number for number in numbers if not drafts[number] and number not in carry)
+        + tuple(number for number in numbers if drafts[number])
+    )
+
+
 def main() -> int:
     if not REPOSITORY or not SERVER_URL or not NUMBER.fullmatch(WRITER_RUN_ID):
         print("Writer runtime identity is invalid.", file=sys.stderr)
@@ -934,7 +1016,7 @@ def main() -> int:
     try:
         dispatcher_source = trusted_dispatcher_source(int(dispatcher_run_id))
         snapshot = open_snapshot()
-        observed_invalidations(snapshot, dispatcher_source)
+        carry = observed_invalidations(snapshot, dispatcher_source)
         initial_evidence = evidence_snapshot()
     except GovernanceError as error:
         print(str(error), file=sys.stderr)
@@ -953,7 +1035,7 @@ def main() -> int:
         # rolling Check Run mutation maximum at 445/hour. Creating a terminal
         # Check Run costs pending POST plus terminal PATCH.
         terminal_write_budget = 400 if dispatcher_source.event == "schedule" else 100
-        for number in snapshot.numbers:
+        for number in governance_order(snapshot, carry):
             decision: PendingDecision | None = None
             try:
                 decision = process(number, snapshot.claimants, source.name, initial_evidence, defer_terminal=True)

@@ -46,8 +46,6 @@ _ZERO_SHA = "0" * 40
 _SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 _REPOSITORY_PATTERN = re.compile(r"^[^/\s]+/[^/\s]+$")
 _NAME_STATUS_PATTERN = re.compile(r"^(?P<kind>[ACDMRTUXB])(?P<score>\d{1,3})?$")
-_PR_FILES_PAGE_SIZE = 100
-_PR_FILES_MAX_PAGES = 30
 _WORKFLOW_DIRECTORY_PREFIX = ".github/workflows/"
 _MANIFEST_NAMES = {
     "Cargo.toml",
@@ -460,43 +458,43 @@ def referenced_issue_snapshot(
     return tuple(snapshot)
 
 
-def _pr_changed_paths(*, repository: str, pr_number: int) -> list[str]:
-    pages = _gh_json(
-        "--paginate",
-        "--slurp",
-        f"repos/{repository}/pulls/{pr_number}/files?per_page={_PR_FILES_PAGE_SIZE}",
-    )
-    if not isinstance(pages, list):
-        raise ContractViolation("GitHub PR files responseの形式が不正です")
-    # GitHub caps this endpoint at 3,000 files.  A full thirtieth page is
-    # indistinguishable from a truncated result, so dependency evidence must
-    # reject it rather than validate a partial path set.
-    if len(pages) > _PR_FILES_MAX_PAGES or (
-        len(pages) == _PR_FILES_MAX_PAGES
-        and isinstance(pages[-1], list)
-        and len(pages[-1]) == _PR_FILES_PAGE_SIZE
+def _pr_changed_paths(
+    *, repository: str, base_sha: str, head_sha: str
+) -> list[str]:
+    """Read paths from immutable base..head objects, never mutable PR metadata."""
+
+    comparison = _gh_json(f"repos/{repository}/compare/{base_sha}...{head_sha}")
+    if not isinstance(comparison, dict):
+        raise ContractViolation("GitHub compare responseの形式が不正です")
+    base_commit = comparison.get("base_commit")
+    if not isinstance(base_commit, dict) or (
+        _require_sha(base_commit.get("sha"), "compare base SHA") != base_sha
     ):
+        raise ContractViolation("GitHub compare responseのbase SHAが一致しません")
+    files = comparison.get("files")
+    if not isinstance(files, list):
+        raise ContractViolation("GitHub compare filesの形式が不正です")
+    # GitHub returns at most 300 paths for a comparison.  A full page is
+    # ambiguous, so never let partial dependency or workflow evidence pass.
+    if len(files) >= 300:
         raise ContractViolation(
-            "GitHub PR files responseが3,000件上限で打ち切られた可能性があります"
+            "GitHub compare filesが300件上限で打ち切られた可能性があります"
         )
     paths: list[str] = []
-    for page in pages:
-        if not isinstance(page, list):
-            raise ContractViolation("GitHub PR files pageの形式が不正です")
-        for changed_file in page:
-            if not isinstance(changed_file, dict):
-                raise ContractViolation("GitHub PR files entryの形式が不正です")
-            filename = changed_file.get("filename")
-            if not isinstance(filename, str) or not filename:
-                raise ContractViolation("GitHub PR files entryのfilenameが不正です")
-            paths.append(filename)
-            previous_filename = changed_file.get("previous_filename")
-            if previous_filename is not None:
-                if not isinstance(previous_filename, str) or not previous_filename:
-                    raise ContractViolation(
-                        "GitHub PR files entryのprevious_filenameが不正です"
-                    )
-                paths.append(previous_filename)
+    for changed_file in files:
+        if not isinstance(changed_file, dict):
+            raise ContractViolation("GitHub compare files entryの形式が不正です")
+        filename = changed_file.get("filename")
+        if not isinstance(filename, str) or not filename:
+            raise ContractViolation("GitHub compare files entryのfilenameが不正です")
+        paths.append(filename)
+        previous_filename = changed_file.get("previous_filename")
+        if previous_filename is not None:
+            if not isinstance(previous_filename, str) or not previous_filename:
+                raise ContractViolation(
+                    "GitHub compare files entryのprevious_filenameが不正です"
+                )
+            paths.append(previous_filename)
     return paths
 
 
@@ -603,7 +601,9 @@ def validate_pr_range(
         issue_loader=issue_loader,
     )
 
-    changed_paths = _pr_changed_paths(repository=repository, pr_number=pr_number)
+    changed_paths = _pr_changed_paths(
+        repository=repository, base_sha=base_sha, head_sha=head_sha
+    )
     protected_workflows = _trusted_workflow_path_errors(changed_paths)
     if protected_workflows:
         raise ContractViolation(
