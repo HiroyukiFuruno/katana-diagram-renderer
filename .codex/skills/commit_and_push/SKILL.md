@@ -81,23 +81,34 @@ git push
 `git push --no-verify` は使いません。
 hook 自体の不具合など例外が必要な場合は、理由、直前に通した検証、対象 commit を tasks.md または PR 本文に記録してからユーザーに確認します。
 
+PR に紐付く push の直前には GitHub API から current PR の `head.sha` と `body` を再取得する。`body` は JSON string、NUL を含まない UTF-8 strict の文字列だけを受け入れ、`hashlib.sha256(body.encode("utf-8", "strict")).hexdigest()` の64桁小文字hexを記録する。同一 HEAD で本文 digest が既存 marker と異なる場合、旧reviewとtrusted successは失効しているため、push前でも Ready 化・merge を進めない。
+
 ## 6. PR 紐付き変更の後続フロー
 
 PR に紐付く変更では、push 成功や CI green だけで review 完了・Ready 条件成立とは扱いません。push 後も PR は Draft のまま維持し、次の review 循環へ戻ります。
 
-initial review は `create_pull_request` スキルの担当とし、このスキルでは push 後の final review に戻る。
+最初の initial review は `create_pull_request` スキルが起点にするが、このスキルによる後続 push も新しい initial review を起点にする。
 
-1. 最新 push 後に `head_sha=$(git rev-parse HEAD)` を取得し、コメント本文へ次の marker と `@codex review` を含めて final review を依頼する。
+1. push 後、GitHub API から current PR の `head.sha` と `body` を再取得し、NUL・non-string・UTF-8 strict 不能を fail-closed で拒否する。marker は属性順序と空白を含めて `^<!-- krr-review phase=(?:initial|final) head=[0-9a-f]{40} body-sha256=[0-9a-f]{64} -->$` に完全一致させる。本文 digest は `hashlib.sha256(body.encode("utf-8", "strict")).hexdigest()` のみを使う。
+
+2. 新しい push は新しい HEAD と current 本文に対する **initial review** を必ず開始する。以前の final reviewを同一修正循環へ持ち越さない。
 
    ```text
-   <!-- krr-review phase=final head=${head_sha} -->
+   <!-- krr-review phase=initial head=<40-lowerhex> body-sha256=<64-lowerhex> -->
    @codex review
    ```
 
-2. final review で新規指摘が出たら、分離可能な修正を subagent に委譲し、修正 → push → 最新 HEAD の `head_sha` で final marker review を繰り返す。旧 HEAD の review は完了扱いにしない。
-3. 修正した各 review thread に、対応内容と検証結果を reply し、確認できた thread だけを resolve する。
-4. review thread の未 resolve 数が 0 であることを確認する。CI green だけで review 完了・Ready 条件成立とは扱わない。
-5. 最新 HEAD の review 完了、未 resolve 0、必要な CI/品質ゲート確認を満たしたら、main が機械ゲートを実行する。成功後も PR は Draft のまま維持し、ユーザーの明示承認後に main が Ready 化を判断する。このスキルは Ready 化コマンドを実行しない。
+3. initial review の指摘を解消して thread reply/resolve と検証を完了したら、marker投稿直前に current PR の HEAD・本文を再取得して同じdigestを再計算し、次の final review を依頼する。取得値が initial marker と異なる場合は final を投稿せず、新しい initial review からやり直す。
+
+   ```text
+   <!-- krr-review phase=final head=<40-lowerhex> body-sha256=<64-lowerhex> -->
+   @codex review
+   ```
+
+4. initial/final のいずれでも新規指摘が出たら、分離可能な修正を subagent に委譲し、修正 → push → 新HEAD・本文の initial review から反復する。同一 HEAD でも body edit により digest が変われば、旧 marker、review、trusted success を完了扱いにしない。
+5. 修正した各 review thread に、対応内容と検証結果を reply し、確認できた thread だけを resolve する。
+6. review thread の未 resolve 数が 0 であることを確認する。CI green だけで review 完了・Ready 条件成立とは扱わない。
+7. 最新 HEAD・本文 digest の review 完了、未 resolve 0、必要な CI/品質ゲート確認を満たしたら、main が機械ゲートを実行する。success を再利用する writer/trusted Check Run evidence の query にある current `pr_body_sha256` は、GitHub APIから再取得した current PR body を正規化せず strict UTF-8でSHA-256化したdigestと**ちょうど1個（exactly one）**一致しなければならない。missing、duplicate、stale、または異なるdigestはfail-closedで拒否し、旧successを再利用せずReady化・mergeへ進まない。成功後も PR は Draft のまま維持し、ユーザーの明示承認後に main が Ready 化を判断する。このスキルは Ready 化コマンドを実行しない。
 
 P1 などの review 指摘修正を実装する場合、分離可能ならファイルまたは責務単位で subagent に委譲し、main はオーケストレーターとして要件・DoD・差分・検証を統合確認する。同じファイルや責務を重ねて委譲しない。
 

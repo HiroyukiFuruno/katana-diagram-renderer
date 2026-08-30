@@ -69,34 +69,52 @@ git push -u origin release/vX.Y.Z
 lefthook run pre-pr
 pr_url="$(gh pr create --draft --base master --head release/vX.Y.Z --title "Prepare vX.Y.Z release" --body-file <pr-body-file>)"
 gh pr view "${pr_url}" --json isDraft --jq '.isDraft'
-head_sha="$(git rev-parse HEAD)"
-review_body="<!-- krr-review phase=initial head=${head_sha} -->"$'\n@codex review'
+review_body="$(gh pr view "${pr_url}" --json headRefOid,body | python3 -c '
+import hashlib, json, re, sys
+value = json.load(sys.stdin); head = value.get("headRefOid"); body = value.get("body")
+if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}", head) is None or not isinstance(body, str) or "\0" in body:
+    raise SystemExit("Current PR head/body is invalid")
+try:
+    digest = hashlib.sha256(body.encode("utf-8", "strict")).hexdigest()
+except UnicodeEncodeError:
+    raise SystemExit("Current PR body is not strict UTF-8")
+print(f"<!-- krr-review phase=initial head={head} body-sha256={digest} -->\n@codex review")
+')"
 gh pr comment "${pr_url}" --body "${review_body}"
 ```
 
 `gh pr view` の結果が `true` であることを確認してから、Draft PR 上で明示的に初回 `@codex review` を依頼します。
-初回 review コメントには、依頼直前の `git rev-parse HEAD` で取得した SHA を `<!-- krr-review phase=initial head=${head_sha} -->` marker として含め、その直後に `@codex review` を置きます。
+初回 marker の投稿直前に GitHub API から current PR の HEAD と本文を再取得する。marker は `^<!-- krr-review phase=(?:initial|final) head=[0-9a-f]{40} body-sha256=[0-9a-f]{64} -->$` に完全一致させ、本文は JSON string・NULなし・UTF-8 strict を確認したバイト列の SHA-256 小文字16進表現だけを使う。
 レビュー（review）はローカルの自己レビューではなく cloud review を正とし、指摘は GitHub 上の review comment から取得して対応します。
 
 ## Phase 5: PR gate
 
-Draft 上の cloud review は最低2回、かつ最新 HEAD に対して実施します。
+Draft 上の cloud review は最低2回、かつ最新 HEAD・本文 digest に対して実施します。
 
 1. 初回 review: PR 作成直後に `@codex review` を投稿する。
-2. 最終 review: 指摘修正を push した後（指摘がなく修正 push がない場合も merge 前）、同じ PR の最新 HEAD に対してもう一度 `@codex review` を投稿する。
+2. 最終 review: 指摘対応、thread reply / resolve、検証を終えた後（指摘がなく修正 push がない場合も merge 前）、同じ PR の最新 HEAD・本文に対してもう一度 `@codex review` を投稿する。
 
-指摘修正は、指摘対象ファイルと責務を分離して subagent へ移譲します。各 review thread について、修正内容を thread へ reply し、確認後に resolve します。2回目以降で指摘が出た場合も、修正 push 後に最新 HEAD への review を追加し、各 thread の reply / resolve を完了します。
-完了条件は「最低2回実施」「最新 HEAD が review 済み」「未 resolve thread が 0」です。
+指摘修正は、指摘対象ファイルと責務を分離して subagent へ移譲します。各 review thread について、修正内容を thread へ reply し、確認後に resolve します。push 後は旧 HEAD の review を継続利用せず、GitHub API で再取得した新HEAD・本文の `initial` marker から review をやり直します。同一 HEAD でも本文 digest が変わった marker・review・trusted success は失効し、同じく `initial` からやり直します。
+完了条件は「最低2回実施」「最新 HEAD・本文 digest が review 済み」「未 resolve thread が 0」です。
 
-指摘修正を push した後（指摘がなく修正 push がない場合も merge 前）は、依頼直前の最新 HEAD を marker に固定して最終 review を依頼します。
+最終 review の marker投稿直前に、GitHub API から current PR の HEAD・本文を再取得し、initial marker と同じstrict検証とdigest計算を行う。取得値が initial marker と異なる場合は final marker を投稿せず、新しい initial review からやり直す。
 
 ```bash
-head_sha="$(git rev-parse HEAD)"
-review_body="<!-- krr-review phase=final head=${head_sha} -->"$'\n@codex review'
+review_body="$(gh pr view "${pr_url}" --json headRefOid,body | python3 -c '
+import hashlib, json, re, sys
+value = json.load(sys.stdin); head = value.get("headRefOid"); body = value.get("body")
+if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}", head) is None or not isinstance(body, str) or "\0" in body:
+    raise SystemExit("Current PR head/body is invalid")
+try:
+    digest = hashlib.sha256(body.encode("utf-8", "strict")).hexdigest()
+except UnicodeEncodeError:
+    raise SystemExit("Current PR body is not strict UTF-8")
+print(f"<!-- krr-review phase=final head={head} body-sha256={digest} -->\n@codex review")
+')"
 gh pr comment "${pr_url}" --body "${review_body}"
 ```
 
-最終 review コメントには `<!-- krr-review phase=final head=${head_sha} -->` marker を含め、その直後に `@codex review` を置きます。以後、別の push を行った場合は旧 HEAD の最終 review を無効として扱い、再度 marker を取得して最終 review を依頼します。
+最終 review コメントには strict final marker を含め、その直後に `@codex review` を置きます。以後、別の push、または同一 HEAD での本文編集を行った場合は旧 review を無効として扱い、current HEAD・本文の initial marker から review をやり直します。
 
 次を確認します。
 
@@ -113,7 +131,7 @@ gh pr checks --watch "${pr_url}"
 just VERSION=vX.Y.Z release-target-check
 ```
 
-CI green だけでは Ready または merge の条件を満たしません。DoD、release-target gate、最新 HEAD review、未 resolve 0 をすべて確認します。
+CI green だけでは Ready または merge の条件を満たしません。DoD、release-target gate、最新 HEAD・本文 digest の review、未 resolve 0 をすべて確認します。
 
 ## Phase 6: Ready 化と merge 承認
 
@@ -123,7 +141,7 @@ CI green だけでは Ready または merge の条件を満たしません。DoD
 just pr-ready-check "<number>" && gh pr ready "${pr_url}"
 ```
 
-`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。成功するまで `gh pr ready` は実行しません。Ready 化後に、ユーザーへ merge 承認を求めます。承認後、`gh pr merge` の直前に同じ `just pr-ready-check "<number>"` を再実行し、Ready PRの最新Issue/marker/thread/CI/base/headを再検証してから merge します。
+`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。さらに latest marker とpost-marker bot review、writer/trusted Check Run evidence の current `pr_body_sha256` 完全一致を要求します。trusted Check Run の query 結果には、current PR bodyを正規化せず strict UTF-8 SHA-256した64桁小文字hexと完全一致する `pr_body_sha256` が **ちょうど1個（exactly one）** だけ存在しなければならず、missing、duplicate、stale、または不一致は fail-closed で拒否します。成功するまで `gh pr ready` は実行しません。Ready 化後に、ユーザーへ merge 承認を求めます。承認後、`gh pr merge` の直前に同じ `just pr-ready-check "<number>"` を再実行し、Ready PRの最新Issue/marker/thread/CI/base/head/body digestとtrusted digest bindingを再検証してから merge します。
 
 `pr-ready-check` の前に、GitHub の review thread を全ページ取得して未 resolve が 0 件であることを確認します。未 resolve thread が 1 件でも残っている場合は Ready 化せず、対象 subagent に修正・reply・resolve を戻します。
 
@@ -153,11 +171,11 @@ gh run list --workflow Release --limit 5
 - [ ] `release/vX.Y.Z` の PR が作成されている
 - [ ] Draft PR が確認され、初回 `@codex review` が投稿されている
 - [ ] 指摘ごとに subagent で修正し、thread reply / resolve が完了している
-- [ ] 最新 HEAD への `@codex review` を含め、最低2回 review 済みである
+- [ ] 最新 HEAD・本文 digest への `@codex review` を含め、最低2回 review 済みである
 - [ ] 未 resolve thread が 0 件である
 - [ ] `Test and Build (...)` と `preflight` が通っている
 - [ ] OpenSpec の tasks / DoD と `release-target-check` が通っている
-- [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract を含む）が通った後に `gh pr ready` を実行している
+- [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract / current `pr_body_sha256` を含む）が通った後に `gh pr ready` を実行している
 - [ ] Ready 化前に全 review thread を確認し、未 resolve thread が 0 件である
 - [ ] Ready 化後にユーザーの merge 承認を得て、`gh pr merge` 直前の `just pr-ready-check "<number>"` が成功している
 - [ ] release-check / pre-pr の前に対象 version 以前の完了済み OpenSpec change を archive している

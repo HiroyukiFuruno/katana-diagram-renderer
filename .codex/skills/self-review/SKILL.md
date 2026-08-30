@@ -77,15 +77,15 @@ OpenSpec change 中なら確認します。
 
 Self-review の PASS は、外部 cloud review の完了、Ready 化、または merge 準備完了の代替ではありません。Self-review は Draft PR 作成へ進む前提条件としてのみ扱います。
 
-Draft PR 作成後は、必ず次の順序で後続工程へ接続します。cloud review の依頼コメントには、対象 HEAD を追跡できるよう `krr-review phase=initial head=<HEAD_SHA>`（初回）または `krr-review phase=final head=<HEAD_SHA>`（最終）の marker を記録します。
+Draft PR 作成後は、必ず次の順序で後続工程へ接続します。cloud review の依頼コメントには、対象 HEAD と current PR bodyを追跡できるよう `krr-review phase=<initial|final> head=<40 lowercase hex> body-sha256=<64 lowercase hex>` のmarkerを記録します。bodyはstringであることを確認し、NULまたはlone surrogateを含む場合、またはUTF-8 strict encodeに失敗する場合はdigest計算前にfail-closedで停止します。正常なbodyはGitHub APIから取得した文字列を正規化せずUTF-8 bytesとしてSHA-256化します。
 
-1. Draft PR の対象 HEAD SHA を固定し、`krr-review phase=initial head=<HEAD_SHA>` marker とともに初回 cloud review を依頼する。
+1. Draft PR の依頼直前にGitHub APIからcurrentのHEAD/bodyを再取得し、body digest付き`phase=initial` markerとともに初回 cloud review を依頼する。
 2. 指摘を取得・分類し、分離可能な指摘の修正を subagent へ委譲する。
 3. 各指摘の修正を確認し、review thread へ reply して resolve する。
-4. 指摘がなかった場合や修正による push がなかった場合も省略せず、最新 HEAD SHA に対して `krr-review phase=final head=<HEAD_SHA>` marker 付きで最終 cloud review を依頼する。最終 review は必ず依頼時点の最新 HEAD を対象にする。
+4. 指摘がなかった場合や修正による push がなかった場合も省略せず、依頼直前に再取得した最新HEAD/bodyに対してbody digest付き`phase=final` markerで最終 cloud reviewを依頼する。最終 reviewは必ず依頼時点の最新HEADを対象にする。
 5. `pr-ready-check` で review 完了、未 resolve thread 0、CI / DoD PASS を機械確認する。
 
-最終 cloud review で新規指摘が出た場合は、指摘を subagent へ修正委譲し、修正確認、push、review thread への reply、resolve を行ったうえで、更新後の最新 HEAD SHA に `krr-review phase=final head=<HEAD_SHA>` marker を付けて最終 review を再依頼します。新規指摘がなくなるまでこの手順を反復します。
+最終 cloud review で新規指摘が出た場合は、指摘を subagent へ修正委譲し、修正確認、push、review thread への reply、resolve を行ったうえで、更新後の最新HEAD/bodyを再取得してbody digest付き`phase=final` markerで最終reviewを再依頼します。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを失効させ、initial marker→bot review→final marker→bot reviewをやり直します。self-reviewの引き渡し確認ではmarkerのHEAD/body digestとtrusted evidenceのHEAD/external_idが同一境界に一致することを確認します。trusted Check Run evidenceの`pr_body_sha256`は、current PR bodyをstrict UTF-8 SHA-256した値と一致する64桁小文字hexが**ちょうど1個**だけ存在しなければならず、missing、duplicate、stale、または異なるdigestはfail-closedで拒否します。
 
 CI green だけでレビュー完了、Ready 化、または merge 準備完了とは扱いません。
 

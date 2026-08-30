@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import os
 import stat
 import subprocess
@@ -998,11 +999,38 @@ class VerifyPushIssueTest(unittest.TestCase):
         writer = (
             Path(subject.__file__).parents[2] / "scripts/review/pr_governance_status_writer.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("def finalize_decision", writer)
-        self.assertIn("final_closer_is_unique(decision.number, decision.issue, decision.base, decision.head", writer)
-        self.assertIn('generation(decision.number, decision.base, decision.head, "CI"', writer)
-        self.assertIn("base=decision.base if state == \"success\"", writer)
-        self.assertIn("head=decision.head if state == \"success\"", writer)
+        module = ast.parse(writer)
+        finalize = next(
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == "finalize_decision"
+        )
+        calls = [node for node in ast.walk(finalize) if isinstance(node, ast.Call)]
+        def named_call(node: ast.Call, name: str) -> bool:
+            return isinstance(node.func, ast.Name) and node.func.id == name
+        def decision_attribute(node: ast.expr, name: str) -> bool:
+            return (
+                isinstance(node, ast.Attribute) and node.attr == name
+                and isinstance(node.value, ast.Name) and node.value.id == "decision"
+            )
+
+        closer_calls = [node for node in calls if named_call(node, "final_closer_is_unique")]
+        self.assertGreaterEqual(len(closer_calls), 2)
+        self.assertTrue(any(
+            len(node.args) == 6
+            and all(decision_attribute(argument, attribute) for argument, attribute in zip(
+                node.args[:5], ("number", "issue", "base", "head", "body_sha256"), strict=True,
+            ))
+            and isinstance(node.args[5], ast.Name) and node.args[5].id == "claimants"
+            for node in closer_calls
+        ))
+        fence_lines = [node.lineno for node in calls if named_call(node, "check_fence")]
+        write_lines = [node.lineno for node in calls if named_call(node, "write_governance_check")]
+        self.assertTrue(fence_lines)
+        self.assertTrue(write_lines)
+        self.assertTrue(any(
+            fence_line < closer.lineno < write_line
+            for fence_line in fence_lines for closer in closer_calls for write_line in write_lines
+        ))
 
     def test_new_branch_without_upstream_uses_origin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

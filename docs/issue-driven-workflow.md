@@ -103,11 +103,11 @@ python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
 レビュー依頼markerは、対象HEADを曖昧にしないため次の形式にする。
 
 ```text
-<!-- krr-review phase=initial head=<40文字のHEAD SHA> -->
+<!-- krr-review phase=initial head=<40文字のHEAD SHA> body-sha256=<現在のPR本文のUTF-8 SHA-256小文字hex> -->
 @codex review
 ```
 
-最終レビューでは `phase=final` と最新HEAD SHAを使う。initial/finalの完了証跡は、対応するmarker投稿後かつ最新HEADに対してbot reviewが提出された場合だけとする。`eyes`等のreactionは受付中を示す補助表示であり、永続的な完了証跡として受理しない。レビュー指摘へのreplyとresolveを省略したままReady化してはならない。
+最終レビューでは `phase=final` と最新HEAD SHA、現在のPR本文をUTF-8でSHA-256化した小文字hexを使う。initial/finalの完了証跡は、対応するmarker投稿後かつ最新HEAD・本文digestに対してbot reviewが提出された場合だけとする。本文を同一HEADで変更したら、本文digestを更新したinitial markerからレビューをやり直し、initial reviewとfinal reviewの両方を新しい本文digestへ束縛する。trusted Check Runの`pr_body_sha256`がmissing、duplicate、stale、またはcurrent digestと不一致になった場合も旧successを失効させ、新しいinitial marker→bot review→final marker→bot reviewを完了するまでReady化・mergeしてはならない。`eyes`等のreactionは受付中を示す補助表示であり、永続的な完了証跡として受理しない。レビュー指摘へのreplyとresolveを省略したままReady化してはならない。
 
 ### オーケストレーションとハーネス
 
@@ -117,6 +117,7 @@ python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
 
 - ローカルの `pr-ready-check` がDraft、marker、最新HEAD、レビュー完了、thread解決、CIを検査する。
 - trusted default-branch writerがPRの最新HEADを対象に検査し、`KRR / PR governance (trusted check)` Check Runを1件だけcreate-or-updateする。発行App、HEAD、external_idを固定して検証し、branch protectionではこのnameと発行Appの組み合わせを必須化する。
+- trusted Check Runのdetails/queryにある`pr_body_sha256`は、GitHub APIから再取得したcurrent PR bodyを正規化せずstrict UTF-8 SHA-256した64桁小文字hexと**ちょうど1個（exactly one）**だけ一致しなければならない。missing、duplicate、stale、または不一致はfail-closedで拒否し、旧successを有効な証跡として再利用しない。
 - writerが再計算中のtrusted Check Run instanceだけは、そのwriter自身の内部入力検証から除外する。ただしbranch-protectionのApp binding、latch、source、CI、Issue、review、threadの各検証は省略しない。
 - Draftではtrusted Check Runをcompleted-successにせず、ReadyのPRだけを検査して同一HEADのCheck RunをPATCH更新する。writerはPRブランチのworkflowをcheckoutまたは実行しない。
 - Check Run発行にはGitHub Actionsの共通`app_id`を使わず、専用のKRR governance GitHub Appを使う。protected environment `pr-governance` に専用App IDとprivate keyを保持する。dispatcherは`actions:write`とinvalidator用`checks:write`、writerは`checks:write` tokenと分離したread-only App token（actions/checks/contents/issues/pull requests read）を使う。branch protectionのrequired checkも、この専用App IDから発行されたものに固定する。

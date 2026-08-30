@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,8 @@ import verify_push_issue as issue_contract
 
 _MARKER_PATTERN = re.compile(
     r"<!--\s*krr-review\s+phase=(?P<phase>initial|final)\s+"
-    r"head=(?P<head>[0-9a-fA-F]{40})\s*-->"
+    r"head=(?P<head>[0-9a-fA-F]{40})\s+"
+    r"body-sha256=(?P<body_sha256>[0-9a-f]{64})\s*-->"
 )
 _SUCCESSFUL_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 _VALID_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
@@ -40,6 +42,8 @@ _LATCH_CHECK = "KRR / PR governance review latch"
 _ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
+_ReviewMarker = tuple[str, str, str, Mapping[str, object]]
+_RequiredStatusChecks = tuple[tuple[str, ...], tuple[tuple[str, int | None], ...]]
 
 
 def _bot_login(value: object) -> str | None:
@@ -141,6 +145,18 @@ def _marker_updated_time(comment: Mapping[str, object]) -> datetime | None:
         return _timestamp(_marker_updated_at(comment), "marker updated_at")
     except (TypeError, ValueError):
         return None
+
+
+def _body_sha256(body: object) -> str | None:
+    """Return the exact UTF-8 PR-body digest used by review evidence."""
+
+    if not isinstance(body, str) or "\x00" in body:
+        return None
+    try:
+        encoded = body.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _latest_issue_updated_time(
@@ -442,8 +458,8 @@ def _final_review_evidence_is_fresh(
     return any(submitted_at > freshness_floor for submitted_at in review_times)
 
 
-def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[tuple[str, str, Mapping[str, object]]]:
-    markers: list[tuple[str, str, Mapping[str, object]]] = []
+def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[_ReviewMarker]:
+    markers: list[_ReviewMarker] = []
     for comment in comments:
         body = comment["body"]
         if not isinstance(body, str):
@@ -451,7 +467,14 @@ def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[tuple[str,
         if _CODEX_REVIEW_TRIGGER.search(body) is None:
             continue
         for match in _MARKER_PATTERN.finditer(body):
-            markers.append((match.group("phase"), match.group("head").lower(), comment))
+            markers.append(
+                (
+                    match.group("phase"),
+                    match.group("head").lower(),
+                    match.group("body_sha256"),
+                    comment,
+                )
+            )
     return markers
 
 
@@ -494,8 +517,77 @@ def _is_self_check(check: Mapping[str, object]) -> bool:
     return check.get("name", check.get("context")) in _SELF_CHECK_NAMES
 
 
+def _required_status_check_snapshot(
+    repository: str, base_branch: object
+) -> _RequiredStatusChecks:
+    """Read one strict, internally consistent required-check configuration."""
+
+    if not isinstance(base_branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch) is None:
+        raise TypeError("baseRefName must be a safe branch name")
+    protection = _gh_json(
+        "api",
+        f"repos/{repository}/branches/{base_branch}/protection/required_status_checks",
+    )
+    if not isinstance(protection, Mapping):
+        raise TypeError("required status checks response must be an object")
+    if protection.get("strict") is not True:
+        raise ValueError("branch protection required status checks strict must be true")
+    raw_contexts = protection.get("contexts")
+    raw_checks = protection.get("checks")
+    if not isinstance(raw_contexts, list) or not isinstance(raw_checks, list):
+        raise TypeError("required status checks contexts and checks must be arrays")
+    contexts: list[str] = []
+    for context in raw_contexts:
+        if not isinstance(context, str) or not context:
+            raise TypeError("required status check context must be a non-empty string")
+        contexts.append(context)
+    checks: list[tuple[str, int | None]] = []
+    for raw_check in raw_checks:
+        if not isinstance(raw_check, Mapping):
+            raise TypeError("required status check must be an object")
+        context = raw_check.get("context")
+        app_id = raw_check.get("app_id")
+        if not isinstance(context, str) or not context:
+            raise TypeError("required status check context must be a non-empty string")
+        if app_id is not None and (type(app_id) is not int or app_id < 1):
+            raise TypeError("required status check app_id must be null or a positive integer")
+        checks.append((context, app_id))
+    check_contexts = [context for context, _app_id in checks]
+    if len(contexts) != len(set(contexts)) or len(check_contexts) != len(set(check_contexts)):
+        raise ValueError("branch protection required status check contexts contain duplicates")
+    if set(contexts) != set(check_contexts):
+        raise ValueError("branch protection required status check contexts and checks differ")
+    return tuple(sorted(contexts)), tuple(sorted(checks))
+
+
+def _governance_app_binding_error(required_checks: _RequiredStatusChecks) -> str | None:
+    """Validate the two required governance contexts and their immutable Apps."""
+
+    _contexts, checks = required_checks
+    bindings = dict(checks)
+    trusted_app = bindings.get(_TRUSTED_CHECK)
+    if type(trusted_app) is not int or trusted_app < 1:
+        return "branch protection trusted Check Run App binding is missing or ambiguous"
+    if bindings.get(_LATCH_CHECK) != 15368:
+        return "branch protection review latch App binding is not exact"
+    return None
+
+
+def _status_check_context(check: Mapping[str, object]) -> str:
+    """Return one unambiguous CheckRun or StatusContext name."""
+
+    name = check.get("name")
+    context = check.get("context")
+    if name is not None and context is not None and name != context:
+        raise TypeError("status check name and context must agree")
+    value = name if name is not None else context
+    if not isinstance(value, str) or not value:
+        raise TypeError("status check name must be a non-empty string")
+    return value
+
+
 def _check_error(check: Mapping[str, object]) -> str | None:
-    name = check.get("name", check.get("context"))
+    name = _status_check_context(check)
     if _is_self_check(check):
         return None
     if not isinstance(name, str) or not name:
@@ -514,24 +606,56 @@ def _check_error(check: Mapping[str, object]) -> str | None:
     return f"CI check が未完了または失敗しています: {name}"
 
 
-def _status_check_rollup_errors(status_rollup: object) -> list[str]:
-    """Validate the non-governance CI evidence from one immutable API read."""
+def _status_check_rollup_errors(
+    status_rollup: object,
+    required_checks: _RequiredStatusChecks | None = None,
+) -> list[str]:
+    """Validate required independent CI evidence from one immutable API read."""
 
     if not isinstance(status_rollup, Sequence) or isinstance(
         status_rollup, (str, bytes)
     ):
         raise TypeError("statusCheckRollup must be a sequence")
-    errors: list[str] = []
+    typed_rollup: list[Mapping[str, object]] = []
     for check in status_rollup:
         if not isinstance(check, Mapping):
             raise TypeError("status check must be an object")
-        if _is_self_check(check):
+        typed_rollup.append(check)
+    if required_checks is None:
+        errors: list[str] = []
+        for check in typed_rollup:
+            if _is_self_check(check):
+                continue
+            error = _check_error(check)
+            if error is not None:
+                errors.append(error)
+        if not any(not _is_self_check(check) for check in typed_rollup):
+            errors.append("CI check を取得できません")
+        return errors
+
+    required_contexts = {
+        context
+        for context, _app_id in required_checks[1]
+        if context not in _SELF_CHECK_NAMES
+    }
+    matching: dict[str, list[Mapping[str, object]]] = {
+        context: [] for context in required_contexts
+    }
+    for check in typed_rollup:
+        context = _status_check_context(check)
+        if context in matching:
+            matching[context].append(check)
+    errors = []
+    for context in sorted(required_contexts):
+        checks = matching[context]
+        if len(checks) != 1:
+            errors.append(
+                f"required CI check がちょうど1件ではありません: {context} ({len(checks)}件)"
+            )
             continue
-        error = _check_error(check)
-        if error is not None:
-            errors.append(error)
-    if not any(not _is_self_check(check) for check in status_rollup):
-        errors.append("CI check を取得できません")
+        check = checks[0]
+        if check.get("status") != "COMPLETED" or check.get("conclusion") != "SUCCESS":
+            errors.append(f"required CI check がcompleted-successではありません: {context}")
     return errors
 
 
@@ -542,6 +666,7 @@ def readiness_errors(
     review_bot: str,
     require_draft: bool,
     referenced_issues: Sequence[issue_contract.Issue] = (),
+    required_checks: _RequiredStatusChecks | None = None,
 ) -> list[str]:
     """Return every unmet PR readiness condition without changing GitHub state."""
 
@@ -558,7 +683,7 @@ def readiness_errors(
         errors.append("Draft PR でのみ readiness gate を実行できます")
 
     status_rollup = pull_request["statusCheckRollup"]
-    errors.extend(_status_check_rollup_errors(status_rollup))
+    errors.extend(_status_check_rollup_errors(status_rollup, required_checks))
 
     unresolved = [thread for thread in threads if thread.get("isResolved") is not True]
     if unresolved:
@@ -592,71 +717,90 @@ def readiness_errors(
     issue_updated_at = _latest_issue_updated_time(referenced_issues)
     if referenced_issues and issue_updated_at is None:
         errors.append("参照Issue snapshotのupdated_atが不正です")
+    body_sha256 = _body_sha256(pull_request.get("body"))
+    if body_sha256 is None:
+        errors.append("PR本文の review marker digestを検証できません")
 
     markers = _review_markers(comments)
     initial_markers = [marker for marker in markers if marker[0] == "initial"]
     final_markers = [marker for marker in markers if marker[0] == "final"]
 
-    latest_initial: tuple[str, str, Mapping[str, object]] | None = None
+    latest_initial: _ReviewMarker | None = None
     if not initial_markers:
         errors.append("initial review marker がありません")
     else:
         initial_times = [
-            _marker_updated_time(marker[2]) for marker in initial_markers
+            _marker_updated_time(marker[3]) for marker in initial_markers
         ]
         if any(marker_time is None for marker_time in initial_times):
             errors.append("initial review marker の時刻が不正です")
         else:
-            latest_initial = max(
-                zip(initial_markers, initial_times), key=lambda item: item[1]
-            )[0]
+            latest_initial_time = max(initial_times)
+            latest_initial_candidates = [
+                marker
+                for marker, marker_time in zip(initial_markers, initial_times)
+                if marker_time == latest_initial_time
+            ]
+            if len(latest_initial_candidates) != 1:
+                errors.append("initial review marker の最新時刻が曖昧です")
+            else:
+                latest_initial = latest_initial_candidates[0]
 
-    current_final_markers = [
-        marker for marker in final_markers if marker[1] == head
-    ]
-    latest_final: tuple[str, str, Mapping[str, object]] | None = None
-    if current_final_markers:
-        # A later final marker supersedes earlier evidence, including when an
-        # old initial marker was edited into a final marker.
+    latest_final: _ReviewMarker | None = None
+    if final_markers:
+        # The newest final marker is authoritative even when it names an old
+        # head.  Ignoring a later old-head marker would let an earlier current
+        # marker continue to authorize evidence after the review contract was
+        # changed.
         marker_times = [
-            _marker_updated_time(marker[2]) for marker in current_final_markers
+            _marker_updated_time(marker[3]) for marker in final_markers
         ]
         if any(marker_time is None for marker_time in marker_times):
-            current_final_markers = []
+            final_markers = []
         else:
-            latest_final = max(
-                zip(current_final_markers, marker_times),
-                key=lambda item: item[1],
-            )[0]
+            latest_final_time = max(marker_times)
+            latest_final_candidates = [
+                marker
+                for marker, marker_time in zip(final_markers, marker_times)
+                if marker_time == latest_final_time
+            ]
+            if len(latest_final_candidates) == 1:
+                latest_final = latest_final_candidates[0]
     if not final_markers:
         errors.append("final review marker がありません")
     elif latest_final is None:
+        errors.append("final review marker の最新時刻が曖昧です")
+    elif latest_final[1] != head:
         errors.append("final review marker が最新HEADを指していません")
+    elif body_sha256 is None or latest_final[2] != body_sha256:
+        errors.append("final review marker のPR本文digestが現在値と一致しません")
     elif issue_updated_at is not None and (
-        _marker_updated_time(latest_final[2]) is None
-        or _marker_updated_time(latest_final[2]) <= issue_updated_at
+        _marker_updated_time(latest_final[3]) is None
+        or _marker_updated_time(latest_final[3]) <= issue_updated_at
     ):
         errors.append("final review marker が参照Issue更新後ではありません")
     elif not _final_review_evidence_is_fresh(
             typed_reviews,
             review_bot,
             head,
-            latest_final[2],
+            latest_final[3],
             issue_updated_at,
         ):
         errors.append("final review に参照Issue更新後の review bot 完了記録がありません")
 
     if latest_initial is not None and latest_final is not None:
-        initial_time = _marker_updated_time(latest_initial[2])
-        final_time = _marker_updated_time(latest_final[2])
+        initial_time = _marker_updated_time(latest_initial[3])
+        final_time = _marker_updated_time(latest_final[3])
         if initial_time is None or final_time is None or initial_time >= final_time:
             errors.append("initial review marker は最新 final review marker より前である必要があります")
+        elif body_sha256 is None or latest_initial[2] != body_sha256:
+            errors.append("initial review marker のPR本文digestが現在値と一致しません")
         elif not _review_is_for(
             typed_reviews,
             review_bot,
             latest_initial[1],
-            _marker_updated_at(latest_initial[2]),
-            _marker_updated_at(latest_final[2]),
+            _marker_updated_at(latest_initial[3]),
+            _marker_updated_at(latest_final[3]),
         ):
             errors.append("initial review に review bot の完了記録がありません")
 
@@ -713,8 +857,10 @@ def _verify_final_readiness_snapshot_unchanged(
     pull_request: int,
     initial_base: str,
     initial_head: str,
+    initial_base_branch: str,
     initial_body: str,
     initial_updated_at: str,
+    initial_required_checks: _RequiredStatusChecks,
     initial_issue_identity: tuple[tuple[int, str, str, str, str], ...],
     initial_closers: frozenset[int],
     open_pull_requests: Sequence[Mapping[str, object]] | None = None,
@@ -728,18 +874,23 @@ def _verify_final_readiness_snapshot_unchanged(
         "--repo",
         repository,
         "--json",
-        "baseRefOid,headRefOid,body,updatedAt,statusCheckRollup",
+        "baseRefOid,headRefOid,baseRefName,body,updatedAt,statusCheckRollup",
     )
     if not isinstance(payload, dict):
         raise TypeError("pull request final snapshot response must be an object")
     current_base = payload.get("baseRefOid")
     current_head = payload.get("headRefOid")
+    current_base_branch = payload.get("baseRefName")
     current_body = payload.get("body")
     current_updated_at = _required_timestamp_text(
         payload.get("updatedAt"), "pull request updatedAt"
     )
-    if not isinstance(current_base, str) or not isinstance(current_head, str):
-        raise TypeError("pull request baseRefOid/headRefOid must be strings")
+    if (
+        not isinstance(current_base, str)
+        or not isinstance(current_head, str)
+        or not isinstance(current_base_branch, str)
+    ):
+        raise TypeError("pull request baseRefOid/headRefOid/baseRefName must be strings")
     if not isinstance(current_body, str):
         raise TypeError("pull request body must be a string")
     if (current_base, current_head) != (initial_base, initial_head):
@@ -748,7 +899,16 @@ def _verify_final_readiness_snapshot_unchanged(
         raise ValueError("pull request body changed during readiness check")
     if current_updated_at != initial_updated_at:
         raise ValueError("pull request updatedAt changed during readiness check")
-    final_ci_errors = _status_check_rollup_errors(payload.get("statusCheckRollup"))
+    if current_base_branch != initial_base_branch:
+        raise ValueError("pull request base branch changed during readiness check")
+    final_required_checks = _required_status_check_snapshot(
+        repository, initial_base_branch
+    )
+    if final_required_checks != initial_required_checks:
+        raise ValueError("required status checks changed during readiness check")
+    final_ci_errors = _status_check_rollup_errors(
+        payload.get("statusCheckRollup"), final_required_checks
+    )
     if final_ci_errors:
         raise ValueError(
             "CI status changed during readiness check: " + "; ".join(final_ci_errors)
@@ -1144,27 +1304,30 @@ def _latest_sensor_generation(
 
 
 def _governance_check_error(
-    repository: str, pull_request: int, base_branch: object, base_sha: str, head: str,
+    repository: str,
+    pull_request: int,
+    base_branch: object,
+    base_sha: str,
+    head: str,
+    body_sha256: object,
     evidence: dict[str, object] | None = None,
     *,
     exclude_trusted_governance_check: bool = False,
+    required_checks: _RequiredStatusChecks | None = None,
 ) -> str | None:
     """Require exactly one terminal trusted Check Run and its Actions evidence."""
-    if not isinstance(base_branch, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", base_branch):
-        raise TypeError("baseRefName must be a safe branch name")
-    protection = _gh_json("api", f"repos/{repository}/branches/{base_branch}/protection/required_status_checks")
-    if not isinstance(protection, Mapping):
-        raise TypeError("required status checks response must be an object")
-    checks = protection.get("checks")
-    if not isinstance(checks, list):
-        raise TypeError("required status checks checks must be an array")
-    trusted_apps = [item.get("app_id") for item in checks if isinstance(item, Mapping) and item.get("context") == _TRUSTED_CHECK]
-    latch_apps = [item.get("app_id") for item in checks if isinstance(item, Mapping) and item.get("context") == _LATCH_CHECK]
-    if len(trusted_apps) != 1 or type(trusted_apps[0]) is not int or trusted_apps[0] < 1:
-        return "branch protection trusted Check Run App binding is missing or ambiguous"
-    if latch_apps != [15368]:
-        return "branch protection review latch App binding is not exact"
-    app_id = trusted_apps[0]
+    if not isinstance(body_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", body_sha256) is None:
+        raise TypeError("pull request body SHA-256 must be lowercase hexadecimal")
+    if required_checks is None:
+        try:
+            required_checks = _required_status_check_snapshot(repository, base_branch)
+        except (TypeError, ValueError):
+            return "branch protection required status checks configuration is invalid"
+    binding_error = _governance_app_binding_error(required_checks)
+    if binding_error is not None:
+        return binding_error
+    app_id = dict(required_checks[1])[_TRUSTED_CHECK]
+    assert type(app_id) is int
     run: Mapping[str, object] | None = None
     source_ids: list[str] = []
     if not exclude_trusted_governance_check:
@@ -1197,7 +1360,8 @@ def _governance_check_error(
                 return "trusted Check Run immutable generation is invalid"
             if external in generations:
                 return "trusted Check Run immutable generation is ambiguous"
-            source = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
+            query = parse_qs(urlparse(details).query, keep_blank_values=True)
+            source = query.get("source_run_id", [])
             if len(source) != 1 or re.fullmatch(r"[1-9][0-9]*", source[0]) is None:
                 return "trusted Check Run details_url lacks exact source_run_id evidence"
             generations[external] = (item, created)
@@ -1214,9 +1378,12 @@ def _governance_check_error(
             return "trusted Check Run external_id is invalid"
         if not isinstance(details, str):
             return "trusted Check Run details_url lacks exact source_run_id evidence"
-        source_ids = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
+        query = parse_qs(urlparse(details).query, keep_blank_values=True)
+        source_ids = query.get("source_run_id", [])
         if len(source_ids) != 1 or re.fullmatch(r"[1-9][0-9]*", source_ids[0]) is None:
             return "trusted Check Run details_url lacks exact source_run_id evidence"
+        if query.get("pr_body_sha256", []) != [body_sha256]:
+            return "trusted Check Run details_url lacks exact current PR body digest evidence"
     else:
         latest = _latest_sensor_generation(
             repository=repository,
@@ -1305,7 +1472,7 @@ def _governance_check_error(
         return "trusted source Actions run is not the latest sensor generation"
     if evidence is not None:
         evidence.update({
-            "protection": tuple(sorted((str(item.get("context")), item.get("app_id")) for item in checks if isinstance(item, Mapping))),
+            "protection": required_checks,
             "check": (
                 ("excluded", app_id, head.lower())
                 if run is None
@@ -1372,6 +1539,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     base, head = _require_boundary(
         pull_request.get("baseRefOid"), pull_request.get("headRefOid"), expected_boundary
     )
+    base_branch = pull_request.get("baseRefName")
+    initial_required_checks = _required_status_check_snapshot(repository, base_branch)
     initial_updated_at = _required_timestamp_text(
         pull_request.get("updatedAt"), "pull request updatedAt"
     )
@@ -1381,21 +1550,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         head_sha=head,
     )
     initial_body = pull_request.get("body")
+    initial_body_sha256 = _body_sha256(initial_body)
     errors = closing_reference_errors(
         repository=repository,
         body=initial_body,
         referenced_issues=referenced_issues,
     )
+    binding_error = _governance_app_binding_error(initial_required_checks)
+    if binding_error is not None:
+        errors.append(binding_error)
     governance_evidence: dict[str, object] = {}
     if not arguments.require_draft:
         governance_error = _governance_check_error(
             repository,
             arguments.pr,
-            pull_request.get("baseRefName"),
+            base_branch,
             base,
             head,
+            initial_body_sha256,
             governance_evidence,
             exclude_trusted_governance_check=arguments.exclude_trusted_governance_check,
+            required_checks=initial_required_checks,
         )
         if governance_error is not None:
             errors.append(governance_error)
@@ -1435,6 +1610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             review_bot="chatgpt-codex-connector",
             require_draft=arguments.require_draft,
             referenced_issues=referenced_issues,
+            required_checks=initial_required_checks,
         )
     )
     if errors:
@@ -1448,8 +1624,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         pull_request=arguments.pr,
         initial_base=base,
         initial_head=head,
+        initial_base_branch=base_branch,
         initial_body=initial_body,
         initial_updated_at=initial_updated_at,
+        initial_required_checks=initial_required_checks,
         initial_issue_identity=initial_issue_identity,
         initial_closers=initial_closers,
         open_pull_requests=(
@@ -1459,15 +1637,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     if not arguments.require_draft:
+        final_required_checks = _required_status_check_snapshot(repository, base_branch)
+        if final_required_checks != initial_required_checks:
+            raise ValueError("required status checks changed during readiness check")
         final_governance_evidence: dict[str, object] = {}
         governance_error = _governance_check_error(
             repository,
             arguments.pr,
-            pull_request.get("baseRefName"),
+            base_branch,
             base,
             head,
+            initial_body_sha256,
             final_governance_evidence,
             exclude_trusted_governance_check=arguments.exclude_trusted_governance_check,
+            required_checks=final_required_checks,
         )
         if governance_error is not None or final_governance_evidence != governance_evidence:
             raise ValueError("governance evidence changed during readiness check")

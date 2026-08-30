@@ -265,6 +265,7 @@ fn pull_requests_require_draft_review_completion_before_ready()
     assert_agent_pr_review_contract(root)?;
     assert_primary_pr_skill_contracts(root)?;
     assert_governed_skill_contracts(root)?;
+    assert_review_evidence_contract(root)?;
     assert_pr_ready_recipe_contract(root)?;
     assert_governance_workflow_contract(root)?;
     Ok(())
@@ -450,12 +451,117 @@ fn assert_primary_skill_contract(root: &Path, path: &str) -> TestResult {
 
 fn assert_agents_pr_skill_contract(skill: &str) {
     assert!(skill.contains("gh pr create --draft"));
-    assert!(skill.contains("phase=initial head=${head_sha}"));
-    assert!(skill.contains("phase=final head=${head_sha}"));
+    assert!(skill.contains("phase=initial head=$head_sha body-sha256=$body_sha256"));
+    assert!(skill.contains("phase=final head=$head_sha body-sha256=$body_sha256"));
     assert!(skill.contains("thread への reply→resolve") || skill.contains("thread への reply"));
     assert!(skill.contains("just pr-ready-check \"<pr-number>\" &&"));
     assert!(skill.contains("gh pr ready"));
     assert!(!skill.contains("gh pr create --base \"<base-branch>\""));
+}
+
+const REVIEW_EVIDENCE_SKILL_PATHS: &[&str] = &[
+    ".agents/skills/commit_and_push/SKILL.md",
+    ".agents/skills/create_pull_request/SKILL.md",
+    ".agents/skills/impl-release/SKILL.md",
+    ".codex/skills/commit_and_push/SKILL.md",
+    ".codex/skills/create_pull_request/SKILL.md",
+    ".codex/skills/gh-address-comments/SKILL.md",
+    ".codex/skills/impl-release/SKILL.md",
+    ".codex/skills/kdr-workflow-guide/SKILL.md",
+    ".codex/skills/self-review/SKILL.md",
+];
+
+const MIRRORED_REVIEW_SKILLS: &[(&str, &str)] = &[
+    (
+        ".agents/skills/commit_and_push/SKILL.md",
+        ".codex/skills/commit_and_push/SKILL.md",
+    ),
+    (
+        ".agents/skills/create_pull_request/SKILL.md",
+        ".codex/skills/create_pull_request/SKILL.md",
+    ),
+    (
+        ".agents/skills/impl-release/SKILL.md",
+        ".codex/skills/impl-release/SKILL.md",
+    ),
+];
+
+const STRICT_REVIEW_MARKER_TERMS: &[RequiredTerm] = &[
+    RequiredTerm::Alternatives(&[
+        "krr-review phase=<initial|final>",
+        "krr-review phase=(?:initial|final)",
+        "krr-review phase=initial",
+    ]),
+    RequiredTerm::Exact("head="),
+    RequiredTerm::Exact("body-sha256="),
+    RequiredTerm::Alternatives(&["strict", "完全一致"]),
+];
+
+const CURRENT_TRUSTED_BODY_EVIDENCE_TERMS: &[RequiredTerm] = &[
+    RequiredTerm::Exact("pr_body_sha256"),
+    RequiredTerm::Alternatives(&[
+        "current PR body",
+        "current PR本文",
+        "現在のPR本文",
+        "本文digest",
+        "本文 digest",
+    ]),
+    RequiredTerm::Alternatives(&["exactly one", "ちょうど1個"]),
+    RequiredTerm::Exact("fail-closed"),
+];
+
+fn assert_review_evidence_contract(root: &Path) -> TestResult {
+    let mut missing = Vec::new();
+    for path in REVIEW_EVIDENCE_SKILL_PATHS {
+        let skill = std::fs::read_to_string(root.join(path))?;
+        collect_missing_review_evidence_terms(&skill, path, &mut missing);
+    }
+
+    for (agents_path, codex_path) in MIRRORED_REVIEW_SKILLS {
+        let agents_skill = std::fs::read_to_string(root.join(agents_path))?;
+        let codex_skill = std::fs::read_to_string(root.join(codex_path))?;
+        if review_evidence_signature(&agents_skill) != review_evidence_signature(&codex_skill) {
+            missing.push(format!(
+                "{agents_path} and {codex_path} must mirror the strict marker and trusted body-evidence contract"
+            ));
+        }
+    }
+
+    for path in ["AGENTS.md", "docs/issue-driven-workflow.md"] {
+        let document = std::fs::read_to_string(root.join(path))?;
+        collect_missing_review_evidence_terms(&document, path, &mut missing);
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "review-evidence contract is incomplete:\n{}",
+            missing.join("\n")
+        )
+        .into())
+    }
+}
+
+fn review_evidence_signature(text: &str) -> Vec<bool> {
+    STRICT_REVIEW_MARKER_TERMS
+        .iter()
+        .chain(CURRENT_TRUSTED_BODY_EVIDENCE_TERMS)
+        .map(|required| required.is_present(text))
+        .collect()
+}
+
+fn collect_missing_review_evidence_terms(text: &str, path: &str, missing: &mut Vec<String>) {
+    for required in STRICT_REVIEW_MARKER_TERMS
+        .iter()
+        .chain(CURRENT_TRUSTED_BODY_EVIDENCE_TERMS)
+    {
+        if !required.is_present(text) {
+            missing.push(format!(
+                "{path} must contain review-evidence contract term {required:?}"
+            ));
+        }
+    }
 }
 
 fn assert_closing_issue_contract(skill: &str, path: &str) -> TestResult {

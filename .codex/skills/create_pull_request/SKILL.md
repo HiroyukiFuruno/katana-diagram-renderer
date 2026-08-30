@@ -77,26 +77,50 @@ gh pr view "<pr-number>" --json isDraft --jq '.isDraft'
 
 Draft のまま、次の順序を厳守します。
 
-1. 依頼直前の最新 SHA を `git rev-parse HEAD` で取得し、次の marker と `@codex review` を同じコメント本文にこの順で含めて初回 review を依頼する。
+1. 依頼直前に GitHub API から current PR の `headRefOid` と `body` を再取得する。body は string 以外、NUL、lone surrogate、UTF-8 strict 不能を fail-closed で拒否し、空文字列への正規化をしない。受理したbody文字列だけを正規化せずUTF-8 bytesとしてSHA-256し、次の marker と `@codex review` を同じコメント本文にこの順で含めて初回 review を依頼する。markerのSHA値はlowercase hexでなければならない。
 
    ```bash
-   head_sha="$(git rev-parse HEAD)"
-   gh pr comment "<pr-number>" --body "<!-- krr-review phase=initial head=${head_sha} -->
+   pr_json="$(gh api "repos/<owner>/<repo>/pulls/<pr-number>")"
+   head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
+   body_sha256="$(python3 -c '
+import hashlib, json, sys
+value = json.load(sys.stdin)
+body = value.get("body")
+if not isinstance(body, str) or "\x00" in body or any(0xD800 <= ord(char) <= 0xDFFF for char in body):
+    raise SystemExit("current PR body is not valid text")
+try:
+    print(hashlib.sha256(body.encode("utf-8", "strict")).hexdigest())
+except UnicodeEncodeError:
+    raise SystemExit("current PR body is not strict UTF-8")
+' <<<"$pr_json")" || exit 1
+   gh pr comment "<pr-number>" --body "<!-- krr-review phase=initial head=${head_sha} body-sha256=${body_sha256} -->
    @codex review"
    ```
 
 2. review、review thread、PR コメントをすべて取得し、P0/P1/その他、対応要否、担当を分類する。
 3. 修正が必要な指摘は、対象ファイルと DoD を明示して修正担当 subagent へ移譲する。同じファイル・責務を複数担当に重ねない。
 4. P0/P1 に限らず対応対象と判断した通常指摘も、修正担当 subagent が **修正 → ローカル検証 → push → 該当 thread への reply → resolve** の順で完了させる。CI が green でも、未resolve の指摘があれば完了扱いにしない。
-5. 修正を push したかどうかにかかわらず、最終 review は必須とする。依頼直前の最新 SHA を `git rev-parse HEAD` で再取得し、次の marker と `@codex review` を同じコメント本文にこの順で含めて、最新 head に対する最終 review を依頼する。
+5. 修正を push したかどうかにかかわらず、最終 review は必須とする。依頼直前にGitHub APIからcurrent PRの`headRefOid`と`body`を再取得してbody digestを再計算し、次の marker と `@codex review` を同じコメント本文にこの順で含めて、最新 head に対する最終 review を依頼する。
 
    ```bash
-   head_sha="$(git rev-parse HEAD)"
-   gh pr comment "<pr-number>" --body "<!-- krr-review phase=final head=${head_sha} -->
+   pr_json="$(gh api "repos/<owner>/<repo>/pulls/<pr-number>")"
+   head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
+   body_sha256="$(python3 -c '
+import hashlib, json, sys
+value = json.load(sys.stdin)
+body = value.get("body")
+if not isinstance(body, str) or "\x00" in body or any(0xD800 <= ord(char) <= 0xDFFF for char in body):
+    raise SystemExit("current PR body is not valid text")
+try:
+    print(hashlib.sha256(body.encode("utf-8", "strict")).hexdigest())
+except UnicodeEncodeError:
+    raise SystemExit("current PR body is not strict UTF-8")
+' <<<"$pr_json")" || exit 1
+   gh pr comment "<pr-number>" --body "<!-- krr-review phase=final head=${head_sha} body-sha256=${body_sha256} -->
    @codex review"
    ```
 
-6. 最終 review で新規指摘が出た場合は、指摘ごとに修正担当 subagent へ移譲し、修正・検証、push、該当 thread への reply、resolve を完了する。その後、依頼直前の最新 HEAD SHA で final marker 付き review を再依頼し、未resolve 0 かつ新規指摘なしになるまでこの手順を反復する。
+6. 最終 review で新規指摘が出た場合は、指摘ごとに修正担当 subagent へ移譲し、修正・検証、push、該当 thread への reply、resolve を完了する。その後、依頼直前のcurrent PR head/bodyを再取得してbody digest付きfinal markerでreviewを再依頼し、未resolve 0 かつ新規指摘なしになるまでこの手順を反復する。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを無効とし、initial marker付きbot review → final marker付きbot reviewをやり直す。
 
 初回・最終 review とも、コメント投稿だけでなく結果を取得して確認します。レビュー取得では review thread を省略せず、GraphQL の `pageInfo.hasNextPage` が `false` になるまで `pageInfo.endCursor` を次の `after` cursor に渡して全ページ取得します。必要に応じて次を使います。
 
@@ -117,6 +141,7 @@ gh api graphql \
 - self-review、lint、テスト、coverage、OpenSpec/DoD がすべて PASS である。
 - 各 Issue の `non-Draft target` は 256 件以下である（256 non-Draft target invariant）。超過した場合は bypass せず、影響する PR を Draft に戻すか closing reference を外してから merge 前に解消します。
 - `pr-ready-check` は最初に、参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査します。
+- trusted Check Run evidence の `pr_body_sha256` は、current PR bodyを正規化せず strict UTF-8 SHA-256した値と一致する64桁小文字hexがちょうど1個だけ存在しなければなりません。missing、duplicate、stale、または異なるdigestはfail-closedで拒否します。
 
 ### Governance workflow の初回導入・改修
 

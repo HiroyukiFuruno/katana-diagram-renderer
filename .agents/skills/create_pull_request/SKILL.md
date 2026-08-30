@@ -63,9 +63,14 @@ Draft PR を作る前に、branch の全 commit が参照する同一 repository
 
 ```bash
 pr_url="$(gh pr create --draft --base "<base-branch>" --head "<current-branch>" --title "<title>" --body-file "<body-file>")"
-gh pr view "${pr_url}" --json isDraft --jq '.isDraft'
-head_sha="$(git rev-parse HEAD)"
-gh pr comment "${pr_url}" --body "<!-- krr-review phase=initial head=${head_sha} -->"$'\n@codex review'
+gh pr view "$pr_url" --json isDraft --jq '.isDraft'
+pr_number="$(gh pr view "$pr_url" --json number --jq '.number')"
+pr_json="$(gh api "repos/<owner>/<repo>/pulls/$pr_number")"
+head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
+body_type="$(jq -r '.body | type' <<<"$pr_json")"
+[ "$body_type" = "string" ] || { echo "PR body must be a string" >&2; exit 1; }
+body_sha256="$(jq -j '.body' <<<"$pr_json" | shasum -a 256 | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+gh pr comment "$pr_url" --body "<!-- krr-review phase=initial head=$head_sha body-sha256=$body_sha256 -->"$'\n@codex review'
 ```
 
 `--base` は必須です。`isDraft=true` を確認してから初回 review を依頼します。
@@ -73,16 +78,20 @@ gh pr comment "${pr_url}" --body "<!-- krr-review phase=initial head=${head_sha}
 ## 5. Review と指摘対応
 
 ```bash
-head_sha="$(git rev-parse HEAD)"
-gh pr comment "${pr_url}" --body "<!-- krr-review phase=final head=${head_sha} -->"$'\n@codex review'
+pr_json="$(gh api "repos/<owner>/<repo>/pulls/$pr_number")"
+head_sha="$(jq -r '.head.sha' <<<"$pr_json" | tr '[:upper:]' '[:lower:]')"
+body_type="$(jq -r '.body | type' <<<"$pr_json")"
+[ "$body_type" = "string" ] || { echo "PR body must be a string" >&2; exit 1; }
+body_sha256="$(jq -j '.body' <<<"$pr_json" | shasum -a 256 | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+gh pr comment "$pr_url" --body "<!-- krr-review phase=final head=$head_sha body-sha256=$body_sha256 -->"$'\n@codex review'
 ```
 
-初回・最終 review とも結果を取得し、review thread は全ページ確認します。指摘は責務単位で subagent に委譲し、修正→検証→通常の commit/push→該当 thread への reply→resolve の順で処理します。push 後は最新 HEAD の final marker review を再依頼し、未対応指摘と未resolve thread が 0 件になるまで繰り返します。
+初回・最終 review とも結果を取得し、review thread は全ページ確認します。指摘は責務単位で subagent に委譲し、修正→検証→通常の commit/push→該当 thread への reply→resolve の順で処理します。markerはcurrent PRのhead/bodyを依頼直前に再取得して生成し、bodyがstringでない、NULまたはsurrogateを含む、UTF-8 strictで符号化できない場合はfail-closedで停止します。bot reviewが最新HEADに提出された場合だけ完了とします。push 後は最新HEADのbody digest付きfinal marker reviewを再依頼し、未対応指摘と未resolve threadが0件になるまで繰り返します。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを無効とし、initial marker付きbot review→final marker付きbot reviewをやり直します。
 
 ## 6. Ready 化と承認後 merge
 
 CI、self-review、lint、test、coverage、OpenSpec/DoD、最新 HEAD review、未resolve 0 を確認した後だけ、次を実行します。各 Issue の `non-Draft target` は 256 件以下である（256 non-Draft target invariant）ことも確認します。超過した場合は bypass せず、影響する PR を Draft に戻すか closing reference を外してから merge 前に解消します。
-- `pr-ready-check` は最初に、参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査します。
+- `pr-ready-check` は最初に、参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査します。trusted Check Run evidenceの`pr_body_sha256`がcurrent PR body digestとexactly one一致し、missing、duplicate、stale digestをfail-closedで拒否することも確認します。
 
 ### Governance workflow の初回導入・改修
 

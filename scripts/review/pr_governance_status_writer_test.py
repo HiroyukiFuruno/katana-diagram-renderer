@@ -37,7 +37,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         )
 
     @staticmethod
-    def pull(number: int, body: str = "Fixes #64", *, draft: bool = False) -> dict[str, object]:
+    def pull(number: int, body: object = "Fixes #64", *, draft: bool = False) -> dict[str, object]:
         return {
             "number": number, "state": "open", "draft": draft, "body": body,
             "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}},
@@ -60,7 +60,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         return WRITER.OpenSnapshot(
             numbers,
             {} if claimants is None else claimants,
-            tuple({"number": number, "isDraft": number in drafts, "head_sha": f"{number:040x}"[-40:]} for number in numbers),
+            tuple({"number": number, "isDraft": number in drafts, "body": "Fixes #64", "head_sha": f"{number:040x}"[-40:]} for number in numbers),
         )
 
     def test_canonical_issue_requires_exactly_one_closer(self) -> None:
@@ -150,7 +150,10 @@ class StatusWriterUnitTest(unittest.TestCase):
             "base": {"sha": "b" * 40}, "head": {"sha": "c" * 40},
         }
         with patch.object(WRITER, "pull", return_value=source):
-            self.assertFalse(WRITER.final_closer_is_unique(72, "64", "b" * 40, "a" * 40, {"64": frozenset({72, 73})}))
+            self.assertFalse(WRITER.final_closer_is_unique(
+                72, "64", "b" * 40, "a" * 40, WRITER.pr_body_sha256("Fixes #64"),
+                {"64": frozenset({72, 73})},
+            ))
 
     def test_open_snapshot_rejects_two_governed_prs_with_the_same_head(self) -> None:
         shared = "a" * 40
@@ -275,7 +278,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         head, base = "a" * 40, "b" * 40
         snapshot = WRITER.OpenSnapshot(
             (72, 73), {},
-            ({"number": 72, "isDraft": False, "head_sha": head}, {"number": 73, "isDraft": False, "head_sha": "c" * 40}),
+            ({"number": 72, "isDraft": False, "body": "Fixes #64", "head_sha": head}, {"number": 73, "isDraft": False, "body": "Fixes #64", "head_sha": "c" * 40}),
         )
         source = WRITER.DispatcherSource(88, "workflow_run", 1)
         query = {
@@ -283,6 +286,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "ci_status": "completed", "ci_conclusion": "success", "release_workflow_id": "5", "release_run_id": "6",
             "release_run_number": "7", "release_run_attempt": "1", "release_status": "completed", "release_conclusion": "success",
             "pr_base_sha": base, "pr_head_sha": head,
+            "pr_body_sha256": WRITER.pr_body_sha256("Fixes #64"),
         }
         early_success = {
             "id": 711, "name": WRITER.CHECK_NAME, "head_sha": head,
@@ -305,6 +309,21 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "check_run", return_value=marker):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.observed_invalidations(snapshot, source, "all", (72, 73), (72,), 72)
+        for digest in (None, "d" * 64):
+            stale_query = dict(query)
+            if digest is None:
+                del stale_query["pr_body_sha256"]
+            else:
+                stale_query["pr_body_sha256"] = digest
+            stale = {
+                **early_success,
+                "details_url": "https://github.com/owner/repository/actions/runs/71?" + WRITER.urlencode(stale_query),
+            }
+            with self.subTest(digest=digest), self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), \
+                 patch.object(WRITER, "object_pages", return_value=[{"check_runs": [stale]}]), \
+                 patch.object(WRITER, "check_run", return_value=marker):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.observed_invalidations(snapshot, source, "all", (72, 73), (72,), 71)
 
     def test_all_scope_fails_closed_when_a_new_open_pr_missed_the_all_open_invalidation(self) -> None:
         snapshot = WRITER.OpenSnapshot(
@@ -362,7 +381,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "source_run_id": "1", "ci_workflow_id": "2", "ci_run_id": "3", "ci_run_number": "4", "ci_run_attempt": "1",
             "ci_status": "completed", "ci_conclusion": "success", "release_workflow_id": "5", "release_run_id": "6",
             "release_run_number": "7", "release_run_attempt": "1", "release_status": "completed", "release_conclusion": "success",
-            "pr_base_sha": base, "pr_head_sha": heads[72],
+            "pr_base_sha": base, "pr_head_sha": heads[72], "pr_body_sha256": WRITER.pr_body_sha256("Fixes #64"),
         }
         values: dict[int, dict[str, object]] = {
             701: {"id": 701, "name": WRITER.CHECK_NAME, "head_sha": heads[72], "external_id": f"krr-governance/v1/{heads[72]}/writer-71", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "completed", "conclusion": "success", "details_url": f"https://github.com/owner/repository/actions/runs/71?{WRITER.urlencode(early_query)}"},
@@ -474,8 +493,8 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_main_finalizes_each_pr_before_processing_the_next(self) -> None:
         snapshot = self.snapshot((72, 73))
-        first = WRITER.PendingDecision(72, "a" * 40, "b" * 40, (), "failure", "failed", None, None, None)
-        second = WRITER.PendingDecision(73, "c" * 40, "d" * 40, (), "failure", "failed", None, None, None)
+        first = WRITER.PendingDecision(72, "a" * 40, "b" * 40, (), "failure", "failed", None, None, None, "c" * 64)
+        second = WRITER.PendingDecision(73, "c" * 40, "d" * 40, (), "failure", "failed", None, None, None, "c" * 64)
         calls: list[str] = []
         def process(number, *_args, **_kwargs):
             calls.append(f"process-{number}")
@@ -566,7 +585,7 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_event_reserves_100_terminal_write_budget(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
-        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, 99, "failure", "bad", None, None, None)
+        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, 99, "failure", "bad", None, None, None, "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
@@ -584,7 +603,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         finalized: list[int] = []
 
         def decision(number: int, *_args, **_kwargs):
-            return WRITER.PendingDecision(number, f"{number:040x}"[-40:], "b" * 40, 99, "failure", "bad", None, None, None)
+            return WRITER.PendingDecision(number, f"{number:040x}"[-40:], "b" * 40, 99, "failure", "bad", None, None, None, "c" * 64)
 
         def finalize(value, *_args):
             finalized.append(value.number)
@@ -694,7 +713,10 @@ class StatusWriterUnitTest(unittest.TestCase):
             return current
         with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), patch.object(WRITER, "api_json", side_effect=api):
             self.assertEqual(WRITER.pull(72)["number"], 72)
-            self.assertTrue(WRITER.final_closer_is_unique(72, "64", "b" * 40, "a" * 40, {"64": frozenset({72})}))
+            self.assertTrue(WRITER.final_closer_is_unique(
+                72, "64", "b" * 40, "a" * 40, WRITER.pr_body_sha256("Fixes #64"),
+                {"64": frozenset({72})},
+            ))
         self.assertEqual(calls, [False, True])
 
     def test_check_baseline_uses_the_app_read_path_before_default_fence(self) -> None:
@@ -900,7 +922,10 @@ class StatusWriterUnitTest(unittest.TestCase):
             WRITER.Generation("release-preflight", "y", 45, 102, 9, 1, "completed", "success"),
         )
         with self.identity():
-            url = WRITER.target_url(source_run_id=77, generations=values, base="b" * 40, head="a" * 40)
+            url = WRITER.target_url(
+                source_run_id=77, generations=values, base="b" * 40, head="a" * 40,
+                body_sha256="c" * 64,
+            )
         self.assertIn("source_run_id=77", url)
         self.assertIn("ci_workflow_id=44", url)
         self.assertIn("ci_run_attempt=2", url)
@@ -910,6 +935,31 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertIn("release_workflow_id=45", url)
         self.assertIn("pr_base_sha=" + "b" * 40, url)
         self.assertIn("pr_head_sha=" + "a" * 40, url)
+        self.assertIn("pr_body_sha256=" + "c" * 64, url)
+
+    def test_body_digest_rejects_non_text_nul_and_invalid_utf8_scalars(self) -> None:
+        self.assertEqual(
+            WRITER.pr_body_sha256("Fixes #64"),
+            "807aa69d375bfa66f74b64ac2143fa2c9511a011eb57ab8b4883f052d7ceb65f",
+        )
+        for value in (None, 64, "Fixes #64\0", "Fixes #64\ud800"):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.pr_body_sha256(value)
+
+    def test_success_evidence_requires_the_exact_body_digest(self) -> None:
+        values = (
+            WRITER.Generation("CI", "x", 44, 101, 8, 2, "completed", "success"),
+            WRITER.Generation("release-preflight", "y", 45, 102, 9, 1, "completed", "success"),
+        )
+        with self.identity():
+            desired = WRITER.target_url(
+                source_run_id=77, generations=values, base="b" * 40, head="a" * 40,
+                body_sha256="c" * 64,
+            )
+        self.assertTrue(WRITER._same_check_evidence(desired.replace("/99?", "/100?"), desired))
+        self.assertFalse(WRITER._same_check_evidence(desired.replace("&pr_body_sha256=" + "c" * 64, ""), desired))
+        self.assertFalse(WRITER._same_check_evidence(desired.replace("c" * 64, "d" * 64), desired))
 
     def test_verdict_handles_requested_success_and_terminal_failure(self) -> None:
         template = WRITER.Generation("CI", "p", 44, 1, 1, 1, "completed", "success")
@@ -938,6 +988,43 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(decision.state if decision is not None else None, "failure")
         self.assertEqual(decision.description if decision is not None else None, "Trusted PR governance failed closed.")
         post.assert_not_called()
+
+    def test_deferred_success_carries_the_process_time_body_digest(self) -> None:
+        current = self.pull(72)
+        generations = (
+            WRITER.Generation("CI", "x", 44, 1, 1, 1, "completed", "success"),
+            WRITER.Generation("release-preflight", "y", 45, 2, 1, 1, "completed", "success"),
+        )
+        with self.identity(), patch.object(WRITER, "pull", return_value=current), \
+             patch.object(WRITER, "check_baseline", return_value=(101,)), \
+             patch.object(WRITER, "contract", return_value="success"), \
+             patch.object(WRITER, "sensor", return_value=77), \
+             patch.object(WRITER, "generation", side_effect=[*generations, *generations]), \
+             patch.object(WRITER, "final_closer_is_unique", return_value=True):
+            decision = WRITER.process(72, {"64": frozenset({72})}, "/tmp/snapshot.json", defer_terminal=True)
+        self.assertEqual(decision.state if decision is not None else None, "success")
+        self.assertEqual(
+            decision.body_sha256 if decision is not None else None,
+            WRITER.pr_body_sha256("Fixes #64"),
+        )
+
+    def test_finalize_refuses_success_when_the_pr_body_changes_after_the_decision(self) -> None:
+        generations = (
+            WRITER.Generation("CI", "x", 44, 1, 1, 1, "completed", "success"),
+            WRITER.Generation("release-preflight", "y", 45, 2, 1, 1, "completed", "success"),
+        )
+        decision = WRITER.PendingDecision(
+            72, "a" * 40, "b" * 40, (101,), "success", "ok", 77, generations, "64",
+            WRITER.pr_body_sha256("Fixes #64"),
+        )
+        with self.identity(), patch.object(WRITER, "final_closer_is_unique", side_effect=[True, False]), \
+             patch.object(WRITER, "sensor", return_value=77), \
+             patch.object(WRITER, "generation", side_effect=generations), \
+             patch.object(WRITER, "check_fence", return_value=(False, 0, False)), \
+             patch.object(WRITER, "rebind_trusted_default_writer"), \
+             patch.object(WRITER, "write_governance_check", return_value=(102,)) as post:
+            self.assertTrue(WRITER.finalize_decision(decision, {"64": frozenset({72})}, WRITER.EvidenceSnapshot({}, {}, {})))
+        self.assertEqual(post.call_args.args[1], "failure")
 
     def test_deferred_draft_reuses_the_dispatcher_pending_check_without_a_write(self) -> None:
         current = self.pull(72, draft=True)
@@ -1006,7 +1093,7 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_schedule_reserves_two_writes_for_each_missing_terminal_check(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
-        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "success", "ok", 77, (), "64")
+        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "success", "ok", 77, (), "64", "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "spoofed"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
@@ -1020,7 +1107,7 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_event_writer_reserves_300_dispatcher_writes_and_ignores_count_spoofing(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
-        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (102, "pending"), "success", "ok", 77, (), "64")
+        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (102, "pending"), "success", "ok", 77, (), "64", "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "not-a-number"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
@@ -1034,7 +1121,7 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     def test_exceptional_terminal_decisions_cannot_exceed_their_reserved_write_budget(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)))
-        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "failure", "bad", None, None, None)
+        decision = WRITER.PendingDecision(1, "a" * 40, "b" * 40, (), "failure", "bad", None, None, None, "c" * 64)
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \

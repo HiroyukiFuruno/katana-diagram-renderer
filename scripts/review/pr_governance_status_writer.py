@@ -9,6 +9,7 @@ single Check Run PATCH helper.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ DISPATCHER_PATH = ".github/workflows/pr-governance.yml"
 WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
 DISPATCHER_EVENTS = frozenset({"pull_request_target", "issue_comment", "issues", "schedule", "workflow_run"})
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+BODY_SHA256 = re.compile(r"[0-9a-f]{64}")
 NUMBER = re.compile(r"[1-9][0-9]*")
 CLOSING = re.compile(
     r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
@@ -216,6 +218,17 @@ def canonical_issue(body: object) -> str | None:
     if len(issues) != 1:
         return None
     return next(iter(issues))
+
+
+def pr_body_sha256(body: object) -> str:
+    """Bind a decision to the exact valid UTF-8 PR description bytes."""
+    if not isinstance(body, str) or "\0" in body:
+        raise GovernanceError("Pull request body is invalid.")
+    try:
+        encoded = body.encode("utf-8", "strict")
+    except UnicodeEncodeError as error:
+        raise GovernanceError("Pull request body is invalid.") from error
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def closing_issues(body: str) -> set[str]:
@@ -512,7 +525,15 @@ def _same_check_evidence(current: str, desired: str) -> bool:
         "ci_run_attempt", "ci_status", "ci_conclusion", "release_workflow_id",
         "release_run_id", "release_run_number", "release_run_attempt",
         "release_status", "release_conclusion", "pr_base_sha", "pr_head_sha",
+        "pr_body_sha256",
     }
+    current_digest = current_query.get("pr_body_sha256")
+    desired_digest = desired_query.get("pr_body_sha256")
+    if current_digest is None and desired_digest is None:
+        return current_query == desired_query
+    for digest in (current_digest, desired_digest):
+        if digest is None or len(digest) != 1 or BODY_SHA256.fullmatch(digest[0]) is None:
+            return False
     return {key: current_query.get(key) for key in required} == {key: desired_query.get(key) for key in required}
 
 
@@ -599,7 +620,7 @@ def dispatcher_invalidation_url(source: DispatcherSource, carry_pending: int) ->
     )
 
 
-def preserved_early_success(value: dict[str, Any], head: str, writer_run_id: int) -> bool:
+def preserved_early_success(value: dict[str, Any], head: str, writer_run_id: int, *, body_sha256: str) -> bool:
     """Accept only the exact early-writer success that this all-pass preserves."""
     details = value.get("details_url")
     if (
@@ -620,9 +641,12 @@ def preserved_early_success(value: dict[str, Any], head: str, writer_run_id: int
         "ci_run_attempt", "ci_status", "ci_conclusion", "release_workflow_id",
         "release_run_id", "release_run_number", "release_run_attempt",
         "release_status", "release_conclusion", "pr_base_sha", "pr_head_sha",
+        "pr_body_sha256",
     }
     return (
         set(query) == required and query.get("pr_head_sha") == [head]
+        and query.get("pr_body_sha256") == [body_sha256]
+        and BODY_SHA256.fullmatch(body_sha256) is not None
         and all(len(query[key]) == 1 for key in required)
         and all(NUMBER.fullmatch(query[key][0]) for key in (
             "source_run_id", "ci_workflow_id", "ci_run_id", "ci_run_number",
@@ -700,7 +724,10 @@ def observed_invalidations(
             )
             if preserved_value is None:
                 raise GovernanceError("Preserved early governance Check Run is missing.")
-            if not preserved_early_success(preserved_value, head, preserved_writer_run_id):
+            if not preserved_early_success(
+                preserved_value, head, preserved_writer_run_id,
+                body_sha256=pr_body_sha256(pull_request.get("body")),
+            ):
                 raise GovernanceError("Preserved early governance success is invalid.")
             continue
         value = check_run(head)
@@ -809,6 +836,7 @@ class PendingDecision:
     sensor_id: int | None
     generations: tuple[Generation, Generation] | None
     issue: str | None
+    body_sha256: str
 
 
 def evidence_snapshot() -> EvidenceSnapshot:
@@ -950,20 +978,32 @@ def contract(number: int, base: str, head: str, branch: str, draft: bool, snapsh
     return "success" if ready.returncode == 0 else "failure"
 
 
-def final_closer_is_unique(number: int, issue: str, base: str, head: str, claimants: dict[str, frozenset[int]]) -> bool:
+def final_closer_is_unique(
+    number: int, issue: str, base: str, head: str, body_sha256: str,
+    claimants: dict[str, frozenset[int]],
+) -> bool:
     current = pull(number, default_token=True)
     actual_issue = canonical_issue(current.get("body"))
-    if actual_issue != issue or current["base"]["sha"] != base or current["head"]["sha"] != head:
+    if (
+        BODY_SHA256.fullmatch(body_sha256) is None
+        or pr_body_sha256(current.get("body")) != body_sha256
+        or actual_issue != issue or current["base"]["sha"] != base or current["head"]["sha"] != head
+    ):
         return False
     # A malformed multi-Issue closer is a claimant for every Issue it names;
     # the one complete snapshot prevents O(N^2) GETs for a 300+ PR run.
     return claimants.get(issue) == frozenset({number})
 
 
-def target_url(*, source_run_id: int | None = None, generations: tuple[Generation, Generation] | None = None, base: str | None = None, head: str | None = None) -> str:
+def target_url(
+    *, source_run_id: int | None = None, generations: tuple[Generation, Generation] | None = None,
+    base: str | None = None, head: str | None = None, body_sha256: str | None = None,
+) -> str:
     url = f"{SERVER_URL}/{REPOSITORY}/actions/runs/{WRITER_RUN_ID}"
-    if source_run_id is None and generations is None and base is None and head is None:
+    if source_run_id is None and generations is None and base is None and head is None and body_sha256 is None:
         return url
+    if body_sha256 is not None and BODY_SHA256.fullmatch(body_sha256) is None:
+        raise GovernanceError("Pull request body digest is invalid.")
     parts = urlparse(url)
     query: dict[str, str] = {}
     if source_run_id is not None:
@@ -980,6 +1020,8 @@ def target_url(*, source_run_id: int | None = None, generations: tuple[Generatio
         query["pr_base_sha"] = base
     if head is not None:
         query["pr_head_sha"] = head
+    if body_sha256 is not None:
+        query["pr_body_sha256"] = body_sha256
     return urlunparse(parts._replace(query=urlencode(query)))
 
 
@@ -992,7 +1034,9 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
     # terminal publication, so it reuses that pending status (or a scheduled
     # baseline) rather than creating a second pending status for every PR.
     pending = check_baseline(head) if defer_terminal else write_governance_check(head, "pending", "Trusted governance revalidation is running.", target_url())
+    body_sha256 = ""
     try:
+        body_sha256 = pr_body_sha256(initial.get("body"))
         issue = canonical_issue(initial.get("body"))
         result = contract(number, base, head, branch, draft, snapshot_path)
         # A Draft is deliberately non-terminal. It must not require a final
@@ -1013,7 +1057,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
         # reads for the same immutable workflow paths.
         if result != "success":
             if defer_terminal:
-                return PendingDecision(number, head, base, pending, "failure", "Trusted PR governance failed.", None, None, issue)
+                return PendingDecision(number, head, base, pending, "failure", "Trusted PR governance failed.", None, None, issue, body_sha256)
             if not check_changed_since(head, pending):
                 write_governance_check(
                     head, "failure", "Trusted PR governance failed.", target_url(),
@@ -1030,7 +1074,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             state, description = "pending", "Trusted governance revalidation is pending."
         elif result != "success" or ci != "success" or issue is None:
             state, description = "failure", "Trusted PR governance failed."
-        elif not final_closer_is_unique(number, issue, base, head, claimants):
+        elif not final_closer_is_unique(number, issue, base, head, body_sha256, claimants):
             state, description = "failure", "Canonical Issue closer set changed."
         else:
             # A second read immediately before success rejects same-head reruns and attempts.
@@ -1045,7 +1089,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             else:
                 state, description = "success", "Trusted PR governance passed."
         if defer_terminal:
-            return PendingDecision(number, head, base, pending, state, description, sensor_id, current_generations, issue)
+            return PendingDecision(number, head, base, pending, state, description, sensor_id, current_generations, issue, body_sha256)
         terminal_count = 0
         if state == "success":
             terminal_count = sensor_terminal_check_count(head, sensor_id)
@@ -1056,6 +1100,8 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             # unambiguous.
         if check_changed_since(head, pending):
             return
+        if state == "success" and not final_closer_is_unique(number, issue, base, head, body_sha256, claimants):
+            state, description = "failure", "Pull request body changed during governance revalidation."
         if os.environ.get("GITHUB_ACTIONS") == "true":
             rebind_trusted_default_writer()
         write_governance_check(head, state, description, target_url(
@@ -1063,6 +1109,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             generations=current_generations if state == "success" else None,
             base=base if state == "success" else None,
             head=head if state == "success" else None,
+            body_sha256=body_sha256 if state == "success" else None,
         ), expected_fingerprint=pending)
     except NoPostGovernanceError:
         raise
@@ -1073,7 +1120,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             # 100/400 write budget and reintroduce a rate-limit burst.
             return PendingDecision(
                 number, head, base, pending, "failure",
-                "Trusted PR governance failed closed.", None, None, None,
+                "Trusted PR governance failed closed.", None, None, None, body_sha256,
             )
         if not check_changed_since(head, pending):
             write_governance_check(
@@ -1090,9 +1137,15 @@ def finalize_decision(decision: PendingDecision, claimants: dict[str, frozenset[
     terminal_count = 0
     try:
         if state == "success":
-            if decision.sensor_id is None or generations is None or decision.issue is None:
+            if (
+                decision.sensor_id is None or generations is None or decision.issue is None
+                or BODY_SHA256.fullmatch(decision.body_sha256) is None
+            ):
                 raise GovernanceError("Successful governance decision is incomplete.")
-            if not final_closer_is_unique(decision.number, decision.issue, decision.base, decision.head, claimants):
+            if not final_closer_is_unique(
+                decision.number, decision.issue, decision.base, decision.head,
+                decision.body_sha256, claimants,
+            ):
                 state, description = "failure", "Canonical Issue closer set changed."
             else:
                 if sensor(decision.number, decision.base, decision.head, evidence) != decision.sensor_id:
@@ -1109,6 +1162,7 @@ def finalize_decision(decision: PendingDecision, claimants: dict[str, frozenset[
             generations=generations if state == "success" else None,
             base=decision.base if state == "success" else None,
             head=decision.head if state == "success" else None,
+            body_sha256=decision.body_sha256 if state == "success" else None,
         )
         if decision.sensor_id is not None:
             newer, observed_terminal_count, exact_current = check_fence(
@@ -1124,6 +1178,15 @@ def finalize_decision(decision: PendingDecision, claimants: dict[str, frozenset[
             exact_current = False
         if newer:
             return False
+        # The body is mutable without a head change.  Read it again after all
+        # review/CI fences and before honoring an existing or new success.
+        if state == "success" and not final_closer_is_unique(
+            decision.number, decision.issue, decision.base, decision.head,
+            decision.body_sha256, claimants,
+        ):
+            state, description, exact_current = (
+                "failure", "Pull request body changed during governance revalidation.", False,
+            )
         # A scheduled all-open pass must not manufacture a fresh status when
         # the currently trusted App status already has identical immutable
         # CI/review/base/head evidence.
@@ -1138,6 +1201,7 @@ def finalize_decision(decision: PendingDecision, claimants: dict[str, frozenset[
             generations=generations if state == "success" else None,
             base=decision.base if state == "success" else None,
             head=decision.head if state == "success" else None,
+            body_sha256=decision.body_sha256 if state == "success" else None,
         ), expected_fingerprint=decision.pending_check_fingerprint)
         return True
     except NoPostGovernanceError:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import subprocess
 import sys
@@ -18,6 +19,8 @@ import verify_pr_ready as subject
 HEAD = "a" * 40
 INITIAL_HEAD = "b" * 40
 BOT = "chatgpt-codex-connector"
+BODY = "Closes #64"
+BODY_SHA256 = hashlib.sha256(BODY.encode("utf-8")).hexdigest()
 
 
 def marker(
@@ -25,11 +28,16 @@ def marker(
     phase: str,
     head: str,
     updated_at: str | None = None,
+    body: str = BODY,
 ) -> dict[str, object]:
     created_at = f"2026-08-29T03:0{comment_id}:00Z"
     return {
         "id": comment_id,
-        "body": f"<!-- krr-review phase={phase} head={head} -->\n@codex review",
+        "body": (
+            f"<!-- krr-review phase={phase} head={head} "
+            f"body-sha256={hashlib.sha256(body.encode('utf-8')).hexdigest()} -->\n"
+            "@codex review"
+        ),
         "created_at": created_at,
         "updated_at": updated_at or created_at,
         "user": {"login": "HiroyukiFuruno"},
@@ -44,8 +52,9 @@ def successful_state() -> tuple[
     pull_request = {
         "isDraft": True,
         "baseRefOid": "c" * 40,
+        "baseRefName": "master",
         "headRefOid": HEAD,
-        "body": "Closes #64",
+        "body": BODY,
         "updatedAt": "2026-08-29T03:03:00Z",
         "statusCheckRollup": [
             {
@@ -83,6 +92,23 @@ def current_canonical_closer() -> list[dict[str, object]]:
 
 
 class VerifyPrReadyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.required_checks = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        self.required_checks_patcher = patch.object(
+            subject,
+            "_required_status_check_snapshot",
+            return_value=self.required_checks,
+        )
+        self.required_checks_patcher.start()
+        self.addCleanup(self.required_checks_patcher.stop)
+
     def errors(
         self,
         pull_request: dict[str, object] | None = None,
@@ -111,6 +137,43 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_accepts_two_phase_review_on_current_head(self) -> None:
         self.assertEqual(self.errors(), [])
+
+    def test_rejects_same_head_pr_body_edit_with_stale_marker_digests(self) -> None:
+        pull_request, _, comments = successful_state()
+        pull_request["body"] = "Closes #65"
+        errors = " ".join(self.errors(pull_request=pull_request, comments=comments))
+        self.assertIn("initial review marker のPR本文digest", errors)
+        self.assertIn("final review marker のPR本文digest", errors)
+
+    def test_accepts_exact_utf8_unicode_body_digest(self) -> None:
+        body = "Closes #64\n本文"
+        pull_request, _, comments = successful_state()
+        pull_request["body"] = body
+        comments[0] = marker(1, "initial", INITIAL_HEAD, body=body)
+        comments[1] = marker(2, "final", HEAD, body=body)
+        self.assertEqual(self.errors(pull_request=pull_request, comments=comments), [])
+
+    def test_rejects_invalid_pr_body_for_review_evidence(self) -> None:
+        for body in (None, "Closes #64\0", "Closes #64\ud800"):
+            with self.subTest(body=repr(body)):
+                pull_request, _, comments = successful_state()
+                pull_request["body"] = body
+                self.assertIn(
+                    "PR本文の review marker digest",
+                    " ".join(
+                        self.errors(pull_request=pull_request, comments=comments)
+                    ),
+                )
+
+    def test_rejects_malformed_or_wrong_marker_body_digest(self) -> None:
+        pull_request, _, comments = successful_state()
+        for comment in comments:
+            marker_body = comment["body"]
+            assert isinstance(marker_body, str)
+            comment["body"] = marker_body.replace(BODY_SHA256, "A" * 64)
+        errors = " ".join(self.errors(comments=comments))
+        self.assertIn("initial review marker がありません", errors)
+        self.assertIn("final review marker がありません", errors)
 
     def test_rejects_final_evidence_before_referenced_issue_edit(self) -> None:
         pull_request, _, _ = successful_state()
@@ -473,6 +536,22 @@ class VerifyPrReadyTest(unittest.TestCase):
         comments[1] = marker(2, "final", INITIAL_HEAD)
         self.assertIn("最新HEAD", " ".join(self.errors(comments=comments)))
 
+    def test_rejects_newer_final_review_marker_for_an_old_head(self) -> None:
+        _, _, comments = successful_state()
+        comments.append(marker(3, "final", INITIAL_HEAD))
+        self.assertIn("最新HEAD", " ".join(self.errors(comments=comments)))
+
+    def test_rejects_ambiguous_latest_initial_or_final_marker_timestamp(self) -> None:
+        for phase, head in (("initial", INITIAL_HEAD), ("final", HEAD)):
+            with self.subTest(phase=phase):
+                _, _, comments = successful_state()
+                duplicate = marker(3, phase, head)
+                duplicate["created_at"] = comments[0 if phase == "initial" else 1]["created_at"]
+                duplicate["updated_at"] = comments[0 if phase == "initial" else 1]["updated_at"]
+                comments.append(duplicate)
+                errors = " ".join(self.errors(comments=comments))
+                self.assertIn("最新時刻が曖昧", errors)
+
     def test_rejects_unresolved_review_threads(self) -> None:
         threads = [{"id": "thread-1", "isResolved": False}]
         self.assertIn("未resolve", " ".join(self.errors(threads=threads)))
@@ -560,6 +639,105 @@ class VerifyPrReadyTest(unittest.TestCase):
             },
         ]
         self.assertIn("CI", " ".join(self.errors(pull_request=pull_request)))
+
+    def test_required_status_check_snapshot_rejects_invalid_contracts(self) -> None:
+        self.required_checks_patcher.stop()
+        valid_checks = [
+            {"context": "CI", "app_id": None},
+            {"context": subject._TRUSTED_CHECK, "app_id": 42},
+            {"context": subject._LATCH_CHECK, "app_id": 15368},
+        ]
+        variants: dict[str, object] = {
+            "not_strict": {"strict": False, "contexts": ["CI"], "checks": valid_checks},
+            "missing_contexts": {"strict": True, "checks": valid_checks},
+            "missing_checks": {"strict": True, "contexts": ["CI"]},
+            "duplicate_context": {"strict": True, "contexts": ["CI", "CI"], "checks": valid_checks},
+            "contexts_disagree": {"strict": True, "contexts": ["CI"], "checks": valid_checks},
+            "duplicate_check_context": {
+                "strict": True,
+                "contexts": ["CI", subject._TRUSTED_CHECK, subject._LATCH_CHECK],
+                "checks": [*valid_checks, {"context": "CI", "app_id": 7}],
+            },
+            "invalid_app": {
+                "strict": True,
+                "contexts": ["CI", subject._TRUSTED_CHECK, subject._LATCH_CHECK],
+                "checks": [
+                    {"context": "CI", "app_id": True},
+                    *valid_checks[1:],
+                ],
+            },
+        }
+        for name, response in variants.items():
+            with self.subTest(name=name), patch.object(
+                subject, "_gh_json", return_value=response
+            ):
+                with self.assertRaises((TypeError, ValueError)):
+                    subject._required_status_check_snapshot("owner/repo", "master")
+
+    def test_required_non_self_contexts_must_have_one_completed_success(self) -> None:
+        required = (
+            ("CI", "Lint", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                ("Lint", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        completed_ci = {
+            "__typename": "CheckRun",
+            "name": "CI",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }
+        completed_lint = {
+            "__typename": "CheckRun",
+            "name": "Lint",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }
+        variants = {
+            "missing": [completed_ci],
+            "duplicate": [completed_ci, {**completed_ci}, completed_lint],
+            "pending": [completed_ci, {**completed_lint, "status": "IN_PROGRESS", "conclusion": None}],
+            "non_required_cannot_substitute": [
+                completed_ci,
+                {**completed_lint, "name": "Unrequired"},
+            ],
+        }
+        for name, rollup in variants.items():
+            with self.subTest(name=name):
+                errors = subject._status_check_rollup_errors(rollup, required)
+                self.assertTrue(errors)
+        self.assertEqual(
+            subject._status_check_rollup_errors(
+                [completed_ci, completed_lint], required
+            ),
+            [],
+        )
+
+    def test_draft_rejects_invalid_required_governance_app_binding(self) -> None:
+        pull_request, threads, comments = successful_state()
+        invalid_required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                (subject._LATCH_CHECK, 15369),
+                (subject._TRUSTED_CHECK, None),
+            ),
+        )
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject.issue_contract, "referenced_issue_snapshot", return_value=()
+        ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
+            subject,
+            "_required_status_check_snapshot",
+            return_value=invalid_required,
+        ):
+            self.assertEqual(
+                subject.main(["--pr", "72", "--repository", "owner/repo"]), 1
+            )
 
     def test_keeps_legacy_governance_context_compatibility(self) -> None:
         pull_request, _, _ = successful_state()
@@ -649,14 +827,15 @@ class VerifyPrReadyTest(unittest.TestCase):
             }
         )
         comments[0]["body"] = (
-            f"<!-- krr-review phase=final head={HEAD} -->\n@codex review"
+            f"<!-- krr-review phase=final head={HEAD} body-sha256={BODY_SHA256} -->\n"
+            "@codex review"
         )
         comments[0]["updated_at"] = "2026-08-29T03:04:00Z"
         comments.append(
             {
                 "id": 3,
                 "body": (
-                    f"<!-- krr-review phase=initial head={INITIAL_HEAD} -->\n"
+                    f"<!-- krr-review phase=initial head={INITIAL_HEAD} body-sha256={BODY_SHA256} -->\n"
                     "@codex review"
                 ),
                 "created_at": "2026-08-29T03:00:00Z",
@@ -892,6 +1071,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         pull_request = {
             "isDraft": True,
             "baseRefOid": "c" * 40,
+            "baseRefName": "master",
             "headRefOid": HEAD,
             "body": "Closes #64",
             "updatedAt": "2026-08-29T03:03:00Z",
@@ -930,13 +1110,19 @@ class VerifyPrReadyTest(unittest.TestCase):
         all_comments = filler + [
             {
                 "id": 31,
-                "body": f"<!-- krr-review phase=initial head={INITIAL_HEAD} -->\n@codex review",
+                "body": (
+                    f"<!-- krr-review phase=initial head={INITIAL_HEAD} "
+                    f"body-sha256={BODY_SHA256} -->\n@codex review"
+                ),
                 "created_at": "2026-08-29T03:01:00Z",
                 "user": {"login": "HiroyukiFuruno"},
             },
             {
                 "id": 32,
-                "body": f"<!-- krr-review phase=final head={HEAD} -->\n@codex review",
+                "body": (
+                    f"<!-- krr-review phase=final head={HEAD} "
+                    f"body-sha256={BODY_SHA256} -->\n@codex review"
+                ),
                 "created_at": "2026-08-29T03:03:00Z",
                 "user": {"login": "HiroyukiFuruno"},
             },
@@ -1327,6 +1513,25 @@ class VerifyPrReadyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "updatedAt changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
+    def test_rejects_base_branch_retarget_with_the_same_base_sha(self) -> None:
+        pull_request, threads, comments = successful_state()
+        changed_pull_request = dict(pull_request)
+        changed_pull_request["baseRefName"] = "release/v0.4"
+
+        with patch.object(
+            subject, "_gh_json", side_effect=[pull_request, changed_pull_request]
+        ), patch.object(subject, "_paginated_api_array", return_value=comments), patch.object(
+            subject, "_review_threads", return_value=threads
+        ), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "base branch changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
     def test_rechecks_ci_status_rollup_immediately_before_success(self) -> None:
         pull_request, threads, comments = successful_state()
         final_snapshot = deepcopy(pull_request)
@@ -1351,6 +1556,33 @@ class VerifyPrReadyTest(unittest.TestCase):
             subject, "_open_pull_requests", return_value=current_canonical_closer()
         ):
             with self.assertRaisesRegex(ValueError, "CI status changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_rejects_required_status_check_configuration_change_before_success(self) -> None:
+        pull_request, threads, comments = successful_state()
+        changed_required_checks = (
+            ("CI", "Lint", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                ("Lint", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject, "_paginated_api_array", return_value=comments
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ), patch.object(
+            subject,
+            "_required_status_check_snapshot",
+            side_effect=[self.required_checks, changed_required_checks],
+        ):
+            with self.assertRaisesRegex(ValueError, "required status checks changed"):
                 subject.main(["--pr", "72", "--repository", "owner/repo"])
 
     def test_rejects_body_change_after_initial_closing_contract(self) -> None:
@@ -1568,6 +1800,10 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
     app_id = 42
     source_run_id = 901
 
+    @property
+    def body_sha256(self) -> str:
+        return hashlib.sha256(BODY.encode("utf-8")).hexdigest()
+
     def _source(self, *, event: str = "pull_request_review") -> dict[str, object]:
         return {
             "id": self.source_run_id,
@@ -1608,7 +1844,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             "external_id": f"krr-governance/v1/{self.head}/writer-101",
             "details_url": (
                 "https://github.com/owner/repo/actions/runs/123"
-                f"?source_run_id={self.source_run_id}"
+                f"?source_run_id={self.source_run_id}&pr_body_sha256={self.body_sha256}"
             ),
         }
 
@@ -1626,13 +1862,18 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
         }
 
     def _protection(self, checks: list[dict[str, object]] | None = None) -> dict[str, object]:
-        return {
-            "checks": checks
+        current_checks = (
+            checks
             if checks is not None
             else [
                 {"context": subject._TRUSTED_CHECK, "app_id": self.app_id},
                 {"context": subject._LATCH_CHECK, "app_id": 15368},
             ]
+        )
+        return {
+            "strict": True,
+            "contexts": [item["context"] for item in current_checks],
+            "checks": current_checks,
         }
 
     def _gate(
@@ -1710,8 +1951,63 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                 self.branch,
                 self.base,
                 self.head,
+                self.body_sha256,
                 exclude_trusted_governance_check=exclude_trusted_governance_check,
             )
+
+    def test_rejects_trusted_check_with_stale_pr_body_digest(self) -> None:
+        run = self._run()
+        run["details_url"] = (
+            "https://github.com/owner/repo/actions/runs/123"
+            f"?source_run_id={self.source_run_id}&pr_body_sha256={'0' * 64}"
+        )
+        error = self._gate(pages=[{"check_runs": [run]}])
+        self.assertEqual(
+            error,
+            "trusted Check Run details_url lacks exact current PR body digest evidence",
+        )
+
+    def test_accepts_current_newest_generation_with_stale_body_history(self) -> None:
+        historical = self._run()
+        historical.update(
+            {
+                "id": 100,
+                "created_at": "2026-08-29T23:59:59Z",
+                "external_id": f"krr-governance/v1/{self.head}/writer-100",
+                "details_url": (
+                    "https://github.com/owner/repo/actions/runs/123"
+                    f"?source_run_id={self.source_run_id}&pr_body_sha256={'0' * 64}"
+                ),
+            }
+        )
+        self.assertIsNone(
+            self._gate(pages=[{"check_runs": [historical, self._run()]}])
+        )
+
+    def test_rejects_trusted_check_without_pr_body_digest(self) -> None:
+        run = self._run()
+        run["details_url"] = (
+            "https://github.com/owner/repo/actions/runs/123"
+            f"?source_run_id={self.source_run_id}"
+        )
+        error = self._gate(pages=[{"check_runs": [run]}])
+        self.assertEqual(
+            error,
+            "trusted Check Run details_url lacks exact current PR body digest evidence",
+        )
+
+    def test_rejects_trusted_check_with_duplicate_pr_body_digest(self) -> None:
+        run = self._run()
+        run["details_url"] = (
+            "https://github.com/owner/repo/actions/runs/123"
+            f"?source_run_id={self.source_run_id}&pr_body_sha256={self.body_sha256}"
+            f"&pr_body_sha256={self.body_sha256}"
+        )
+        error = self._gate(pages=[{"check_runs": [run]}])
+        self.assertEqual(
+            error,
+            "trusted Check Run details_url lacks exact current PR body digest evidence",
+        )
 
     def _allow_ready(
         self, sources: list[dict[str, object]], *, exclude_trusted_governance_check: bool = False
@@ -1831,7 +2127,18 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                     subject.issue_contract, "referenced_issue_snapshot", return_value=()
                 ), patch.object(subject, "closing_reference_errors", return_value=[]), patch.object(
                     subject, "_verify_final_readiness_snapshot_unchanged"
-                ), patch.object(subject, "_governance_check_error") as governance:
+                ), patch.object(subject, "_governance_check_error") as governance, patch.object(
+                    subject,
+                    "_required_status_check_snapshot",
+                    return_value=(
+                        ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+                        (
+                            ("CI", None),
+                            (subject._LATCH_CHECK, 15368),
+                            (subject._TRUSTED_CHECK, self.app_id),
+                        ),
+                    ),
+                ):
                     self.assertEqual(
                         subject.main(["--pr", "72", "--repository", self.repository]), 0
                     )
