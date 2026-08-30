@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -57,7 +58,7 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         self.assertNotIn("invalidated_count", self.writer_workflow)
         self.assertNotIn("invalidated_count", self.dispatcher)
         self.assertIn("dispatcher_run_id:", self.writer_workflow)
-        self.assertNotIn("inputs.pr", self.writer_workflow)
+        self.assertNotRegex(self.writer_workflow, r"inputs\.pr(?:\s|}}|\])")
 
     def test_ready_and_merge_harness_rechecks_the_same_gate_immediately_before_merge(self) -> None:
         root = Path(__file__).parents[2]

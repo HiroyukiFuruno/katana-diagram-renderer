@@ -41,6 +41,8 @@ CLOSING = re.compile(
     re.I,
 )
 _last_check_write_at: float | None = None
+_bound_check_runs: dict[tuple[str, str], int] = {}
+_bound_check_ids_by_number: dict[int, int] = {}
 
 
 class GovernanceError(RuntimeError):
@@ -141,6 +143,7 @@ def open_snapshot() -> OpenSnapshot:
     # scope.  A fork must not become an Issue claimant, but it also must not
     # hide a malformed duplicate response on a later page.
     seen_all: set[int] = set()
+    governed_heads: set[str] = set()
     claimants: dict[str, set[int]] = {}
     pull_requests: list[dict[str, object]] = []
     for page in pages(f"repos/{REPOSITORY}/pulls?state=open&per_page=100"):
@@ -169,6 +172,10 @@ def open_snapshot() -> OpenSnapshot:
                 or base.get("ref") != os.environ.get("GITHUB_REF_NAME") or not isinstance(head_sha, str) or not SHA.fullmatch(head_sha)
             ):
                 continue
+            normalized_head = head_sha.lower()
+            if normalized_head in governed_heads:
+                raise GovernanceError("Open pull request snapshot has duplicate governed head SHA.")
+            governed_heads.add(normalized_head)
             numbers.append(number)
             pull_requests.append({"number": number, "isDraft": draft, "body": body, "head_sha": head_sha})
             for issue in closing_issues(body):
@@ -261,8 +268,9 @@ def trusted_dispatcher_source(identifier: int) -> DispatcherSource:
         and value.get("event") in DISPATCHER_EVENTS and value.get("head_sha") == expected_head
         and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
         and type(value.get("run_number")) is int and value["run_number"] > 0
-        and type(attempt) is int and attempt > 0
-        and isinstance(status, str) and status in {"requested", "queued", "waiting", "in_progress", "completed"}
+        and type(attempt) is int and attempt == 1
+        and isinstance(status, str) and status in {"in_progress", "completed"}
+        and (status != "completed" or value.get("conclusion") == "success")
     ):
         raise GovernanceError("Dispatcher source is not a trusted default-branch run.")
     return DispatcherSource(identifier, value["event"], attempt)
@@ -317,7 +325,17 @@ def trusted_workflow_blob(path: str, base: str, head: str, cache: dict[tuple[str
 def check_external_id(head: str) -> str:
     if not SHA.fullmatch(head):
         raise GovernanceError("Check Run head SHA is invalid.")
-    return CHECK_EXTERNAL_PREFIX + head.lower()
+    scope = os.environ.get("GOVERNANCE_SCOPE", "")
+    dispatcher = os.environ.get("GOVERNANCE_DISPATCHER_RUN_ID", "")
+    if scope == "all" and NUMBER.fullmatch(dispatcher):
+        generation = f"dispatcher-{dispatcher}"
+    elif scope == "early" and NUMBER.fullmatch(WRITER_RUN_ID):
+        generation = f"writer-{WRITER_RUN_ID}"
+    else:
+        # Unit-level helpers retain a stable synthetic generation; production
+        # main rejects a missing/invalid scope before any network access.
+        generation = "unit"
+    return CHECK_EXTERNAL_PREFIX + head.lower() + "/" + generation
 
 
 def check_app_id() -> int:
@@ -327,13 +345,13 @@ def check_app_id() -> int:
     return int(value)
 
 
-def _valid_check(value: object, head: str) -> dict[str, Any]:
+def _valid_check(value: object, head: str, *, external_id: str | None = None) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GovernanceError("Check Run response is invalid.")
     app = value.get("app")
     if (
         type(value.get("id")) is not int or value.get("name") != CHECK_NAME
-        or value.get("head_sha") != head or value.get("external_id") != check_external_id(head)
+        or value.get("head_sha") != head or value.get("external_id") != (external_id if external_id is not None else check_external_id(head))
         or not isinstance(app, dict) or app.get("id") != check_app_id()
         or not isinstance(value.get("updated_at"), str)
     ):
@@ -352,7 +370,16 @@ def checks(head: str, *, default_token: bool = False) -> list[dict[str, Any]]:
     return values
 
 
-def check_run(head: str) -> dict[str, Any] | None:
+def check_run_for_external_id(head: str, external_id: str) -> dict[str, Any] | None:
+    """Read exactly one immutable App Check Run generation, or fail closed."""
+    if not isinstance(external_id, str) or not external_id:
+        raise GovernanceError("Check Run generation external ID is invalid.")
+    bound = _bound_check_runs.get((head, external_id))
+    if bound is not None:
+        value = api_json(f"repos/{REPOSITORY}/check-runs/{bound}")
+        if not isinstance(value, dict) or value.get("id") != bound:
+            raise GovernanceError("Bound Check Run ID changed.")
+        return _valid_check(value, head, external_id=external_id)
     matching: list[dict[str, Any]] = []
     for item in checks(head):
         if item.get("name") != CHECK_NAME:
@@ -364,10 +391,15 @@ def check_run(head: str) -> dict[str, Any] | None:
             continue
         if item.get("head_sha") != head:
             raise GovernanceError("Check Run head mismatch.")
-        matching.append(_valid_check(item, head))
+        if item.get("external_id") == external_id:
+            matching.append(_valid_check(item, head, external_id=external_id))
     if len(matching) > 1:
-        raise GovernanceError("Multiple trusted Check Runs exist for one head.")
+        raise GovernanceError("Multiple trusted Check Runs exist for one immutable generation.")
     return matching[0] if matching else None
+
+
+def check_run(head: str) -> dict[str, Any] | None:
+    return check_run_for_external_id(head, check_external_id(head))
 
 
 def pace_check_write() -> None:
@@ -406,6 +438,12 @@ def write_check(
             raise NoPostGovernanceError("Check Run changed before terminal write.")
         existing = current
     if existing is None:
+        # A production all-open writer is bound to the exact IDs returned by
+        # the invalidator POSTs.  Falling back to a new same-name generation
+        # would turn a missing/changed manifest entry into an unprotected
+        # terminal decision.
+        if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("GOVERNANCE_SCOPE") == "all":
+            raise NoPostGovernanceError("Bound all-open Check Run is missing.")
         arguments = ["--method", "POST", f"repos/{REPOSITORY}/check-runs", "-f", f"name={CHECK_NAME}", "-f", f"head_sha={head}", "-f", f"external_id={check_external_id(head)}", "-f", "status=in_progress", "-f", f"details_url={details_url}", "-f", f"output[title]={CHECK_NAME}", "-f", f"output[summary]={description}"]
     else:
         identifier = _valid_check(existing, head)["id"]
@@ -414,12 +452,24 @@ def write_check(
             arguments.extend(["-f", "status=in_progress"])
         else:
             arguments.extend(["-f", "status=completed", "-f", f"conclusion={state}"])
+    # Check Runs provide no compare-and-swap PATCH.  A priority writer first
+    # acquires the workflow singleton with cancellation enabled; this final
+    # read is the matching writer-side fence, so a cancelled older generation
+    # cannot publish a terminal value after that hand-off.
+    if state != "in_progress":
+        ensure_writer_run_is_active()
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            source = os.environ.get("GOVERNANCE_DISPATCHER_RUN_ID", "")
+            if not NUMBER.fullmatch(source):
+                raise NoPostGovernanceError("Writer dispatcher source is invalid.")
+            trusted_dispatcher_source(int(source))
     pace_check_write()
     try:
         value = json.loads(command(arguments, check_write=True))
     except json.JSONDecodeError as error:
         raise GovernanceError("Check Run write response is not JSON.") from error
     checked = _valid_check(value, head)
+    _bound_check_runs[(head, checked["external_id"])] = checked["id"]
     expected_status = "in_progress" if state == "in_progress" else "completed"
     expected_conclusion = None if state == "in_progress" else state
     if checked.get("status") != expected_status or checked.get("conclusion") != expected_conclusion or checked.get("details_url") != details_url:
@@ -428,6 +478,28 @@ def write_check(
     if reread is None or check_fingerprint(reread) != check_fingerprint(checked):
         raise GovernanceError("Check Run changed after write.")
     return reread
+
+
+def ensure_writer_run_is_active() -> None:
+    """Reject a terminal mutation once this workflow generation was cancelled."""
+    # Unit callers are not Actions generations.  Production always supplies
+    # this marker, and must prove the current default-branch workflow run.
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    expected_head = os.environ.get("GITHUB_SHA", "")
+    if not NUMBER.fullmatch(WRITER_RUN_ID) or not SHA.fullmatch(expected_head):
+        raise NoPostGovernanceError("Writer generation identity is invalid.")
+    value = api_json(f"repos/{REPOSITORY}/actions/runs/{WRITER_RUN_ID}", default_token=True)
+    repository = value.get("repository") if isinstance(value, dict) else None
+    if not (
+        isinstance(value, dict) and value.get("id") == int(WRITER_RUN_ID)
+        and value.get("name") == "PR governance status writer"
+        and workflow_path_matches(value.get("path"), WRITER_WORKFLOW_PATH)
+        and value.get("event") == "workflow_dispatch" and value.get("head_sha") == expected_head
+        and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
+        and value.get("status") == "in_progress" and type(value.get("run_attempt")) is int and value["run_attempt"] == 1
+    ):
+        raise NoPostGovernanceError("Writer generation is no longer active.")
 
 
 def _same_check_evidence(current: str, desired: str) -> bool:
@@ -526,16 +598,60 @@ def dispatcher_invalidation_url(source: DispatcherSource, carry_pending: int) ->
     )
 
 
+def preserved_early_success(value: dict[str, Any], head: str, writer_run_id: int) -> bool:
+    """Accept only the exact early-writer success that this all-pass preserves."""
+    details = value.get("details_url")
+    if (
+        value.get("status") != "completed" or value.get("conclusion") != "success"
+        or not isinstance(details, str) or type(writer_run_id) is not int or writer_run_id < 1
+    ):
+        return False
+    expected = urlparse(f"{SERVER_URL}/{REPOSITORY}/actions/runs/{writer_run_id}")
+    parsed = urlparse(details)
+    if (
+        parsed.scheme != expected.scheme or parsed.netloc != expected.netloc
+        or parsed.path != expected.path or parsed.params or parsed.fragment
+    ):
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    required = {
+        "source_run_id", "ci_workflow_id", "ci_run_id", "ci_run_number",
+        "ci_run_attempt", "ci_status", "ci_conclusion", "release_workflow_id",
+        "release_run_id", "release_run_number", "release_run_attempt",
+        "release_status", "release_conclusion", "pr_base_sha", "pr_head_sha",
+    }
+    return (
+        set(query) == required and query.get("pr_head_sha") == [head]
+        and all(len(query[key]) == 1 for key in required)
+        and all(NUMBER.fullmatch(query[key][0]) for key in (
+            "source_run_id", "ci_workflow_id", "ci_run_id", "ci_run_number",
+            "ci_run_attempt", "release_workflow_id", "release_run_id",
+            "release_run_number", "release_run_attempt",
+        ))
+        and SHA.fullmatch(query["pr_base_sha"][0]) is not None
+    )
+
+
 def observed_invalidations(
     snapshot: OpenSnapshot, source: DispatcherSource, scope: str, targets: tuple[int, ...],
+    preserved: tuple[int, ...] = (), preserved_writer_run_id: int = 0,
 ) -> tuple[OpenSnapshot, frozenset[int]]:
     """Bind the writer scope to current App invalidations from one dispatcher."""
     if scope not in {"early", "all"}:
         raise GovernanceError("Writer scope is invalid.")
     if scope == "all":
-        if targets:
-            raise GovernanceError("All-open writer must not accept target inputs.")
         expected_numbers = snapshot.numbers
+        if len(set(targets)) != len(targets) or any(type(number) is not int or number < 1 for number in targets):
+            raise GovernanceError("All-open priority target boundary is invalid.")
+        if not set(targets).issubset(expected_numbers):
+            raise GovernanceError("All-open priority target is outside the open snapshot.")
+        if (
+            len(set(preserved)) != len(preserved)
+            or any(type(number) is not int or number < 1 for number in preserved)
+            or not set(preserved).issubset(targets)
+            or (bool(preserved) != (preserved_writer_run_id > 0))
+        ):
+            raise GovernanceError("All-open preserved target boundary is invalid.")
     else:
         if source.event == "schedule" or not targets or len(set(targets)) != len(targets):
             raise GovernanceError("Early writer target boundary is invalid.")
@@ -543,7 +659,27 @@ def observed_invalidations(
             raise GovernanceError("Early writer target boundary is invalid.")
         if not set(targets).issubset(snapshot.numbers):
             raise GovernanceError("Early writer target is outside the open snapshot.")
+        if preserved or preserved_writer_run_id != 0:
+            raise GovernanceError("Early writer cannot preserve an all-open target.")
         expected_numbers = targets
+        # The early workflow acquired the repository writer singleton with
+        # cancellation before this program starts.  It therefore owns the
+        # source pending mutation itself; requiring an external dispatcher
+        # marker would reintroduce the old GET/PATCH hand-off race.
+        selected = {
+            pull_request.get("number"): pull_request
+            for pull_request in snapshot.pull_requests
+            if isinstance(pull_request, dict) and pull_request.get("number") in expected_numbers
+        }
+        if set(selected) != set(expected_numbers):
+            raise GovernanceError("Early writer target set changed.")
+        return (
+            OpenSnapshot(
+                tuple(expected_numbers), snapshot.claimants,
+                tuple(selected[number] for number in expected_numbers),
+            ),
+            frozenset(),
+        )
     expected_fresh = dispatcher_invalidation_url(source, 0)
     expected_carry = dispatcher_invalidation_url(source, 1)
     carry: set[int] = set()
@@ -555,6 +691,16 @@ def observed_invalidations(
         if type(number) is not int or number < 1 or type(draft) is not bool or not isinstance(head, str) or not SHA.fullmatch(head):
             raise GovernanceError("Open pull request head is invalid.")
         if number not in expected_numbers:
+            continue
+        if number in preserved:
+            preserved_value = check_run_for_external_id(
+                head,
+                CHECK_EXTERNAL_PREFIX + head.lower() + f"/writer-{preserved_writer_run_id}",
+            )
+            if preserved_value is None:
+                raise GovernanceError("Preserved early governance Check Run is missing.")
+            if not preserved_early_success(preserved_value, head, preserved_writer_run_id):
+                raise GovernanceError("Preserved early governance success is invalid.")
             continue
         value = check_run(head)
         if value is None:
@@ -569,12 +715,12 @@ def observed_invalidations(
                 raise GovernanceError("Draft pull request cannot carry a terminal governance decision.")
             carry.add(number)
         selected[number] = pull_request
-    if set(selected) != set(expected_numbers):
+    if set(selected) != set(expected_numbers) - set(preserved):
         raise GovernanceError("Dispatcher invalidation target set changed.")
     return (
         OpenSnapshot(
-            tuple(expected_numbers), snapshot.claimants,
-            tuple(selected[number] for number in expected_numbers),
+            tuple(number for number in expected_numbers if number not in preserved), snapshot.claimants,
+            tuple(selected[number] for number in expected_numbers if number not in preserved),
         ),
         frozenset(carry),
     )
@@ -609,7 +755,7 @@ def sensor(number: int, base: str, head: str, evidence: EvidenceSnapshot | None 
                 if not (
                     run.get("name") == "PR governance review sensor" and run.get("event") == event
                     and workflow_path_matches(run.get("path"), ".github/workflows/pr-governance-review-events.yml")
-                    and run.get("head_sha") == head and run.get("run_attempt") == 1
+                    and run.get("head_sha") == head and type(run.get("run_attempt")) is int and run.get("run_attempt") == 1
                     and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
                     and current.get("number") == number and isinstance(run_base, dict) and isinstance(run_head, dict)
                     and run_base.get("sha") == base and run_head.get("sha") == head
@@ -909,6 +1055,8 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             # unambiguous.
         if check_changed_since(head, pending):
             return
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            rebind_trusted_default_writer()
         write_governance_check(head, state, description, target_url(
             source_run_id=sensor_id if state == "success" and terminal_count == 0 else None,
             generations=current_generations if state == "success" else None,
@@ -1010,11 +1158,13 @@ def decision_write_cost(decision: PendingDecision) -> int:
     return 1 if decision.state == "pending" else 2
 
 
-def governance_order(snapshot: OpenSnapshot, carry: frozenset[int]) -> tuple[int, ...]:
-    """Prioritize terminal carry, then fresh terminal work, then Drafts."""
+def governance_order(snapshot: OpenSnapshot, carry: frozenset[int], priority: tuple[int, ...] = ()) -> tuple[int, ...]:
+    """Prioritize affected event claimants, then carry, terminal work and Drafts."""
     numbers = snapshot.numbers
     if not carry.issubset(numbers):
         raise GovernanceError("Dispatcher carry target is outside the open snapshot.")
+    if len(set(priority)) != len(priority) or not set(priority).issubset(numbers):
+        raise GovernanceError("Dispatcher priority target is outside the open snapshot.")
     drafts: dict[int, bool] = {}
     for pull_request in snapshot.pull_requests:
         number = pull_request.get("number")
@@ -1026,10 +1176,15 @@ def governance_order(snapshot: OpenSnapshot, carry: frozenset[int]) -> tuple[int
         raise GovernanceError("Open pull request draft snapshot is incomplete.")
     if any(drafts[number] for number in carry):
         raise GovernanceError("Draft pull request cannot carry a terminal governance decision.")
+    # The dispatcher puts every PR that can be affected by the triggering
+    # Issue/PR event first.  This preserves the resolver's source-first
+    # closure ordering even when REST pagination has unrelated PRs ahead of
+    # it, and makes the first 100 event writer slots protect that closure.
     return (
-        tuple(number for number in numbers if number in carry)
-        + tuple(number for number in numbers if not drafts[number] and number not in carry)
-        + tuple(number for number in numbers if drafts[number])
+        priority
+        + tuple(number for number in numbers if number in carry and number not in priority)
+        + tuple(number for number in numbers if not drafts[number] and number not in carry and number not in priority)
+        + tuple(number for number in numbers if drafts[number] and number not in priority)
     )
 
 
@@ -1040,32 +1195,85 @@ def main() -> int:
     dispatcher_run_id = os.environ.get("GOVERNANCE_DISPATCHER_RUN_ID", "")
     scope = os.environ.get("GOVERNANCE_SCOPE", "")
     raw_targets = os.environ.get("GOVERNANCE_TARGET_NUMBERS", "")
-    if not NUMBER.fullmatch(dispatcher_run_id) or scope not in {"early", "all"}:
+    raw_preserved = os.environ.get("GOVERNANCE_PRESERVED_TARGET_NUMBERS", "")
+    preserved_writer_run_id = os.environ.get("GOVERNANCE_PRESERVED_WRITER_RUN_ID", "")
+    raw_manifest = os.environ.get("GOVERNANCE_CHECK_MANIFEST", "")
+    _bound_check_runs.clear()
+    _bound_check_ids_by_number.clear()
+    if not NUMBER.fullmatch(dispatcher_run_id) or scope not in {"early", "all"} or re.fullmatch(r"0|[1-9][0-9]*", preserved_writer_run_id) is None:
         print("Writer dispatch boundary is invalid.", file=sys.stderr)
         return 1
     try:
         decoded_targets = json.loads(raw_targets)
-        if not isinstance(decoded_targets, list) or any(type(number) is not int for number in decoded_targets):
+        decoded_preserved = json.loads(raw_preserved)
+        decoded_manifest = json.loads(raw_manifest)
+        if (
+            not isinstance(decoded_targets, list) or any(type(number) is not int for number in decoded_targets)
+            or not isinstance(decoded_preserved, list) or any(type(number) is not int for number in decoded_preserved)
+            or not isinstance(decoded_manifest, list)
+        ):
             raise ValueError
         # Dispatcher output is a compact canonical JSON array.  Accepting
         # alternate spellings here would make an out-of-band dispatch
         # indistinguishable from the event boundary that was invalidated.
-        if json.dumps(decoded_targets, separators=(",", ":")) != raw_targets:
+        if (
+            json.dumps(decoded_targets, separators=(",", ":")) != raw_targets
+            or json.dumps(decoded_preserved, separators=(",", ":")) != raw_preserved
+            or json.dumps(decoded_manifest, separators=(",", ":")) != raw_manifest
+        ):
             raise ValueError
         targets = tuple(decoded_targets)
+        preserved = tuple(decoded_preserved)
     except (json.JSONDecodeError, ValueError):
         print("Writer target boundary is invalid.", file=sys.stderr)
         return 1
     if (
-        (scope == "all" and targets)
-        or (scope == "early" and (not targets or len(set(targets)) != len(targets) or any(number < 1 for number in targets)))
+        len(set(targets)) != len(targets)
+        or any(number < 1 for number in targets)
+        or len(set(preserved)) != len(preserved)
+        or any(number < 1 for number in preserved)
+        or (scope == "all" and (not set(preserved).issubset(targets) or bool(preserved) != (preserved_writer_run_id != "0")))
+        or (scope == "early" and not targets)
+        or (scope == "early" and (preserved or preserved_writer_run_id != "0"))
+        or (scope == "early" and decoded_manifest)
     ):
         print("Writer target boundary is invalid.", file=sys.stderr)
         return 1
+    manifest_numbers: list[int] = []
+    manifest_check_ids: set[int] = set()
+    for item in decoded_manifest:
+        if (
+            not isinstance(item, list) or len(item) != 2 or type(item[0]) is not int
+            or item[0] in manifest_numbers or type(item[1]) is not int or item[1] < 1
+            or item[1] in manifest_check_ids
+        ):
+            print("Writer Check Run manifest is invalid.", file=sys.stderr)
+            return 1
+        manifest_numbers.append(item[0])
+        manifest_check_ids.add(item[1])
+        _bound_check_ids_by_number[item[0]] = item[1]
     try:
         dispatcher_source = trusted_dispatcher_source(int(dispatcher_run_id))
         snapshot = open_snapshot()
-        scoped_snapshot, carry = observed_invalidations(snapshot, dispatcher_source, scope, targets)
+        if scope == "all" and os.environ.get("GITHUB_ACTIONS") == "true":
+            event_tail = tuple(number for number in targets if number not in preserved)
+            expected_manifest = preserved + event_tail + tuple(
+                number for number in snapshot.numbers
+                if number not in preserved and number not in event_tail
+            )
+            if tuple(manifest_numbers) != expected_manifest:
+                raise GovernanceError("Writer Check Run manifest does not match the current open snapshot.")
+            for pull_request in snapshot.pull_requests:
+                number = pull_request.get("number")
+                head = pull_request.get("head_sha")
+                if number in _bound_check_ids_by_number and isinstance(head, str) and SHA.fullmatch(head):
+                    external = CHECK_EXTERNAL_PREFIX + head.lower() + (
+                        f"/writer-{preserved_writer_run_id}" if number in preserved else f"/dispatcher-{dispatcher_run_id}"
+                    )
+                    _bound_check_runs[(head, external)] = _bound_check_ids_by_number[number]
+        scoped_snapshot, carry = observed_invalidations(
+            snapshot, dispatcher_source, scope, targets, preserved, int(preserved_writer_run_id),
+        )
         initial_evidence = evidence_snapshot()
     except GovernanceError as error:
         print(str(error), file=sys.stderr)
@@ -1084,9 +1292,18 @@ def main() -> int:
         # rolling Check Run mutation maximum at 445/hour. Creating a terminal
         # Check Run costs pending POST plus terminal PATCH.
         terminal_write_budget = 400 if dispatcher_source.event == "schedule" else 100
-        for number in governance_order(scoped_snapshot, carry):
+        for number in governance_order(
+            scoped_snapshot, carry,
+            tuple(number for number in targets if number not in preserved) if scope == "all" else (),
+        ):
             decision: PendingDecision | None = None
             try:
+                if scope == "early":
+                    # The early scope holds the writer singleton.  It writes
+                    # source pending and the final result in one generation,
+                    # rather than trusting a dispatcher-side pre-write.
+                    process(number, snapshot.claimants, source.name, initial_evidence, defer_terminal=False)
+                    continue
                 decision = process(number, snapshot.claimants, source.name, initial_evidence, defer_terminal=True)
                 if decision is not None:
                     cost = decision_write_cost(decision)

@@ -19,7 +19,12 @@ KDR は Mermaid、Draw.io、ZenUML などの図表描画ランタイムと `kdr`
 3. `/openspec-verify-change`
    - 実装が仕様、設計、タスクと一致しているか確認する。
 4. `/openspec-archive-change`
-   - 実装、検証、PR 統合が終わった変更だけ archive へ移す。
+   - 実装と検証が終わった変更だけ archive へ移す。リリース対象より前の完了済み change は、release gate 前に archive して正式な release commit に含める。
+
+通常の変更では PR 統合後に archive する運用も可能ですが、リリース作業では
+`/impl-release` の対象 version より前の完了済み change を `release-check` と
+`pre-pr` の前に archive します。archive の変更を正式な release commit に含め、
+merge 後まで先送りしません。未完了の change は完了条件を満たすまで archive しません。
 
 ## 2. 日常的な実装変更
 

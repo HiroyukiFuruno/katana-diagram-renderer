@@ -604,16 +604,17 @@ fn assert_pr_ready_recipe_metadata(ready_check: &str) {
     for required in [
         "set -euo pipefail",
         "pr={{quote(pr)}}",
-        "gh pr view \"$pr\" --json baseRefOid,headRefOid,headRefName,isDraft",
+        "gh pr view \"$pr\" --json baseRefOid,headRefOid,headRefName,baseRefName,isDraft",
         "gh repo view --json nameWithOwner",
         "gh returned incomplete repository metadata",
         "gh returned incomplete or unsafe PR/default metadata",
         "gh returned incomplete PR metadata",
         "IFS=\"$(printf '\\011')\" read -r repository_owner repository_name repository repository_extra",
-        "IFS=\"$(printf '\\011')\" read -r base_sha head_sha branch parsed_repository trusted_default_sha readiness_mode extra",
+        "IFS=\"$(printf '\\011')\" read -r base_sha head_sha branch base_branch parsed_repository trusted_default_sha readiness_mode extra",
         "not any(ord(character) < 32 or ord(character) == 127",
-        "isinstance(fields[5], bool)",
-        "\"require-draft\" if fields[5] else \"allow-ready\"",
+        "fields[3] == default[\"name\"]",
+        "isinstance(fields[6], bool)",
+        "\"require-draft\" if fields[6] else \"allow-ready\"",
         "\"$readiness_mode\" != \"require-draft\" && \"$readiness_mode\" != \"allow-ready\"",
     ] {
         assert!(

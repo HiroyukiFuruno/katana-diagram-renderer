@@ -33,6 +33,8 @@ git switch -c release/vX.Y.Z
 対象 version の OpenSpec change や tasks がある場合は、先に読みます。
 見つからない場合は、release 内容を差分と `docs/release.md` から確認します。
 
+対象 version より前の完了済み OpenSpec change は、`release-check` と `pre-pr` の前に archive へ移動します。archive の変更も release の正式な commit に含め、merge 後まで先送りしません。未完了の change は完了条件を満たすまで archive せず、対象 version の release gate を通してはいけません。
+
 ## Phase 2: 実装と検証
 
 未完了 task を実装し、必要に応じて `tasks.md` を更新します。
@@ -61,7 +63,7 @@ git push -u origin release/vX.Y.Z
 
 ## Phase 4: Draft PR 作成と cloud review
 
-`release/vX.Y.Z` から `master` へ Draft の Pull Request を作成します。対象 version 以前の完了済み OpenSpec change は PR 前に archive へ移動せず、merge 後に移動します。
+`release/vX.Y.Z` から `master` へ Draft の Pull Request を作成します。対象 version 以前の完了済み OpenSpec change が archive 済みであることを確認してから、PR 前の gate と Draft PR 作成へ進みます。
 
 ```bash
 lefthook run pre-pr
@@ -133,11 +135,11 @@ PR が `.github/workflows/` の governance workflow 自体を追加・変更す�
 
 ## Phase 7: merge と自動リリース
 
-承認後は、直前の `just pr-ready-check "<number>"` が成功した場合だけ merge します。merge 後に、対象 version 以前の完了済み OpenSpec change を archive へ移動します。
+承認後は、直前の `just pr-ready-check "<number>"` が成功した場合だけ merge します。merge 後は、OpenSpec change が release 前に archive 済みであることを確認し、Release workflow の結果を確認します。
 
 ```bash
 gh pr merge --merge --delete-branch "${pr_url}"
-# merge 後に OpenSpec change を archive へ移動
+# OpenSpec change は release gate 前に archive 済みであることを確認
 ```
 
 merge 後、Release workflow と crates.io 公開結果を確認します。
@@ -158,5 +160,5 @@ gh run list --workflow Release --limit 5
 - [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract を含む）が通った後に `gh pr ready` を実行している
 - [ ] Ready 化前に全 review thread を確認し、未 resolve thread が 0 件である
 - [ ] Ready 化後にユーザーの merge 承認を得て、`gh pr merge` 直前の `just pr-ready-check "<number>"` が成功している
-- [ ] merge 後に OpenSpec change を archive している
+- [ ] release-check / pre-pr の前に対象 version 以前の完了済み OpenSpec change を archive している
 - [ ] merge 後に Release workflow が起動している

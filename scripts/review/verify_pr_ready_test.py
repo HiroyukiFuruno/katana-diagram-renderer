@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 import sys
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -302,6 +305,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             return {
                 "data": {
                     "repository": {
+                        "defaultBranchRef": {"name": "master"},
                         "pullRequests": {
                             "nodes": nodes,
                             "pageInfo": {
@@ -339,6 +343,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         malformed = {
             "data": {
                 "repository": {
+                    "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
                         "nodes": [{"number": 72, "isDraft": True, "body": None}],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -354,6 +359,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         first_page = {
             "data": {
                 "repository": {
+                    "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
                         "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
@@ -364,6 +370,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         duplicate_page = {
             "data": {
                 "repository": {
+                    "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
                         "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -379,6 +386,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         first_page = {
             "data": {
                 "repository": {
+                    "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
                         "nodes": [{"number": 72, "isDraft": True, "body": "Closes #64"}],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
@@ -389,6 +397,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         repeated_cursor_page = {
             "data": {
                 "repository": {
+                    "defaultBranchRef": {"name": "master"},
                     "pullRequests": {
                         "nodes": [{"number": 73, "isDraft": True, "body": "Closes #64"}],
                         "pageInfo": {"hasNextPage": True, "endCursor": "again"},
@@ -401,6 +410,55 @@ class VerifyPrReadyTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(TypeError, "endCursor"):
                 subject._open_pull_requests("owner/repo")
+
+    def test_open_pull_requests_rejects_duplicate_live_governed_heads(self) -> None:
+        duplicate_head = "d" * 40
+        response = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 72,
+                                "isDraft": True,
+                                "body": "Closes #64",
+                                "baseRefName": "master",
+                                "headRefOid": duplicate_head,
+                                "headRepository": {"nameWithOwner": "owner/repo"},
+                            },
+                            {
+                                "number": 73,
+                                "isDraft": True,
+                                "body": "Closes #64",
+                                "baseRefName": "master",
+                                "headRefOid": duplicate_head.upper(),
+                                "headRepository": {"nameWithOwner": "owner/repo"},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=response) as gh_json:
+            with self.assertRaisesRegex(TypeError, "duplicate governed head SHA"):
+                subject._open_pull_requests("owner/repo")
+        query = gh_json.call_args.args[3]
+        self.assertIn("defaultBranchRef { name }", query)
+        self.assertIn("baseRefName headRefOid", query)
+        self.assertIn("headRepository { nameWithOwner }", query)
+
+    def test_open_pull_request_snapshot_rejects_duplicate_governed_heads(self) -> None:
+        snapshot = json.dumps(
+            [
+                {"number": 72, "isDraft": True, "body": "Closes #64", "head_sha": "d" * 40},
+                {"number": 73, "isDraft": True, "body": "Closes #64", "head_sha": "D" * 40},
+            ]
+        )
+        with patch("builtins.open", mock_open(read_data=snapshot)):
+            with self.assertRaisesRegex(TypeError, "duplicate governed head SHA"):
+                subject._open_pull_request_snapshot("/immutable/open-pulls.json")
 
     def test_rejects_ready_pr_before_the_gate(self) -> None:
         pull_request, _, _, _ = successful_state()
@@ -1458,8 +1516,10 @@ class VerifyPrReadyTest(unittest.TestCase):
         check_end = justfile.index("\n\n# ", check_start)
         check = justfile[check_start:check_end]
         self.assertIn("verify_push_issue.py --pr-number \"$pr\" --pr-base-sha \"$base_sha\" --pr-head-sha \"$head_sha\"", check)
-        self.assertIn("baseRefOid,headRefOid,headRefName,isDraft", check)
-        self.assertIn('"require-draft" if fields[5] else "allow-ready"', check)
+        self.assertIn("baseRefOid,headRefOid,headRefName,baseRefName,isDraft", check)
+        self.assertIn('pull.get("baseRefName")', check)
+        self.assertIn('fields[3] == default["name"]', check)
+        self.assertIn('"require-draft" if fields[6] else "allow-ready"', check)
         self.assertIn('gh repo view --json nameWithOwner', check)
         self.assertIn('gh api graphql -f query=', check)
         self.assertIn('target{__typename ... on Commit {oid}}', check)
@@ -1467,6 +1527,61 @@ class VerifyPrReadyTest(unittest.TestCase):
         self.assertIn('--trusted-default-sha "$trusted_default_sha"', check)
         self.assertIn("verify_pr_ready.py --pr \"$pr\" --repository \"$repository\" \"--$readiness_mode\" --expected-base-sha \"$base_sha\" --expected-head-sha \"$head_sha\"", check)
         self.assertLess(check.index("verify_push_issue.py"), check.index("verify_pr_ready.py"))
+
+    def test_pr_ready_metadata_parser_requires_default_branch_base(self) -> None:
+        justfile = (Path(__file__).parents[2] / "Justfile").read_text(encoding="utf-8")
+        check_start = justfile.index("pr-ready-check pr:")
+        check_end = justfile.index("\n\n# ", check_start)
+        check = justfile[check_start:check_end]
+        match = re.search(
+            r"read -r base_sha head_sha branch base_branch parsed_repository "
+            r"trusted_default_sha readiness_mode extra < <\(python3 -c '(.+?)' "
+            r'\"\$pr_metadata\" \"\$repository\" \"\$default_metadata\"\)',
+            check,
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        parser = match.group(1)
+        pull_request = {
+            "baseRefOid": "c" * 40,
+            "headRefOid": "a" * 40,
+            "headRefName": "feature/pr-ready",
+            "baseRefName": "master",
+            "isDraft": True,
+        }
+        default_metadata = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {
+                        "name": "master",
+                        "target": {"__typename": "Commit", "oid": "d" * 40},
+                    }
+                }
+            }
+        }
+
+        def run_parser(pull: dict[str, object], default: dict[str, object]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-c", parser, json.dumps(pull), "owner/repo", json.dumps(default)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(run_parser(pull_request, default_metadata).returncode, 0)
+        for invalid_base in ("release/v1", None, "master\n"):
+            with self.subTest(baseRefName=invalid_base):
+                invalid_pull = dict(pull_request)
+                invalid_pull["baseRefName"] = invalid_base
+                result = run_parser(invalid_pull, default_metadata)
+                self.assertNotEqual(result.returncode, 0)
+
+        for invalid_default in (None, "release/v1", "master\n"):
+            with self.subTest(defaultBranch=invalid_default):
+                invalid_default_metadata = json.loads(json.dumps(default_metadata))
+                invalid_default_metadata["data"]["repository"]["defaultBranchRef"]["name"] = invalid_default
+                result = run_parser(pull_request, invalid_default_metadata)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_rejects_base_changed_with_head_unchanged_during_readiness_check(self) -> None:
         pull_request, threads, comments, reactions = successful_state()
@@ -1576,12 +1691,13 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
     def _run(self) -> dict[str, object]:
         return {
             "id": 101,
+            "created_at": "2026-08-30T00:00:00Z",
             "name": subject._TRUSTED_CHECK,
             "head_sha": self.head,
             "app": {"id": self.app_id},
             "status": "completed",
             "conclusion": "success",
-            "external_id": f"krr-governance/v1/{self.head}",
+            "external_id": f"krr-governance/v1/{self.head}/writer-101",
             "details_url": (
                 "https://github.com/owner/repo/actions/runs/123"
                 f"?source_run_id={self.source_run_id}"
@@ -1914,6 +2030,40 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
         for name, runs in invalid_runs.items():
             with self.subTest(name=name):
                 self.assertIsNotNone(self._gate(pages=[{"check_runs": runs}]))
+
+    def test_newest_immutable_generation_controls_the_trusted_gate(self) -> None:
+        old = self._run()
+        newest = {
+            **old,
+            "id": 102,
+            "created_at": "2026-08-30T00:00:01Z",
+            "external_id": f"krr-governance/v1/{self.head}/writer-102",
+            "status": "in_progress",
+            "conclusion": None,
+        }
+        # A previous success must not mask pending/failure in the generation
+        # with the greatest immutable Check Run ID.
+        self.assertIsNotNone(self._gate(pages=[{"check_runs": [old, newest]}]))
+        newest_failure = {**newest, "status": "completed", "conclusion": "failure"}
+        self.assertIsNotNone(self._gate(pages=[{"check_runs": [old, newest_failure]}]))
+
+    def test_newest_immutable_generation_parses_fractional_timestamps(self) -> None:
+        old_success = {**self._run(), "created_at": "2026-08-30T00:00:00Z"}
+        newer_pending = {
+            **old_success,
+            "id": 102,
+            "created_at": "2026-08-30T00:00:00.1Z",
+            "external_id": f"krr-governance/v1/{self.head}/writer-102",
+            "status": "in_progress",
+            "conclusion": None,
+        }
+        # Lexicographic ordering puts the non-fractional `Z` after `.1Z`.
+        # The parsed instant must instead select the pending generation.
+        self.assertIsNotNone(self._gate(pages=[{"check_runs": [old_success, newer_pending]}]))
+
+    def test_newest_immutable_generation_rejects_invalid_timestamp(self) -> None:
+        invalid = {**self._run(), "created_at": "2026-02-30T00:00:00Z"}
+        self.assertIsNotNone(self._gate(pages=[{"check_runs": [invalid]}]))
 
     def test_governance_check_requires_exact_branch_protection_app_bindings(self) -> None:
         variants = {

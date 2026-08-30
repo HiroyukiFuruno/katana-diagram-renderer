@@ -23,7 +23,10 @@ class StatusWriterUnitTest(unittest.TestCase):
     def setUp(self) -> None:
         self.dispatch_boundary = patch.dict(
             os.environ,
-            {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[]"},
+            {
+                "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[]",
+                "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[]", "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "0", "GOVERNANCE_CHECK_MANIFEST": "[]",
+            },
         )
         self.dispatch_boundary.start()
         self.addCleanup(self.dispatch_boundary.stop)
@@ -128,6 +131,19 @@ class StatusWriterUnitTest(unittest.TestCase):
         with patch.object(WRITER, "pull", return_value=source):
             self.assertFalse(WRITER.final_closer_is_unique(72, "64", "b" * 40, "a" * 40, {"64": frozenset({72, 73})}))
 
+    def test_open_snapshot_rejects_two_governed_prs_with_the_same_head(self) -> None:
+        shared = "a" * 40
+        records = [
+            self.pull(72),
+            self.pull(73),
+        ]
+        for record in records:
+            record["head"]["sha"] = shared  # type: ignore[index]
+        with self.identity(), patch.dict(os.environ, {"GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "pages", return_value=[records]):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.open_snapshot()
+
     def test_newer_check_fence_rejects_terminal_write(self) -> None:
         value = {"id": 102, "name": WRITER.CHECK_NAME, "head_sha": "a" * 40, "external_id": WRITER.check_external_id("a" * 40), "updated_at": "now", "app": {"id": 42}}
         with patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), patch.object(WRITER, "check_run", return_value=value):
@@ -139,18 +155,43 @@ class StatusWriterUnitTest(unittest.TestCase):
             "path": ".github/workflows/pr-governance.yml@master",
             "event": "issues", "head_sha": "d" * 40,
             "repository": {"full_name": "owner/repository"},
-            "run_number": 4, "run_attempt": 2, "status": "in_progress",
+            "run_number": 4, "run_attempt": 1, "status": "in_progress",
         }
         with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40}), \
              patch.object(WRITER, "api_json", return_value=run) as api:
-            self.assertEqual(WRITER.trusted_dispatcher_source(88), WRITER.DispatcherSource(88, "issues", 2))
+            self.assertEqual(WRITER.trusted_dispatcher_source(88), WRITER.DispatcherSource(88, "issues", 1))
         self.assertTrue(api.call_args.kwargs["default_token"])
-        for field, value in (("event", "push"), ("head_sha", "e" * 40), ("path", ".github/workflows/pr-governance.yml.evil@master")):
+        for field, value in (("event", "push"), ("head_sha", "e" * 40), ("path", ".github/workflows/pr-governance.yml.evil@master"), ("run_attempt", 2), ("run_attempt", 0), ("run_attempt", True), ("run_attempt", "1")):
             invalid = {**run, field: value}
             with self.subTest(field=field), self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40}), \
                  patch.object(WRITER, "api_json", return_value=invalid):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.trusted_dispatcher_source(88)
+
+    def test_writer_and_sensor_attempt_boundaries_reject_bool_zero_string_and_retry(self) -> None:
+        head = "a" * 40
+        writer_run = {
+            "id": 99, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": head,
+            "repository": {"full_name": "owner/repository"}, "status": "in_progress", "run_attempt": 1,
+        }
+        with self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_SHA": head}), \
+             patch.object(WRITER, "api_json", return_value=writer_run):
+            WRITER.ensure_writer_run_is_active()
+        for attempt in (0, True, "1", 2):
+            with self.subTest(writer_attempt=attempt), self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_SHA": head}), \
+                 patch.object(WRITER, "api_json", return_value=writer_run | {"run_attempt": attempt}):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.ensure_writer_run_is_active()
+
+        sensor_run = self.generation(attempt=1) | {"name": "PR governance review sensor", "event": "pull_request_review", "head_sha": head, "path": ".github/workflows/pr-governance-review-events.yml@master"}
+        with self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [sensor_run]}]):
+            self.assertEqual(WRITER.sensor(72, "b" * 40, head), 900)
+        for attempt in (0, True, "1", 2):
+            with self.subTest(sensor_attempt=attempt), self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [sensor_run | {"run_attempt": attempt}]}]):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.sensor(72, "b" * 40, head)
 
     def test_observed_invalidations_returns_only_exact_current_carry_markers(self) -> None:
         snapshot = WRITER.OpenSnapshot(
@@ -181,7 +222,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.observed_invalidations(snapshot, source, "all", ())
 
-    def test_early_scope_requires_the_exact_event_boundary_but_all_scope_requires_every_pr(self) -> None:
+    def test_early_scope_requires_the_exact_event_boundary_and_all_scope_accepts_ordered_priority(self) -> None:
         snapshot = WRITER.OpenSnapshot(
             (72, 73), {},
             ({"number": 72, "isDraft": False, "head_sha": "a" * 40}, {"number": 73, "isDraft": False, "head_sha": "b" * 40}),
@@ -198,8 +239,51 @@ class StatusWriterUnitTest(unittest.TestCase):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.observed_invalidations(snapshot, source, "all", ())
         with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
+            scoped, carry = WRITER.observed_invalidations(snapshot, source, "all", (73, 72))
+        self.assertEqual(scoped.numbers, (72, 73))
+        self.assertEqual(carry, frozenset())
+        self.assertEqual(WRITER.governance_order(scoped, carry, (73, 72)), (73, 72))
+        with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.observed_invalidations(snapshot, WRITER.DispatcherSource(88, "schedule", 1), "early", (72,))
+        with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, source, "all", (72, 72))
+
+    def test_all_scope_preserves_only_the_bound_early_success_and_skips_its_rewrite(self) -> None:
+        head, base = "a" * 40, "b" * 40
+        snapshot = WRITER.OpenSnapshot(
+            (72, 73), {},
+            ({"number": 72, "isDraft": False, "head_sha": head}, {"number": 73, "isDraft": False, "head_sha": "c" * 40}),
+        )
+        source = WRITER.DispatcherSource(88, "workflow_run", 1)
+        query = {
+            "source_run_id": "1", "ci_workflow_id": "2", "ci_run_id": "3", "ci_run_number": "4", "ci_run_attempt": "1",
+            "ci_status": "completed", "ci_conclusion": "success", "release_workflow_id": "5", "release_run_id": "6",
+            "release_run_number": "7", "release_run_attempt": "1", "release_status": "completed", "release_conclusion": "success",
+            "pr_base_sha": base, "pr_head_sha": head,
+        }
+        early_success = {
+            "id": 711, "name": WRITER.CHECK_NAME, "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/writer-71", "updated_at": "now", "app": {"id": 42},
+            "status": "completed", "conclusion": "success",
+            "details_url": "https://github.com/owner/repository/actions/runs/71?" + WRITER.urlencode(query),
+        }
+        with self.identity():
+            marker = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 0)}
+        # The preserved source is located via its exact writer-71 external
+        # generation, not the current all-writer dispatcher generation.
+        with self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), \
+             patch.object(WRITER, "object_pages", return_value=[{"check_runs": [early_success]}]), \
+             patch.object(WRITER, "check_run", return_value=marker):
+            scoped, carry = WRITER.observed_invalidations(snapshot, source, "all", (72, 73), (72,), 71)
+        self.assertEqual(scoped.numbers, (73,))
+        self.assertEqual(carry, frozenset())
+        with self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), \
+             patch.object(WRITER, "object_pages", return_value=[{"check_runs": [early_success]}]), \
+             patch.object(WRITER, "check_run", return_value=marker):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, source, "all", (72, 73), (72,), 72)
 
     def test_all_scope_fails_closed_when_a_new_open_pr_missed_the_all_open_invalidation(self) -> None:
         snapshot = WRITER.OpenSnapshot(
@@ -213,12 +297,137 @@ class StatusWriterUnitTest(unittest.TestCase):
                 WRITER.observed_invalidations(snapshot, source, "all", ())
 
     def test_main_rejects_noncanonical_or_invalid_dispatch_target_inputs_before_api_reads(self) -> None:
-        for scope, targets in (("all", "[ ]"), ("all", "[72]"), ("early", "[true]"), ("invalid", "[]")):
+        for scope, targets in (("all", "[ ]"), ("all", "[72,72]"), ("early", "[true]"), ("invalid", "[]")):
             with self.subTest(scope=scope, targets=targets), self.identity(), \
                  patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": scope, "GOVERNANCE_TARGET_NUMBERS": targets}), \
                  patch.object(WRITER, "trusted_dispatcher_source") as source:
                 self.assertEqual(WRITER.main(), 1)
                 source.assert_not_called()
+
+    def test_production_manifest_binds_exact_ids_in_preserved_event_unrelated_order(self) -> None:
+        """The all writer receives the dispatcher POST IDs, never a name-only lookup."""
+        snapshot = self.snapshot((1, 72, 73))
+        source = WRITER.DispatcherSource(88, "issues", 1)
+        environment = {
+            "GITHUB_ACTIONS": "true",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all",
+            "GOVERNANCE_TARGET_NUMBERS": "[72,73]",
+            "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[72]",
+            "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
+            # preserved source, related claimant, then unrelated snapshot PR.
+            "GOVERNANCE_CHECK_MANIFEST": "[[72,701],[73,702],[1,703]]",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=source), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", return_value=None):
+            self.assertEqual(WRITER.main(), 0)
+        self.assertEqual(
+            WRITER._bound_check_runs,
+            {
+                (f"{1:040x}", f"krr-governance/v1/{1:040x}/dispatcher-88"): 703,
+                (f"{72:040x}", f"krr-governance/v1/{72:040x}/writer-71"): 701,
+                (f"{73:040x}", f"krr-governance/v1/{73:040x}/dispatcher-88"): 702,
+            },
+        )
+
+    def test_production_main_uses_manifest_ids_for_preserved_and_terminal_dispatcher_generations(self) -> None:
+        snapshot = self.snapshot((1, 72, 73))
+        heads = {item["number"]: item["head_sha"] for item in snapshot.pull_requests}
+        base = "b" * 40
+        early_query = {
+            "source_run_id": "1", "ci_workflow_id": "2", "ci_run_id": "3", "ci_run_number": "4", "ci_run_attempt": "1",
+            "ci_status": "completed", "ci_conclusion": "success", "release_workflow_id": "5", "release_run_id": "6",
+            "release_run_number": "7", "release_run_attempt": "1", "release_status": "completed", "release_conclusion": "success",
+            "pr_base_sha": base, "pr_head_sha": heads[72],
+        }
+        values: dict[int, dict[str, object]] = {
+            701: {"id": 701, "name": WRITER.CHECK_NAME, "head_sha": heads[72], "external_id": f"krr-governance/v1/{heads[72]}/writer-71", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "completed", "conclusion": "success", "details_url": f"https://github.com/owner/repository/actions/runs/71?{WRITER.urlencode(early_query)}"},
+            702: {"id": 702, "name": WRITER.CHECK_NAME, "head_sha": heads[73], "external_id": f"krr-governance/v1/{heads[73]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
+            703: {"id": 703, "name": WRITER.CHECK_NAME, "head_sha": heads[1], "external_id": f"krr-governance/v1/{heads[1]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
+        }
+        dispatcher = {"id": 88, "name": WRITER.DISPATCHER_NAME, "path": ".github/workflows/pr-governance.yml@master", "event": "issues", "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress"}
+        writer = {"id": 99, "name": "PR governance status writer", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress"}
+        reads: list[int] = []; terminal_ids: list[int] = []
+        def api(endpoint: str, *, default_token: bool = False) -> object:
+            if endpoint.endswith("/actions/runs/88"):
+                return dispatcher
+            if endpoint.endswith("/actions/runs/99"):
+                return writer
+            identifier = int(endpoint.rsplit("/", 1)[1]); reads.append(identifier)
+            return values[identifier]
+        def write(arguments: list[str], *, check_write: bool = False, default_token: bool = False) -> str:
+            self.assertTrue(check_write)
+            identifier = int(next(value.rsplit("/", 1)[1] for value in arguments if "/check-runs/" in value))
+            details = next(value.split("=", 1)[1] for value in arguments if value.startswith("details_url="))
+            terminal_ids.append(identifier); values[identifier] = values[identifier] | {"status": "completed", "conclusion": "failure", "details_url": details}
+            return json.dumps(values[identifier])
+        def terminal(number: int, _claimants: object, _path: str, _evidence: object, *, defer_terminal: bool) -> None:
+            self.assertTrue(defer_terminal)
+            value = WRITER.check_run(heads[number])
+            WRITER.write_check(heads[number], state="failure", description="fixture", details_url="https://github.com/owner/repository/actions/runs/88", existing=value)
+            return None
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[72,73]",
+            "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[72]", "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
+            "GOVERNANCE_CHECK_MANIFEST": "[[72,701],[73,702],[1,703]]",
+        }
+        with self.identity(), patch.dict(os.environ, environment), patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "api_json", side_effect=api), patch.object(WRITER, "command", side_effect=write), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", side_effect=terminal), patch.object(WRITER, "pace_check_write"):
+            self.assertEqual(WRITER.main(), 0)
+        self.assertEqual(terminal_ids, [702, 703])
+        self.assertIn(701, reads)
+        self.assertEqual(reads.count(702), 3)
+        self.assertEqual(reads.count(703), 3)
+
+    def test_production_manifest_rejects_reordered_or_duplicate_ids_before_revalidation(self) -> None:
+        snapshot = self.snapshot((1, 72, 73))
+        source = WRITER.DispatcherSource(88, "issues", 1)
+        base = {
+            "GITHUB_ACTIONS": "true",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all",
+            "GOVERNANCE_TARGET_NUMBERS": "[72,73]", "GOVERNANCE_PRESERVED_TARGET_NUMBERS": "[72]",
+            "GOVERNANCE_PRESERVED_WRITER_RUN_ID": "71",
+        }
+        for manifest in ("[[72,701],[73,702]]", "[[72,701],[73,702],[1,703],[74,704]]", "[[72,701],[1,703],[73,702]]", "[[72,701],[73,701],[1,703]]"):
+            with self.subTest(manifest=manifest), self.identity(), patch.dict(os.environ, base | {"GOVERNANCE_CHECK_MANIFEST": manifest}), \
+                 patch.object(WRITER, "trusted_dispatcher_source", return_value=source), \
+                 patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+                 patch.object(WRITER, "observed_invalidations") as observed:
+                self.assertEqual(WRITER.main(), 1)
+                observed.assert_not_called()
+
+    def test_bound_manifest_id_is_reread_by_id_before_an_immutable_write(self) -> None:
+        head = "a" * 40
+        external = f"krr-governance/v1/{head}/writer-71"
+        value = {
+            "id": 701, "name": WRITER.CHECK_NAME, "head_sha": head, "external_id": external,
+            "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42},
+        }
+        WRITER._bound_check_runs.clear()
+        WRITER._bound_check_runs[(head, external)] = 701
+        with self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), \
+             patch.object(WRITER, "api_json", return_value=value) as api:
+            self.assertEqual(WRITER.check_run_for_external_id(head, external), value)
+        api.assert_called_once_with("repos/owner/repository/check-runs/701")
+
+    def test_all_writer_never_posts_a_replacement_when_a_bound_generation_disappears(self) -> None:
+        head = "a" * 40
+        external = f"krr-governance/v1/{head}/dispatcher-88"
+        WRITER._bound_check_runs.clear()
+        WRITER._bound_check_runs[(head, external)] = 701
+        with self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GOVERNANCE_SCOPE": "all"}), \
+             patch.object(WRITER, "api_json", return_value=None), patch.object(WRITER, "command") as command:
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.write_check(
+                    head, state="in_progress", description="missing", details_url="https://github.com/owner/repository/actions/runs/88",
+                )
+        command.assert_not_called()
 
     def test_terminal_rebind_rejects_default_branch_advance(self) -> None:
         responses = [
@@ -348,6 +557,33 @@ class StatusWriterUnitTest(unittest.TestCase):
             self.assertEqual(WRITER.main(), 0)
         self.assertEqual(process.call_count, 300)
         self.assertEqual(finalize.call_count, 100)
+
+    def test_all_open_event_priority_keeps_the_source_inside_the_first_100_terminal_writes(self) -> None:
+        snapshot = self.snapshot(tuple(range(1, 201)))
+        finalized: list[int] = []
+
+        def decision(number: int, *_args, **_kwargs):
+            return WRITER.PendingDecision(number, f"{number:040x}"[-40:], "b" * 40, 99, "failure", "bad", None, None, None)
+
+        def finalize(value, *_args):
+            finalized.append(value.number)
+            return True
+
+        with self.identity(), patch.dict(os.environ, {
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[150,149]",
+        }), patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
+             patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "process", side_effect=decision) as process, \
+             patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
+             patch.object(WRITER, "finalize_decision", side_effect=finalize):
+            self.assertEqual(WRITER.main(), 0)
+        self.assertEqual(process.call_args_list[0].args[0], 150)
+        self.assertEqual(process.call_args_list[1].args[0], 149)
+        self.assertEqual(finalized[:2], [150, 149])
+        self.assertEqual(len(finalized), 100)
+        self.assertNotIn(100, finalized)
 
     def test_carry_precedes_fresh_targets_and_converges_with_any_dispatcher_gaps(self) -> None:
         numbers = tuple(range(1, 451))
@@ -532,15 +768,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), patch.object(WRITER, "command", return_value=json.dumps(payload)):
             self.assertEqual(WRITER.check_run("a" * 40), item)
 
-    def test_check_run_ignores_foreign_app_but_rejects_expected_app_bad_external_id(self) -> None:
-        for mutate, error in ((lambda value: value["app"].update(id=7), False), (lambda value: value.update(external_id="wrong"), True)):
+    def test_check_run_ignores_foreign_and_historical_generations(self) -> None:
+        for mutate in (lambda value: value["app"].update(id=7), lambda value: value.update(external_id="wrong")):
             value = {"id": 99, "name": WRITER.CHECK_NAME, "head_sha": "a" * 40, "external_id": WRITER.check_external_id("a" * 40), "updated_at": "now", "app": {"id": 42}}
             mutate(value)
             with self.subTest(value=value), self.identity(), patch.dict(os.environ, {"KRR_GOVERNANCE_CHECK_APP_ID": "42"}), patch.object(WRITER, "object_pages", return_value=[{"check_runs": [value]}]):
-                if error:
-                    with self.assertRaises(WRITER.GovernanceError): WRITER.check_run("a" * 40)
-                else:
-                    self.assertIsNone(WRITER.check_run("a" * 40))
+                self.assertIsNone(WRITER.check_run("a" * 40))
 
     def test_check_fence_re_reads_same_id_and_evidence(self) -> None:
         value = {"id": 102, "name": WRITER.CHECK_NAME, "head_sha": "a" * 40, "external_id": WRITER.check_external_id("a" * 40), "updated_at": "now", "app": {"id": 42}, "status": "completed", "conclusion": "success", "details_url": "https://github.test/run?source_run_id=77"}

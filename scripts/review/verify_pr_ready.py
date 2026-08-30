@@ -33,6 +33,7 @@ _SELF_CHECK_NAMES = frozenset(
     }
 )
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
+_SHA = re.compile(r"[0-9a-fA-F]{40}")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
 _LATCH_CHECK = "KRR / PR governance review latch"
@@ -289,6 +290,7 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
     owner, name = repository.split("/", maxsplit=1)
     pull_requests: list[dict[str, object]] = []
     seen_numbers: set[int] = set()
+    governed_heads: set[str] = set()
     seen_cursors: set[str] = set()
     cursor: str | None = None
     while True:
@@ -299,8 +301,9 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             "query="
             "query($owner: String!, $name: String!, $cursor: String) {\n"
             "  repository(owner: $owner, name: $name) {\n"
+            "    defaultBranchRef { name }\n"
             "    pullRequests(first: 100, states: OPEN, after: $cursor) {\n"
-            "      nodes { number isDraft body }\n"
+            "      nodes { number isDraft body baseRefName headRefOid headRepository { nameWithOwner } }\n"
             "      pageInfo { hasNextPage endCursor }\n"
             "    }\n"
             "  }\n"
@@ -321,6 +324,10 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
         repository_data = data.get("repository")
         if not isinstance(repository_data, Mapping):
             raise TypeError("open pull requests repository must be an object")
+        default_ref = repository_data.get("defaultBranchRef")
+        default_branch = default_ref.get("name") if isinstance(default_ref, Mapping) else None
+        if not isinstance(default_branch, str) or not default_branch:
+            raise TypeError("open pull requests default branch is invalid")
         connection = repository_data.get("pullRequests")
         if not isinstance(connection, Mapping):
             raise TypeError("open pull requests connection must be an object")
@@ -333,6 +340,9 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             number = node.get("number")
             is_draft = node.get("isDraft")
             body = node.get("body")
+            base_ref = node.get("baseRefName")
+            head = node.get("headRefOid")
+            head_repository = node.get("headRepository")
             if type(number) is not int or number < 1:
                 raise TypeError("open pull request number must be a positive integer")
             if number in seen_numbers:
@@ -341,8 +351,19 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
                 raise TypeError("open pull request isDraft must be a boolean")
             if not isinstance(body, str):
                 raise TypeError("open pull request body must be a string")
+            # Only same-repository PRs targeting the default branch are
+            # governed.  Two such PRs sharing a head would share one Check
+            # Run namespace, so readiness must stop before a stale success
+            # can satisfy either PR.
+            if base_ref == default_branch and isinstance(head_repository, Mapping) and head_repository.get("nameWithOwner") == repository:
+                if not isinstance(head, str) or _SHA.fullmatch(head) is None:
+                    raise TypeError("governed open pull request head is invalid")
+                normalized_head = head.lower()
+                if normalized_head in governed_heads:
+                    raise TypeError("open pull requests have duplicate governed head SHA")
+                governed_heads.add(normalized_head)
             pull_requests.append(
-                {"number": number, "isDraft": is_draft, "body": body}
+                {"number": number, "isDraft": is_draft, "body": body, "head_sha": head}
             )
             seen_numbers.add(number)
         page_info = connection.get("pageInfo")
@@ -370,16 +391,21 @@ def _open_pull_request_snapshot(path: str) -> list[dict[str, object]]:
         raise TypeError("open pull request snapshot must be an array")
     values: list[dict[str, object]] = []
     seen: set[int] = set()
+    seen_heads: set[str] = set()
     for item in payload:
         if not isinstance(item, Mapping):
             raise TypeError("open pull request snapshot item must be an object")
-        number, draft, body = item.get("number"), item.get("isDraft"), item.get("body")
+        number, draft, body, head = item.get("number"), item.get("isDraft"), item.get("body"), item.get("head_sha")
         if type(number) is not int or number < 1 or number in seen:
             raise TypeError("open pull request snapshot number is invalid")
-        if not isinstance(draft, bool) or not isinstance(body, str):
+        if not isinstance(draft, bool) or not isinstance(body, str) or not isinstance(head, str) or _SHA.fullmatch(head) is None:
             raise TypeError("open pull request snapshot item is invalid")
+        normalized_head = head.lower()
+        if normalized_head in seen_heads:
+            raise TypeError("open pull request snapshot has duplicate governed head SHA")
         seen.add(number)
-        values.append({"number": number, "isDraft": draft, "body": body})
+        seen_heads.add(normalized_head)
+        values.append({"number": number, "isDraft": draft, "body": body, "head_sha": head})
     return values
 
 
@@ -1225,14 +1251,39 @@ def _governance_check_error(
                 raise TypeError("check-runs page must contain an array")
             runs.extend(page_runs)
         matches = [item for item in runs if item.get("name") == _TRUSTED_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == app_id]
-        if len(matches) != 1:
-            return "trusted Check Run must have exactly one matching App/head run"
-        run = matches[0]
+        # Each dispatcher/early writer owns an immutable Check Run generation.
+        # Check Run PATCH has no CAS, so the newest immutable ID is the only
+        # authoritative generation; an old success must never mask a newer
+        # pending or failure.  Duplicating one external-id is ambiguous.
+        generations: dict[str, tuple[Mapping[str, object], datetime]] = {}
+        external_pattern = re.compile(rf"krr-governance/v1/{re.escape(head.lower())}/(?:dispatcher|writer)-[1-9][0-9]*$")
+        for item in matches:
+            identifier = item.get("id")
+            external = item.get("external_id")
+            details = item.get("details_url")
+            created_at = item.get("created_at")
+            if type(identifier) is not int or identifier < 1 or not isinstance(external, str) or external_pattern.fullmatch(external) is None or not isinstance(details, str) or not isinstance(created_at, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", created_at):
+                return "trusted Check Run immutable generation is invalid"
+            try:
+                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except ValueError:
+                return "trusted Check Run immutable generation is invalid"
+            if external in generations:
+                return "trusted Check Run immutable generation is ambiguous"
+            source = parse_qs(urlparse(details).query, keep_blank_values=True).get("source_run_id", [])
+            if len(source) != 1 or re.fullmatch(r"[1-9][0-9]*", source[0]) is None:
+                return "trusted Check Run details_url lacks exact source_run_id evidence"
+            generations[external] = (item, created)
+        if not generations:
+            return "trusted Check Run immutable generation is missing"
+        run = max(
+            generations.values(), key=lambda item: (item[1], int(item[0]["id"]))
+        )[0]
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             return "trusted Check Run is not completed successfully"
         external_id = run.get("external_id")
         details = run.get("details_url")
-        if external_id != f"krr-governance/v1/{head.lower()}":
+        if not isinstance(external_id, str) or external_pattern.fullmatch(external_id) is None:
             return "trusted Check Run external_id is invalid"
         if not isinstance(details, str):
             return "trusted Check Run details_url lacks exact source_run_id evidence"

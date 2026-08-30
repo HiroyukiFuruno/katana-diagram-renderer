@@ -25,7 +25,7 @@ class GovernanceOverflowContractTest(unittest.TestCase):
     def test_writer_has_no_matrix_or_256_target_limit(self) -> None:
         self.assertNotIn("matrix:", self.workflow)
         self.assertNotIn("MAX_MATRIX", self.writer)
-        self.assertIn("for number in governance_order(scoped_snapshot, carry):", self.writer)
+        self.assertIn("tuple(number for number in targets if number not in preserved) if scope == \"all\" else ()", self.writer)
         self.assertIn("failures += 1", self.writer)
 
     def test_bounded_terminal_writes_carry_the_tail_to_the_next_dispatcher(self) -> None:
@@ -53,13 +53,31 @@ class GovernanceOverflowContractTest(unittest.TestCase):
                 early, carry = WRITER.observed_invalidations(snapshot, source, "early", (72,))
             self.assertEqual(early.numbers, (72,))
             self.assertEqual(carry, frozenset())
-            self.assertEqual(checks.call_count, 1)
+            # The early writer owns its immutable pending Check Run after it
+            # acquires the singleton; no dispatcher-side read/patch marker.
+            self.assertEqual(checks.call_count, 0)
 
             with patch.object(WRITER, "check_run", return_value=marker) as checks:
                 all_open, carry = WRITER.observed_invalidations(snapshot, source, "all", ())
             self.assertEqual(all_open.numbers, (72, 73))
             self.assertEqual(carry, frozenset())
             self.assertEqual(checks.call_count, 2)
+
+    def test_preserved_early_source_is_removed_before_remaining_affected_targets_are_ordered(self) -> None:
+        snapshot = WRITER.OpenSnapshot(
+            (72, 73, 74), {},
+            (
+                {"number": 72, "isDraft": False, "head_sha": "a" * 40},
+                {"number": 73, "isDraft": False, "head_sha": "b" * 40},
+                {"number": 74, "isDraft": False, "head_sha": "c" * 40},
+            ),
+        )
+        # The source was terminalized by the early writer; its sibling
+        # claimant remains ahead of unrelated PRs in the all-open writer.
+        selected = WRITER.OpenSnapshot(
+            (73, 74), {}, tuple(item for item in snapshot.pull_requests if item["number"] != 72),
+        )
+        self.assertEqual(WRITER.governance_order(selected, frozenset(), (73,)), (73, 74))
 
     def test_open_pr_and_check_run_api_reads_are_fully_paginated(self) -> None:
         self.assertIn('pulls?state=open&per_page=100', self.writer)
