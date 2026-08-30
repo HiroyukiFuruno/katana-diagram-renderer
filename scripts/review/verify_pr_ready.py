@@ -36,6 +36,9 @@ _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
 _LATCH_CHECK = "KRR / PR governance review latch"
+_ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
+    {"queued", "in_progress", "waiting", "requested", "pending"}
+)
 
 
 def _bot_login(value: object) -> str | None:
@@ -43,6 +46,22 @@ def _bot_login(value: object) -> str | None:
         return None
     login = value.get("login")
     return login if isinstance(login, str) else None
+
+
+def _sensor_or_latch_state_is_valid(
+    value: Mapping[str, object], *, internal_recalculation: bool
+) -> bool:
+    """Allow only a completed success, or an active current run during recalculation."""
+    status = value.get("status")
+    conclusion = value.get("conclusion")
+    return (
+        status == "completed" and conclusion == "success"
+    ) or (
+        internal_recalculation
+        and isinstance(status, str)
+        and status in _ACTIVE_SENSOR_OR_LATCH_STATUSES
+        and conclusion is None
+    )
 
 
 def _is_review_bot(login: str | None, review_bot: str) -> bool:
@@ -1227,11 +1246,7 @@ def _governance_check_error(
             base_sha=base_sha,
             head=head,
         )
-        if (
-            latest is None
-            or latest.get("status") != "completed"
-            or latest.get("conclusion") != "success"
-        ):
+        if latest is None:
             return "trusted source Actions run is not the latest sensor generation"
         source_ids = [str(latest["id"])]
     latch_payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_LATCH_CHECK.replace(' ', '%20')}&app_id=15368&filter=all&per_page=100")
@@ -1249,7 +1264,9 @@ def _governance_check_error(
     if len(same_source) != 1:
         return "review latch Check Run for the trusted source must have exactly one matching run"
     latch = same_source[0]
-    if latch.get("status") != "completed" or latch.get("conclusion") != "success":
+    if not _sensor_or_latch_state_is_valid(
+        latch, internal_recalculation=exclude_trusted_governance_check
+    ):
         return "review latch Check Run is not completed successfully"
     source = _gh_json("api", f"repos/{repository}/actions/runs/{source_ids[0]}")
     if not isinstance(source, Mapping):
@@ -1262,8 +1279,6 @@ def _governance_check_error(
         or type(source.get("run_attempt")) is not int
         or source.get("run_attempt") != 1
         or source.get("head_sha", "").lower() != head.lower()
-        or source.get("status") != "completed"
-        or source.get("conclusion") != "success"
         or not isinstance(source.get("path"), str)
         or source.get("path", "").split("@", 1)[0] != ".github/workflows/pr-governance-review-events.yml"
         or ("@" in source.get("path", "") and (
@@ -1272,6 +1287,10 @@ def _governance_check_error(
             or "//" in source.get("path", "").split("@", 1)[1]
             or any(part in {".", ".."} for part in source.get("path", "").split("@", 1)[1].split("/"))
         ))
+    ):
+        return "trusted source Actions run evidence does not match"
+    if not _sensor_or_latch_state_is_valid(
+        source, internal_recalculation=exclude_trusted_governance_check
     ):
         return "trusted source Actions run evidence does not match"
     pull_requests = source.get("pull_requests")
@@ -1299,10 +1318,10 @@ def _governance_check_error(
     )
     if latest is None:
         return "trusted source Actions run is not the latest sensor generation"
-    if (
-        latest.get("id") != int(source_ids[0])
-        or latest.get("status") != "completed"
-        or latest.get("conclusion") != "success"
+    if latest.get("id") != int(source_ids[0]):
+        return "trusted source Actions run is not the latest sensor generation"
+    if not _sensor_or_latch_state_is_valid(
+        latest, internal_recalculation=exclude_trusted_governance_check
     ):
         return "trusted source Actions run is not the latest sensor generation"
     if evidence is not None:

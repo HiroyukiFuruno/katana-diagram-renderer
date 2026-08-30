@@ -1831,6 +1831,54 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             0,
         )
 
+    def test_internal_writer_mode_allows_only_active_current_sensor_and_latch(self) -> None:
+        for status in subject._ACTIVE_SENSOR_OR_LATCH_STATUSES:
+            with self.subTest(status=status):
+                source = {**self._source(), "status": status, "conclusion": None}
+                latch = {**self._latch_run(), "status": status, "conclusion": None}
+                self.assertIsNone(
+                    self._gate(
+                        source=source,
+                        source_history=[source],
+                        latch_pages=[{"check_runs": [latch]}],
+                        exclude_trusted_governance_check=True,
+                    )
+                )
+        self.assertIsNotNone(
+            self._gate(
+                source={**self._source(), "status": "in_progress", "conclusion": None},
+                source_history=[{**self._source(), "status": "in_progress", "conclusion": None}],
+            )
+        )
+
+    def test_internal_writer_mode_rejects_invalid_sensor_or_latch_states(self) -> None:
+        invalid_states = {
+            "completed_failure": ("completed", "failure"),
+            "unknown": ("unrecognized", None),
+            "active_with_conclusion": ("in_progress", "success"),
+        }
+        for target in ("sensor", "latch"):
+            for name, (status, conclusion) in invalid_states.items():
+                with self.subTest(target=target, state=name):
+                    source = (
+                        {**self._source(), "status": status, "conclusion": conclusion}
+                        if target == "sensor"
+                        else self._source()
+                    )
+                    latch = (
+                        {**self._latch_run(), "status": status, "conclusion": conclusion}
+                        if target == "latch"
+                        else self._latch_run()
+                    )
+                    self.assertIsNotNone(
+                        self._gate(
+                            source=source,
+                            source_history=[source],
+                            latch_pages=[{"check_runs": [latch]}],
+                            exclude_trusted_governance_check=True,
+                        )
+                    )
+
     def test_internal_writer_mode_requires_allow_ready(self) -> None:
         with self.assertRaises(SystemExit):
             subject.main(
