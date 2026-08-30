@@ -31,6 +31,8 @@ jobs:
       pull-requests: read
     outputs:
       reconcile: ${{ steps.targets.outputs.reconcile }}
+      event_targets: ${{ steps.targets.outputs.event_targets }}
+      priority_targets: ${{ steps.targets.outputs.priority_targets }}
     steps:
       - name: Resolve current open pull requests from the trusted default branch
         id: targets
@@ -192,10 +194,12 @@ jobs:
           def referenced(issue: int) -> set[int]:
               text = str(issue)
               return {number for number, body in bodies.items() if text in set(closing.findall(body))}
+          source_number_value: int | None = None
           if event_name == "schedule":
               affected = numbers
           elif event_name == "workflow_run":
               source_number = source.get("number")
+              source_number_value = source_number
               affected = {source_number} if source_number in numbers else set()
               source_issues = set(closing.findall(bodies.get(source_number, "")))
               for source_issue in source_issues:
@@ -238,8 +242,20 @@ jobs:
               affected = referenced(issue)
               if event_name == "issue_comment" and os.environ.get("ISSUE_PULL_REQUEST_URL", "") and issue in numbers:
                   affected.add(issue)
+                  source_number_value = issue
+          ordered_targets = (
+              ([source_number_value] if source_number_value in affected else [])
+              + sorted(affected - ({source_number_value} if source_number_value in affected else set()))
+          )
+          # Only the current event's source PR may receive the early writer.
+          # Related claimants converge in the all-open pass; treating the
+          # source-first ordering as a priority set would still serially
+          # invalidate every sibling before the review-sensor deadline.
+          priority_targets = [source_number_value] if source_number_value in affected and source_number_value in numbers else []
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("reconcile=" + ("true" if affected else "false") + "\n")
+              output.write("event_targets=" + json.dumps(ordered_targets) + "\n")
+              output.write("priority_targets=" + json.dumps(priority_targets) + "\n")
           PY
 
   reconcile-all-open:
@@ -261,6 +277,8 @@ jobs:
         id: current-targets
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_TARGETS: ${{ needs.resolve_event.outputs.event_targets }}
+          EVENT_PRIORITY_TARGETS: ${{ needs.resolve_event.outputs.priority_targets }}
         run: |
           python3 - <<'PY'
           import json
@@ -269,6 +287,15 @@ jobs:
           import subprocess
 
           repository = os.environ["GITHUB_REPOSITORY"]
+          try:
+              event_targets = json.loads(os.environ.get("EVENT_TARGETS", ""))
+              event_priority_targets = json.loads(os.environ.get("EVENT_PRIORITY_TARGETS", ""))
+          except json.JSONDecodeError as error:
+              raise SystemExit("Event target boundary is invalid.") from error
+          if not isinstance(event_targets, list) or any(type(number) is not int or number < 1 for number in event_targets) or len(set(event_targets)) != len(event_targets):
+              raise SystemExit("Event target boundary is invalid.")
+          if not isinstance(event_priority_targets, list) or len(event_priority_targets) > 1 or any(type(number) is not int or number < 1 for number in event_priority_targets) or any(number not in event_targets for number in event_priority_targets):
+              raise SystemExit("Event priority target boundary is invalid.")
           repo_result = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
           if repo_result.returncode != 0:
               raise SystemExit("Unable to load repository default branch.")
@@ -316,9 +343,12 @@ jobs:
                       raise SystemExit("Current open pull request repository binding is invalid.")
                   if base_repository.get("full_name") == repository and head_repository.get("full_name") == repository and base.get("ref") == branch:
                       targets.append(number)
+          priority_targets = [number for number in event_priority_targets if number in set(targets)]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("has_targets=" + ("true" if targets else "false") + "\n")
               output.write("targets=" + json.dumps(targets) + "\n")
+              output.write("has_priority_targets=" + ("true" if priority_targets else "false") + "\n")
+              output.write("priority_targets=" + json.dumps(priority_targets) + "\n")
               output.write("writer_head=" + writer_head + "\n")
               output.write("default_branch=" + branch + "\n")
           PY
@@ -452,13 +482,13 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-pull-requests: read
 
-      - name: Invalidate affected current pull requests before dispatch
-        if: steps.current-targets.outputs.has_targets == 'true'
+      - name: Invalidate event targets before early dispatch
+        if: steps.current-targets.outputs.has_priority_targets == 'true'
         env:
           GH_TOKEN: ${{ steps.invalidator-read-token.outputs.token }}
           CHECK_WRITE_TOKEN: ${{ steps.invalidator-token.outputs.token }}
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
-          AFFECTED: ${{ steps.current-targets.outputs.targets }}
+          AFFECTED: ${{ steps.current-targets.outputs.priority_targets }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, sys, time
@@ -545,6 +575,148 @@ jobs:
               raise SystemExit("Unable to invalidate one or more current pull requests.")
           PY
 
+      - name: Dispatch and bind the early event writer
+        if: steps.current-targets.outputs.has_priority_targets == 'true'
+        id: dispatch-early
+        env:
+          GH_TOKEN: ${{ steps.dispatcher-token.outputs.token }}
+          DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
+          WRITER_HEAD: ${{ steps.current-targets.outputs.writer_head }}
+          TARGETS: ${{ steps.current-targets.outputs.priority_targets }}
+          DISPATCHER_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, time
+          repository=os.environ["GITHUB_REPOSITORY"]
+          branch=os.environ.get("DEFAULT_BRANCH", "")
+          head=os.environ.get("WRITER_HEAD", "")
+          source=os.environ.get("DISPATCHER_RUN_ID", "")
+          try: targets=json.loads(os.environ.get("TARGETS", ""))
+          except json.JSONDecodeError as error: raise SystemExit("Early writer targets are invalid.") from error
+          if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or not re.fullmatch(r"[0-9a-fA-F]{40}", head) or not re.fullmatch(r"[1-9][0-9]*", source) or not isinstance(targets, list) or not targets or any(type(number) is not int or number < 1 for number in targets) or len(set(targets)) != len(targets): raise SystemExit("Early writer boundary is invalid.")
+          title=f"source={source} scope=early"
+          workflow_path=".github/workflows/pr-governance-status-writer.yml"
+          def path_matches(value):
+              if value == workflow_path: return True
+              if not isinstance(value,str) or not value.startswith(workflow_path+"@"): return False
+              ref=value[len(workflow_path)+1:]
+              return re.fullmatch(r"[A-Za-z0-9._/-]+",ref) is not None and ref not in {".",".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"",".",".."} for part in ref.split("/"))
+          def runs():
+              result=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"],capture_output=True,text=True,check=False)
+              if result.returncode != 0: raise SystemExit("Unable to enumerate governance writer runs.")
+              try: pages=json.loads(result.stdout)
+              except json.JSONDecodeError as error: raise SystemExit("Governance writer runs are not JSON.") from error
+              if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in pages): raise SystemExit("Governance writer runs are invalid.")
+              return [run for page in pages for run in page["workflow_runs"] if isinstance(run,dict)]
+          before={run.get("id") for run in runs() if type(run.get("id")) is int}
+          result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=early","-f",f"inputs[target_numbers]={json.dumps(targets,separators=(',', ':'))}"],capture_output=True,text=True,check=False)
+          if result.returncode != 0: raise SystemExit("Unable to dispatch early governance writer.")
+          for _ in range(150):
+              matches=[]
+              for run in runs():
+                  identifier=run.get("id"); repository_value=run.get("repository")
+                  if identifier in before or run.get("display_title") != title: continue
+                  if not (type(identifier) is int and identifier > 0 and run.get("name")=="PR governance status writer" and path_matches(run.get("path")) and run.get("event")=="workflow_dispatch" and isinstance(repository_value,dict) and repository_value.get("full_name")==repository and run.get("head_branch")==branch and run.get("head_sha")==head and run.get("status") in {"requested","queued","pending","waiting","in_progress","completed"} and type(run.get("run_number")) is int and run["run_number"]>0 and type(run.get("run_attempt")) is int and run["run_attempt"]>0): raise SystemExit("Early governance writer registration identity is invalid.")
+                  matches.append(identifier)
+              if len(matches)==1:
+                  with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write(f"writer_run_id={matches[0]}\n")
+                  raise SystemExit(0)
+              if len(matches)>1: raise SystemExit("Early governance writer registration is ambiguous.")
+              time.sleep(2)
+          raise SystemExit("Early governance writer registration timed out.")
+          PY
+
+      - name: Await the bound early event writer before all-open invalidation
+        if: steps.current-targets.outputs.has_priority_targets == 'true'
+        env:
+          GH_TOKEN: ${{ steps.dispatcher-token.outputs.token }}
+          WRITER_RUN_ID: ${{ steps.dispatch-early.outputs.writer_run_id }}
+          DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
+          WRITER_HEAD: ${{ steps.current-targets.outputs.writer_head }}
+          DISPATCHER_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, time
+          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", "")
+          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or not re.fullmatch(r"[0-9a-fA-F]{40}",head) or not re.fullmatch(r"[1-9][0-9]*",source): raise SystemExit("Early governance writer ID is invalid.")
+          workflow_path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=early"
+          def path_matches(value):
+              if value == workflow_path: return True
+              if not isinstance(value,str) or not value.startswith(workflow_path+"@"): return False
+              ref=value[len(workflow_path)+1:]
+              return re.fullmatch(r"[A-Za-z0-9._/-]+",ref) is not None and ref not in {".",".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"",".",".."} for part in ref.split("/"))
+          for _ in range(450):
+              result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False)
+              if result.returncode != 0: raise SystemExit("Unable to read early governance writer.")
+              try: run=json.loads(result.stdout)
+              except json.JSONDecodeError as error: raise SystemExit("Early governance writer is not JSON.") from error
+              run_repository=run.get("repository") if isinstance(run,dict) else None
+              if not isinstance(run,dict) or run.get("id")!=int(identifier) or run.get("name")!="PR governance status writer" or run.get("display_title")!=title or not path_matches(run.get("path")) or run.get("event")!="workflow_dispatch" or not isinstance(run_repository,dict) or run_repository.get("full_name")!=repository or run.get("head_branch")!=branch or run.get("head_sha")!=head or run.get("status") not in {"requested","queued","pending","waiting","in_progress","completed"} or type(run.get("run_number")) is not int or run["run_number"]<1 or type(run.get("run_attempt")) is not int or run["run_attempt"]<1: raise SystemExit("Early governance writer identity is invalid.")
+              if run.get("status")=="completed":
+                  if run.get("conclusion")!="success": raise SystemExit("Early governance writer failed closed.")
+                  raise SystemExit(0)
+              time.sleep(2)
+          raise SystemExit("Early governance writer did not reach a terminal state.")
+          PY
+
+      - name: Invalidate every current pull request for the all-open writer
+        if: steps.current-targets.outputs.has_targets == 'true'
+        env:
+          GH_TOKEN: ${{ steps.invalidator-read-token.outputs.token }}
+          CHECK_WRITE_TOKEN: ${{ steps.invalidator-token.outputs.token }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          AFFECTED: ${{ steps.current-targets.outputs.targets }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, time
+          from urllib.parse import parse_qs, urlencode, urlparse
+          repository=os.environ["GITHUB_REPOSITORY"]; token=os.environ.get("CHECK_WRITE_TOKEN", ""); app_id=os.environ.get("CHECK_APP_ID", "")
+          if not token or re.fullmatch(r"[1-9][0-9]*",app_id) is None: raise SystemExit("Governance invalidator credentials are invalid.")
+          try: numbers=json.loads(os.environ.get("AFFECTED", ""))
+          except json.JSONDecodeError as error: raise SystemExit("Affected pull request set is invalid.") from error
+          if not isinstance(numbers,list) or not numbers or any(type(number) is not int or number<1 for number in numbers) or len(set(numbers))!=len(numbers): raise SystemExit("Affected pull request set is invalid.")
+          failures=[]; next_write_at=time.monotonic()+8.1
+          for number in numbers:
+              current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False)
+              if current.returncode!=0: failures.append(number); continue
+              try:
+                  pull=json.loads(current.stdout); head=pull.get("head",{}).get("sha") if isinstance(pull,dict) else None; draft=pull.get("draft") if isinstance(pull,dict) else None
+              except json.JSONDecodeError: head=draft=None
+              if not isinstance(head,str) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or type(draft) is not bool: failures.append(number); continue
+              external_id=f"krr-governance/v1/{head.lower()}"; query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
+              listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/commits/{head}/check-runs?{query}"],capture_output=True,text=True,check=False)
+              if listed.returncode!=0: failures.append(number); continue
+              try:
+                  pages=json.loads(listed.stdout); named=[run for page in pages for run in page.get("check_runs",[]) if isinstance(run,dict) and run.get("name")=="KRR / PR governance (trusted check)"]; runs=[run for run in named if isinstance(run.get("app"),dict) and str(run["app"].get("id"))==app_id]
+              except (json.JSONDecodeError,AttributeError): failures.append(number); continue
+              if len(runs)>1: failures.append(number); continue
+              run=runs[0] if runs else None; app=run.get("app") if isinstance(run,dict) else None
+              valid=run is None or (run.get("status")=="in_progress" and run.get("conclusion") is None) or (run.get("status")=="completed" and run.get("conclusion") in {"success","failure"})
+              if run is not None and (run.get("head_sha")!=head or run.get("external_id")!=external_id or not valid or not isinstance(app,dict) or str(app.get("id"))!=app_id or type(run.get("id")) is not int): failures.append(number); continue
+              base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/"; base_parts=urlparse(base); dispatcher=os.environ["GITHUB_RUN_ID"]
+              def is_prior_dispatcher_invalidation(details):
+                  if not isinstance(details,str): return False
+                  parts=urlparse(details); query_values=parse_qs(parts.query,keep_blank_values=True); run_id=parts.path.removeprefix(base_parts.path)
+                  return parts.scheme==base_parts.scheme and parts.netloc==base_parts.netloc and not parts.params and not parts.fragment and bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path==base_parts.path+run_id and query_values.keys()=={"dispatcher_run_id","carry_pending"} and query_values["dispatcher_run_id"]==[run_id] and query_values["carry_pending"] in (["0"],["1"])
+              carry_pending=int(draft is False and run is not None and run.get("status")=="in_progress" and run.get("conclusion") is None and is_prior_dispatcher_invalidation(run.get("details_url")))
+              details=base+dispatcher+"?"+urlencode({"dispatcher_run_id":dispatcher,"carry_pending":str(carry_pending)})
+              command=["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external_id}","-f","status=in_progress","-f",f"details_url={details}"] if run is None else ["gh","api","--method","PATCH",f"repos/{repository}/check-runs/{run['id']}","-f","status=in_progress","-f",f"details_url={details}"]
+              delay=next_write_at-time.monotonic()
+              if delay>0: time.sleep(delay)
+              next_write_at=time.monotonic()+8.1
+              result=subprocess.run(command,capture_output=True,text=True,check=False,env={"GH_TOKEN":token,"PATH":os.environ["PATH"]})
+              if result.returncode!=0: failures.append(number); continue
+              try: response=json.loads(result.stdout); identifier=response.get("id") if isinstance(response,dict) else None; posted=response.get("app",{}).get("id") if isinstance(response,dict) and isinstance(response.get("app"),dict) else None
+              except json.JSONDecodeError: identifier=posted=None
+              if type(identifier) is not int or identifier<1 or str(posted)!=app_id or response.get("name")!="KRR / PR governance (trusted check)" or response.get("head_sha")!=head or response.get("external_id")!=external_id or response.get("status")!="in_progress" or response.get("conclusion") is not None or response.get("details_url")!=details: failures.append(number); continue
+              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False)
+              if reread.returncode!=0: failures.append(number); continue
+              try: check=json.loads(reread.stdout)
+              except json.JSONDecodeError: failures.append(number); continue
+              if not isinstance(check,dict) or check.get("id")!=identifier or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external_id or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: failures.append(number)
+          if failures: raise SystemExit("Unable to invalidate one or more current pull requests.")
+          PY
+
       - name: Dispatch one repository-wide governance arbiter
         if: steps.current-targets.outputs.has_targets == 'true'
         env:
@@ -552,6 +724,8 @@ jobs:
           DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}
           WRITER_HEAD: ${{ steps.current-targets.outputs.writer_head }}
           DISPATCHER_RUN_ID: ${{ github.run_id }}
+          WRITER_SCOPE: all
+          WRITER_TARGETS: '[]'
         run: |
           python3 - <<'PY'
           import json
@@ -566,7 +740,11 @@ jobs:
           if not isinstance(branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is None or re.fullmatch(r"[0-9a-fA-F]{40}", writer_head) is None or re.fullmatch(r"[1-9][0-9]*", dispatcher_run_id) is None:
               raise SystemExit("Governance dispatch inputs are invalid.")
           workflow_path = ".github/workflows/pr-governance-status-writer.yml"
-          expected_title = f"source={dispatcher_run_id}"
+          scope = os.environ.get("WRITER_SCOPE", "")
+          raw_targets = os.environ.get("WRITER_TARGETS", "")
+          if scope != "all" or raw_targets != "[]":
+              raise SystemExit("Governance all-open dispatch boundary is invalid.")
+          expected_title = f"source={dispatcher_run_id} scope={scope}"
           def path_matches(value):
               if value == workflow_path:
                   return True
@@ -592,7 +770,7 @@ jobs:
           before_ids = {run.get("id") for run in before if type(run.get("id")) is int}
           if len(before_ids) != len(before):
               raise SystemExit("Governance writer run identity is invalid.")
-          result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={dispatcher_run_id}"], capture_output=True, text=True, check=False)
+          result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={dispatcher_run_id}", "-f", f"inputs[scope]={scope}", "-f", f"inputs[target_numbers]={raw_targets}"], capture_output=True, text=True, check=False)
           if result.returncode != 0:
               raise SystemExit("Unable to dispatch governance arbiter.")
           for _ in range(150):

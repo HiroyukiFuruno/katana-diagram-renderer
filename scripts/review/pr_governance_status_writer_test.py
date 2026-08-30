@@ -20,6 +20,14 @@ SPEC.loader.exec_module(WRITER)
 
 
 class StatusWriterUnitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dispatch_boundary = patch.dict(
+            os.environ,
+            {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": "all", "GOVERNANCE_TARGET_NUMBERS": "[]"},
+        )
+        self.dispatch_boundary.start()
+        self.addCleanup(self.dispatch_boundary.stop)
+
     def identity(self):
         return patch.multiple(
             WRITER, REPOSITORY="owner/repository", SERVER_URL="https://github.com", WRITER_RUN_ID="99"
@@ -151,25 +159,66 @@ class StatusWriterUnitTest(unittest.TestCase):
         )
         source = WRITER.DispatcherSource(88, "issues", 1)
         with self.identity():
-            carry = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 1)}
+            carry_check = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 1)}
             fresh = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 0)}
         terminal = {"status": "completed", "conclusion": "success", "details_url": WRITER.dispatcher_invalidation_url(source, 1)}
-        with self.identity(), patch.object(WRITER, "check_run", side_effect=[carry, fresh]):
-            self.assertEqual(WRITER.observed_invalidations(snapshot, source), frozenset({72}))
+        with self.identity(), patch.object(WRITER, "check_run", side_effect=[carry_check, fresh]):
+            scoped, carry = WRITER.observed_invalidations(snapshot, source, "all", ())
+            self.assertEqual(scoped.numbers, (72, 73))
+            self.assertEqual(carry, frozenset({72}))
         with self.identity(), patch.object(WRITER, "check_run", return_value=terminal):
             with self.assertRaises(WRITER.GovernanceError):
-                WRITER.observed_invalidations(snapshot, source)
+                WRITER.observed_invalidations(snapshot, source, "all", ())
         draft_snapshot = WRITER.OpenSnapshot(
             (72,), {}, ({"number": 72, "isDraft": True, "head_sha": "a" * 40},)
         )
-        with self.identity(), patch.object(WRITER, "check_run", return_value=carry):
+        with self.identity(), patch.object(WRITER, "check_run", return_value=carry_check):
             with self.assertRaises(WRITER.GovernanceError):
-                WRITER.observed_invalidations(draft_snapshot, source)
+                WRITER.observed_invalidations(draft_snapshot, source, "all", ())
         # A writer-owned pending URL is not a dispatcher carry marker.
         for invalid in (None, fresh | {"details_url": "https://github.com/owner/repository/actions/runs/99"}):
             with self.subTest(invalid=invalid), self.identity(), patch.object(WRITER, "check_run", return_value=invalid):
                 with self.assertRaises(WRITER.GovernanceError):
-                    WRITER.observed_invalidations(snapshot, source)
+                    WRITER.observed_invalidations(snapshot, source, "all", ())
+
+    def test_early_scope_requires_the_exact_event_boundary_but_all_scope_requires_every_pr(self) -> None:
+        snapshot = WRITER.OpenSnapshot(
+            (72, 73), {},
+            ({"number": 72, "isDraft": False, "head_sha": "a" * 40}, {"number": 73, "isDraft": False, "head_sha": "b" * 40}),
+        )
+        source = WRITER.DispatcherSource(88, "workflow_run", 1)
+        with self.identity():
+            marker = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 0)}
+        stale = {"status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/7"}
+        with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
+            scoped, carry = WRITER.observed_invalidations(snapshot, source, "early", (72,))
+        self.assertEqual(scoped.numbers, (72,))
+        self.assertEqual(carry, frozenset())
+        with self.identity(), patch.object(WRITER, "check_run", side_effect=[marker, stale]):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, source, "all", ())
+        with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, WRITER.DispatcherSource(88, "schedule", 1), "early", (72,))
+
+    def test_all_scope_fails_closed_when_a_new_open_pr_missed_the_all_open_invalidation(self) -> None:
+        snapshot = WRITER.OpenSnapshot(
+            (72, 73), {},
+            ({"number": 72, "isDraft": False, "head_sha": "a" * 40}, {"number": 73, "isDraft": False, "head_sha": "b" * 40}),
+        )
+        source = WRITER.DispatcherSource(88, "issues", 1)
+        marker = {"status": "in_progress", "conclusion": None, "details_url": WRITER.dispatcher_invalidation_url(source, 0)}
+        with self.identity(), patch.object(WRITER, "check_run", side_effect=[marker, None]):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(snapshot, source, "all", ())
+
+    def test_main_rejects_noncanonical_or_invalid_dispatch_target_inputs_before_api_reads(self) -> None:
+        for scope, targets in (("all", "[ ]"), ("all", "[72]"), ("early", "[true]"), ("invalid", "[]")):
+            with self.subTest(scope=scope, targets=targets), self.identity(), \
+                 patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_SCOPE": scope, "GOVERNANCE_TARGET_NUMBERS": targets}), \
+                 patch.object(WRITER, "trusted_dispatcher_source") as source:
+                self.assertEqual(WRITER.main(), 1)
+                source.assert_not_called()
 
     def test_terminal_rebind_rejects_default_branch_advance(self) -> None:
         responses = [
@@ -209,7 +258,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             return True
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
-             patch.object(WRITER, "open_snapshot", return_value=snapshot), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "open_snapshot", return_value=snapshot), patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=process), patch.object(WRITER, "final_evidence_for_pr", side_effect=final), \
              patch.object(WRITER, "finalize_decision", side_effect=finalize):
@@ -222,7 +271,7 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "WRITER_RUN_ID", "99"), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=self.snapshot((72, 73), {"64": frozenset({72, 73})})), \
-             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "observed_invalidations", return_value=(self.snapshot((72, 73), {"64": frozenset({72, 73})}), frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=[WRITER.GovernanceError("bad"), None]) as process:
             self.assertEqual(WRITER.main(), 1)
@@ -278,7 +327,7 @@ class StatusWriterUnitTest(unittest.TestCase):
     def test_300_pr_main_processes_all_after_one_failure_with_one_snapshot(self) -> None:
         snapshot = self.snapshot(tuple(range(1, 301)), {"64": frozenset(range(1, 301))})
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), patch.object(WRITER, "open_snapshot", return_value=snapshot) as open_snapshot, \
-             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", side_effect=[WRITER.GovernanceError("one failed"), *([None] * 299)]) as process:
             self.assertEqual(WRITER.main(), 1)
@@ -291,7 +340,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision) as process, \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -349,7 +398,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 self.fail(f"unexpected verifier command: {command}")
             return Result()
         with self.identity(), patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=evidence), patch.object(WRITER, "pull", side_effect=current), \
              patch.object(WRITER, "write_governance_check", side_effect=range(1, 1000)) as post, patch.object(WRITER.subprocess, "run", side_effect=verifier_transport), \
              patch.object(WRITER, "check_baseline", return_value=0) as baseline, \
@@ -707,7 +756,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "spoofed"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -721,7 +770,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88", "GOVERNANCE_INVALIDATED_COUNT": "not-a-number"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "issues", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
@@ -735,7 +784,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.dict(os.environ, {"GOVERNANCE_DISPATCHER_RUN_ID": "88"}), \
              patch.object(WRITER, "trusted_dispatcher_source", return_value=WRITER.DispatcherSource(88, "schedule", 1)), \
              patch.object(WRITER, "open_snapshot", return_value=snapshot), \
-             patch.object(WRITER, "observed_invalidations", return_value=frozenset()), \
+             patch.object(WRITER, "observed_invalidations", return_value=(snapshot, frozenset())), \
              patch.object(WRITER, "evidence_snapshot", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \
              patch.object(WRITER, "process", return_value=decision), \
              patch.object(WRITER, "final_evidence_for_pr", return_value=WRITER.EvidenceSnapshot({}, {}, {})), \

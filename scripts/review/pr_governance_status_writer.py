@@ -526,17 +526,36 @@ def dispatcher_invalidation_url(source: DispatcherSource, carry_pending: int) ->
     )
 
 
-def observed_invalidations(snapshot: OpenSnapshot, source: DispatcherSource) -> frozenset[int]:
-    """Return exactly the carry targets marked by this dispatcher invalidation."""
+def observed_invalidations(
+    snapshot: OpenSnapshot, source: DispatcherSource, scope: str, targets: tuple[int, ...],
+) -> tuple[OpenSnapshot, frozenset[int]]:
+    """Bind the writer scope to current App invalidations from one dispatcher."""
+    if scope not in {"early", "all"}:
+        raise GovernanceError("Writer scope is invalid.")
+    if scope == "all":
+        if targets:
+            raise GovernanceError("All-open writer must not accept target inputs.")
+        expected_numbers = snapshot.numbers
+    else:
+        if source.event == "schedule" or not targets or len(set(targets)) != len(targets):
+            raise GovernanceError("Early writer target boundary is invalid.")
+        if any(type(number) is not int or number < 1 for number in targets):
+            raise GovernanceError("Early writer target boundary is invalid.")
+        if not set(targets).issubset(snapshot.numbers):
+            raise GovernanceError("Early writer target is outside the open snapshot.")
+        expected_numbers = targets
     expected_fresh = dispatcher_invalidation_url(source, 0)
     expected_carry = dispatcher_invalidation_url(source, 1)
     carry: set[int] = set()
+    selected: dict[int, dict[str, Any]] = {}
     for pull_request in snapshot.pull_requests:
         number = pull_request.get("number")
         head = pull_request.get("head_sha")
         draft = pull_request.get("isDraft")
         if type(number) is not int or number < 1 or type(draft) is not bool or not isinstance(head, str) or not SHA.fullmatch(head):
             raise GovernanceError("Open pull request head is invalid.")
+        if number not in expected_numbers:
+            continue
         value = check_run(head)
         if value is None:
             raise GovernanceError("Dispatcher invalidation Check Run is missing.")
@@ -549,7 +568,16 @@ def observed_invalidations(snapshot: OpenSnapshot, source: DispatcherSource) -> 
             if draft:
                 raise GovernanceError("Draft pull request cannot carry a terminal governance decision.")
             carry.add(number)
-    return frozenset(carry)
+        selected[number] = pull_request
+    if set(selected) != set(expected_numbers):
+        raise GovernanceError("Dispatcher invalidation target set changed.")
+    return (
+        OpenSnapshot(
+            tuple(expected_numbers), snapshot.claimants,
+            tuple(selected[number] for number in expected_numbers),
+        ),
+        frozenset(carry),
+    )
 
 
 def sensor(number: int, base: str, head: str, evidence: EvidenceSnapshot | None = None) -> int:
@@ -1010,13 +1038,34 @@ def main() -> int:
         print("Writer runtime identity is invalid.", file=sys.stderr)
         return 1
     dispatcher_run_id = os.environ.get("GOVERNANCE_DISPATCHER_RUN_ID", "")
-    if not NUMBER.fullmatch(dispatcher_run_id):
-        print("Writer dispatcher run ID is invalid.", file=sys.stderr)
+    scope = os.environ.get("GOVERNANCE_SCOPE", "")
+    raw_targets = os.environ.get("GOVERNANCE_TARGET_NUMBERS", "")
+    if not NUMBER.fullmatch(dispatcher_run_id) or scope not in {"early", "all"}:
+        print("Writer dispatch boundary is invalid.", file=sys.stderr)
+        return 1
+    try:
+        decoded_targets = json.loads(raw_targets)
+        if not isinstance(decoded_targets, list) or any(type(number) is not int for number in decoded_targets):
+            raise ValueError
+        # Dispatcher output is a compact canonical JSON array.  Accepting
+        # alternate spellings here would make an out-of-band dispatch
+        # indistinguishable from the event boundary that was invalidated.
+        if json.dumps(decoded_targets, separators=(",", ":")) != raw_targets:
+            raise ValueError
+        targets = tuple(decoded_targets)
+    except (json.JSONDecodeError, ValueError):
+        print("Writer target boundary is invalid.", file=sys.stderr)
+        return 1
+    if (
+        (scope == "all" and targets)
+        or (scope == "early" and (not targets or len(set(targets)) != len(targets) or any(number < 1 for number in targets)))
+    ):
+        print("Writer target boundary is invalid.", file=sys.stderr)
         return 1
     try:
         dispatcher_source = trusted_dispatcher_source(int(dispatcher_run_id))
         snapshot = open_snapshot()
-        carry = observed_invalidations(snapshot, dispatcher_source)
+        scoped_snapshot, carry = observed_invalidations(snapshot, dispatcher_source, scope, targets)
         initial_evidence = evidence_snapshot()
     except GovernanceError as error:
         print(str(error), file=sys.stderr)
@@ -1035,7 +1084,7 @@ def main() -> int:
         # rolling Check Run mutation maximum at 445/hour. Creating a terminal
         # Check Run costs pending POST plus terminal PATCH.
         terminal_write_budget = 400 if dispatcher_source.event == "schedule" else 100
-        for number in governance_order(snapshot, carry):
+        for number in governance_order(scoped_snapshot, carry):
             decision: PendingDecision | None = None
             try:
                 decision = process(number, snapshot.claimants, source.name, initial_evidence, defer_terminal=True)

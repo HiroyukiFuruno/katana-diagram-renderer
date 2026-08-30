@@ -1665,6 +1665,8 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             ):
                 query = parse_qs(urlparse(endpoint).query)
                 requested_events = query.get("event", [])
+                if query.get("head_sha") != [self.head]:
+                    raise AssertionError("sensor history query must bind to the fixed head")
                 return [
                     {
                         "workflow_runs": [
@@ -1734,6 +1736,8 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             ):
                 query = parse_qs(urlparse(endpoint).query)
                 requested_events = query.get("event", [])
+                if query.get("head_sha") != [self.head]:
+                    raise AssertionError("sensor history query must bind to the fixed head")
                 return [{
                     "workflow_runs": [
                         latest_source
@@ -2061,6 +2065,45 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                     base_sha=self.base,
                     head=self.head,
                 )
+
+    def test_sensor_history_queries_are_bounded_to_fixed_head(self) -> None:
+        endpoints: list[str] = []
+
+        def gh_json(*arguments: str) -> object:
+            endpoint = next(
+                argument
+                for argument in arguments
+                if argument.startswith(f"repos/{self.repository}/")
+            )
+            endpoints.append(endpoint)
+            return [{"workflow_runs": []}]
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            self.assertIsNone(
+                subject._latest_sensor_generation(
+                    repository=self.repository,
+                    pull_request=self.pull_request,
+                    base_branch=self.branch,
+                    base_sha=self.base,
+                    head=self.head,
+                )
+            )
+
+        self.assertEqual(len(endpoints), 3)
+        for event_name, endpoint in zip(
+            (
+                "pull_request",
+                "pull_request_review",
+                "pull_request_review_comment",
+            ),
+            endpoints,
+        ):
+            self.assertEqual(
+                endpoint,
+                f"repos/{self.repository}/actions/workflows/"
+                f"pr-governance-review-events.yml/runs?event={event_name}"
+                f"&head_sha={self.head}&per_page=100",
+            )
 
     def test_governance_check_rejects_mismatched_source_run_identity(self) -> None:
         variants: dict[str, dict[str, object]] = {}

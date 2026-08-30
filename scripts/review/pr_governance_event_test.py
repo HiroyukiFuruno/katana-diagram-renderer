@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,11 @@ ROOT = Path(__file__).parents[2]
 class GovernanceDispatcherContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _workflow_program(match: re.Match[str]) -> str:
+        """Normalize extracted YAML Python and neutralize its polling delay for tests."""
+        return textwrap.dedent(match.group(1)).replace("time.sleep(2)", "None")
 
     def test_all_issue_mutations_and_schedule_reconcile_every_open_pr(self) -> None:
         actions = (
@@ -39,9 +45,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("group: pr-governance-status-${{ github.repository_id }}", writer)
         self.assertNotIn("group: pr-governance-status-${{ github.repository_id }}", self.workflow)
         self.assertIn("cancel-in-progress: false", writer)
-        self.assertIn("Invalidate affected current pull requests before dispatch", self.workflow)
+        self.assertIn("Invalidate event targets before early dispatch", self.workflow)
+        self.assertIn("Invalidate every current pull request for the all-open writer", self.workflow)
         self.assertIn("status=in_progress", self.workflow)
-        self.assertEqual(self.workflow.count("actions/workflows/pr-governance-status-writer.yml/dispatches"), 1)
+        self.assertEqual(self.workflow.count("actions/workflows/pr-governance-status-writer.yml/dispatches"), 2)
         self.assertIn("permission-actions: write", self.workflow)
         self.assertIn("permission-checks: write", self.workflow)
 
@@ -86,7 +93,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-                result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_requested_and_waiting_workflow_run_statuses_reach_invalidation_path(self) -> None:
@@ -105,7 +112,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-                result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_unrelated_issue_skips_post_and_dispatch_but_referenced_issue_selects_all_closers(self) -> None:
@@ -115,12 +122,15 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             {"number": 72, "state": "open", "body": "Fixes #64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}},
             {"number": 73, "state": "open", "body": "Closes https://github.com/owner/repository/issues/64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}},
         ]]
-        for issue, expected in (("999", {"reconcile": "false"}), ("64", {"reconcile": "true"})):
+        for issue, expected in (
+            ("999", {"reconcile": "false", "event_targets": "[]", "priority_targets": "[]"}),
+            ("64", {"reconcile": "true", "event_targets": "[72, 73]", "priority_targets": "[]"}),
+        ):
             with self.subTest(issue=issue), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 fake.write_text("#!/bin/sh\nprintf '%s' \"${PULLS}\"\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {"EVENT_NAME": "issues", "ISSUE_NUMBER": issue, "ISSUE_PULL_REQUEST_URL": "", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-                result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(values, expected)
@@ -138,7 +148,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
             fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-            result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("reconcile=true", output.read_text(encoding="utf-8"))
 
@@ -152,7 +162,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             {"number": 73, "state": "open", "body": "Fixes #65", **local},
         ]]
         current = {"number": 73, "state": "open", "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
-        for source, expected in ((current, {"reconcile": "true"}), ({**current, "head": {"sha": head, "repo": {"full_name": "fork/repository"}}}, {"reconcile": "false"})):
+        for source, expected in (
+            (current, {"reconcile": "true", "event_targets": "[73, 72]", "priority_targets": "[73]"}),
+            ({**current, "head": {"sha": head, "repo": {"full_name": "fork/repository"}}}, {"reconcile": "false", "event_targets": "[]", "priority_targets": "[]"}),
+        ):
             with self.subTest(source=source["head"]["repo"]["full_name"]), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 fake.write_text(
@@ -165,10 +178,62 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls), "SOURCE": json.dumps(source),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
-                result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(values, expected)
+
+    def test_104_related_prs_keep_the_early_sensor_path_to_the_source_only(self) -> None:
+        resolver = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        current = re.search(r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(resolver); self.assertIsNotNone(current)
+        assert resolver is not None and current is not None
+        base, head = "b" * 40, "a" * 40
+        local = {"base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}}
+        pulls = [[{"number": number, "state": "open", "body": "Fixes #64", **local} for number in range(1, 106)]]
+        source = {"number": 72, "state": "open", "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); fake = directory / "gh"; output = directory / "resolve-output"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'/pulls/72'*) printf '%s' \"${SOURCE}\" ;;\n"
+                "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *) exit 91 ;;\nesac\n", encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "EVENT_NAME": "pull_request_target", "PR_ACTION": "edited", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                "PR_BASE_SHA": base, "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "Fixes #64", "GITHUB_REPOSITORY": "owner/repository",
+                "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls), "SOURCE": json.dumps(source),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(resolver)], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resolved = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(resolved["priority_targets"], "[72]")
+            self.assertEqual(json.loads(resolved["event_targets"]), [72, *[number for number in range(1, 106) if number != 72]])
+
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                "  *) exit 91 ;;\nesac\n", encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            current_output = directory / "current-output"
+            current_environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_OUTPUT": str(current_output), "PULLS": json.dumps(pulls),
+                "EVENT_TARGETS": resolved["event_targets"], "EVENT_PRIORITY_TARGETS": resolved["priority_targets"],
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(current)], env=current_environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            selected = dict(line.split("=", 1) for line in current_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(json.loads(selected["priority_targets"]), [72])
+            self.assertEqual(len(json.loads(selected["targets"])), 105)
+        early = self.workflow.index("Invalidate event targets before early dispatch")
+        full = self.workflow.index("Invalidate every current pull request for the all-open writer")
+        self.assertIn("AFFECTED: ${{ steps.current-targets.outputs.priority_targets }}", self.workflow[early:full])
+        self.assertIn("AFFECTED: ${{ steps.current-targets.outputs.targets }}", self.workflow[full:])
 
     def test_pull_request_target_rejects_source_head_or_state_race(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
@@ -179,7 +244,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
             fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/pulls/72'*) printf '%s' \"${SOURCE}\" ;;\n  *'pulls?state=open'*) printf '%s' '[]' ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             environment = os.environ | {"EVENT_NAME": "pull_request_target", "PR_ACTION": "closed", "PR_NUMBER": "72", "PR_HEAD_SHA": head, "PR_BASE_SHA": base, "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "SOURCE": json.dumps({**source, "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}}}), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-            result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
 
     def test_dispatcher_rejects_duplicate_foreign_pr_across_pages(self) -> None:
@@ -190,7 +255,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
             fake.write_text("#!/bin/sh\nprintf '%s' \"${PULLS}\"\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             environment = os.environ | {"EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps([[fork], [fork]]), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
-            result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
 
     def test_only_dispatcher_can_issue_synchronous_pending_invalidation(self) -> None:
@@ -229,14 +294,19 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "GITHUB_OUTPUT": str(output),
-                    "PULLS": json.dumps(pages), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                    "EVENT_TARGETS": "[64,65]", "EVENT_PRIORITY_TARGETS": "[64]", "PULLS": json.dumps(pages),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
-                result = subprocess.run([sys.executable, "-c", match.group(1)], env=environment, capture_output=True, text=True, check=False)
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 if expected == 0:
                     self.assertEqual(
                         dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()),
-                        {"has_targets": "true", "targets": "[64, 65]", "writer_head": "a" * 40, "default_branch": "master"},
+                        {
+                            "has_targets": "true", "targets": "[64, 65]",
+                            "has_priority_targets": "true", "priority_targets": "[64]",
+                            "writer_head": "a" * 40, "default_branch": "master",
+                        },
                     )
 
     def test_replacement_reconciler_includes_prior_pending_event_targets(self) -> None:
@@ -251,7 +321,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_writer_drain_precedes_pending_invalidation_and_preserves_token_boundaries(self) -> None:
         drain = self.workflow.index("Drain authoritative writer before invalidation")
-        invalidate = self.workflow.index("Invalidate affected current pull requests before dispatch")
+        invalidate = self.workflow.index("Invalidate event targets before early dispatch")
         dispatch = self.workflow.index("Dispatch one repository-wide governance arbiter")
         self.assertLess(drain, invalidate)
         self.assertLess(invalidate, dispatch)
@@ -265,6 +335,96 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn('run.get("status") != "completed"', section)
         self.assertIn("Governance writer run identity is invalid.", section)
 
+    def test_event_writer_is_terminal_before_full_snapshot_invalidation(self) -> None:
+        early = self.workflow.index("Invalidate event targets before early dispatch")
+        dispatch = self.workflow.index("Dispatch and bind the early event writer")
+        await_early = self.workflow.index("Await the bound early event writer before all-open invalidation")
+        all_open = self.workflow.index("Invalidate every current pull request for the all-open writer")
+        self.assertLess(early, dispatch)
+        self.assertLess(dispatch, await_early)
+        self.assertLess(await_early, all_open)
+        wait_section = self.workflow[await_early:all_open]
+        for value in (
+            "DEFAULT_BRANCH: ${{ steps.current-targets.outputs.default_branch }}",
+            "WRITER_HEAD: ${{ steps.current-targets.outputs.writer_head }}",
+            "DISPATCHER_RUN_ID: ${{ github.run_id }}",
+            'run.get("display_title")!=title', 'run.get("head_sha")!=head',
+            'run.get("status")=="completed"', 'run.get("conclusion")!="success"',
+        ):
+            self.assertIn(value, wait_section)
+
+    def test_early_dispatch_binds_exact_new_writer_or_fails_closed(self) -> None:
+        match = re.search(
+            r"- name: Dispatch and bind the early event writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        base_program = self._workflow_program(match).replace("time.sleep(2)", "None")
+        valid = {
+            "id": 71, "name": "PR governance status writer", "display_title": "source=99 scope=early",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch",
+            "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40,
+            "status": "queued", "run_number": 1, "run_attempt": 1,
+        }
+        for mode, expected in (("exact", 0), ("ambiguous", 1), ("bad-path", 1), ("timeout", 1)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); fake = directory / "gh"; state = directory / "state"; output = directory / "output"
+                fake.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "arguments = ' '.join(sys.argv[1:]); state = os.environ['STATE']\n"
+                    "count = int(open(state).read()) if os.path.exists(state) else 0\n"
+                    "if '/runs?per_page=100' in arguments:\n"
+                    "    open(state, 'w').write(str(count + 1))\n"
+                    "    if count < 2 or os.environ['MODE'] == 'timeout': print(json.dumps([{'workflow_runs': []}]))\n"
+                    "    else:\n"
+                    "        run = json.loads(os.environ['RUN'])\n"
+                    "        if os.environ['MODE'] == 'bad-path': run['path'] = '.github/workflows/other.yml@master'\n"
+                    "        runs = [run] if os.environ['MODE'] != 'ambiguous' else [run, dict(run, id=72)]\n"
+                    "        print(json.dumps([{'workflow_runs': runs}]))\n"
+                    "elif '/dispatches' in arguments:\n"
+                    "    if 'inputs[scope]=early' not in arguments or 'inputs[target_numbers]=[72,73]' not in arguments: raise SystemExit(92)\n"
+                    "else: raise SystemExit(91)\n",
+                    encoding="utf-8",
+                ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                program = base_program.replace("range(150)", "range(2)") if mode == "timeout" else base_program
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "WRITER_HEAD": "a" * 40,
+                    "DISPATCHER_RUN_ID": "99", "TARGETS": "[72,73]", "MODE": mode, "STATE": str(state),
+                    "RUN": json.dumps(valid), "GITHUB_OUTPUT": str(output), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected == 0:
+                    self.assertEqual(output.read_text(encoding="utf-8"), "writer_run_id=71\n")
+
+    def test_early_writer_wait_rejects_identity_drift_and_non_success_terminal(self) -> None:
+        match = re.search(
+            r"- name: Await the bound early event writer before all-open invalidation.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        base_program = self._workflow_program(match).replace("time.sleep(2)", "None")
+        valid = {
+            "id": 71, "name": "PR governance status writer", "display_title": "source=99 scope=early",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch",
+            "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40,
+            "status": "completed", "conclusion": "success", "run_number": 1, "run_attempt": 1,
+        }
+        for mutate, expected in ((lambda run: None, 0), (lambda run: run.update(conclusion="failure"), 1), (lambda run: run.update(head_sha="b" * 40), 1)):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); fake = directory / "gh"
+                run = dict(valid); mutate(run)
+                fake.write_text("#!/bin/sh\nprintf '%s' \"${RUN}\"\n", encoding="utf-8")
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": "owner/repository", "WRITER_RUN_ID": "71", "DEFAULT_BRANCH": "master",
+                    "WRITER_HEAD": "a" * 40, "DISPATCHER_RUN_ID": "99", "RUN": json.dumps(run),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", base_program], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+
     def test_invalidator_serializes_dispatchers_and_paces_every_check_write(self) -> None:
         dispatcher_group = "group: pr-governance-dispatcher-${{ github.repository_id }}"
         self.assertEqual(self.workflow.count(dispatcher_group), 1)
@@ -273,22 +433,28 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.workflow,
         )
         match = re.search(
-            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        program = match.group(1)
+        program = self._workflow_program(match)
         self.assertIn("next_write_at=time.monotonic()+8.1", program)
         self.assertIn("time.sleep(delay)", program)
         self.assertLess(program.index("next_write_at=time.monotonic()+8.1"), program.index("for number in numbers:"))
+        early = re.search(
+            r"- name: Invalidate event targets before early dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(early); assert early is not None
+        self.assertIn("next_write_at=time.monotonic()+8.1", self._workflow_program(early))
 
     def test_invalidator_reopens_terminal_trusted_checks_but_marks_carry_only_for_pending_dispatcher_state(self) -> None:
         match = re.search(
-            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        program = match.group(1)
+        program = self._workflow_program(match)
         self.assertIn('run.get("status")=="completed" and run.get("conclusion") in {"success","failure"}', program)
         self.assertIn('run.get("status")=="in_progress" and run.get("conclusion") is None and is_prior_dispatcher_invalidation', program)
         self.assertIn('draft is False and run is not None', program)
@@ -297,11 +463,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_invalidator_resets_a_prior_dispatcher_marker_on_a_draft_to_carry_zero(self) -> None:
         match = re.search(
-            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        program = match.group(1).replace("time.sleep(delay)", "None")
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None")
         head = "a" * 40
         prior = {
             "id": 101, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
@@ -336,7 +502,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        program = match.group(1).replace("time.sleep(2)", "None")
+        program = self._workflow_program(match).replace("time.sleep(2)", "None")
         head = "a" * 40
         valid = {
             "id": 7, "name": "PR governance status writer",
@@ -372,16 +538,16 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_dispatch_waits_for_exact_new_writer_registration_and_rejects_gap_or_bad_identity(self) -> None:
         writer = (ROOT / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
-        self.assertIn("run-name: source=${{ inputs.dispatcher_run_id }}", writer)
+        self.assertIn("run-name: source=${{ inputs.dispatcher_run_id }} scope=${{ inputs.scope }}", writer)
         match = re.search(
             r"- name: Dispatch one repository-wide governance arbiter.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
             re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        base_program = match.group(1).replace('subprocess.run(["sleep", "2"], check=False)', "None")
+        base_program = self._workflow_program(match).replace('subprocess.run(["sleep", "2"], check=False)', "None")
         valid = {
-            "id": 71, "name": "PR governance status writer", "display_title": "source=99",
+            "id": 71, "name": "PR governance status writer", "display_title": "source=99 scope=all",
             "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch",
             "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40,
             "status": "queued", "run_number": 1, "run_attempt": 1,
@@ -402,7 +568,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "    else:\n"
                     "        run = json.loads(os.environ['RUN'])\n"
                     "        if os.environ['MODE'] == 'bad': run['head_sha'] = 'b' * 40\n"
-                    "        unrelated = dict(run, id=70, display_title='source=other')\n"
+                    "        unrelated = dict(run, id=70, display_title='source=other scope=all')\n"
                     "        print(json.dumps([{'workflow_runs': [unrelated, run]}]))\n"
                     "elif '/dispatches' in arguments:\n"
                     "    pass\n"
@@ -413,7 +579,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 program = base_program.replace("range(150)", "range(2)") if mode == "timeout" else base_program
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "WRITER_HEAD": "a" * 40,
-                    "DISPATCHER_RUN_ID": "99", "MODE": mode, "STATE": str(state), "RUN": json.dumps(valid),
+                    "DISPATCHER_RUN_ID": "99", "WRITER_SCOPE": "all", "WRITER_TARGETS": "[]", "MODE": mode, "STATE": str(state), "RUN": json.dumps(valid),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
@@ -421,12 +587,12 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_invalidator_rejects_wrong_or_malformed_check_app_before_dispatch(self) -> None:
         match = re.search(
-            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match)
         assert match is not None
-        program = match.group(1).replace("time.sleep(delay)", "None")
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None")
         base = {
             "id": 101, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
             "head_sha": "a" * 40, "external_id": "krr-governance/v1/" + "a" * 40,
@@ -458,11 +624,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_invalidator_has_no_all_open_cap_and_continues_after_a_post_failure(self) -> None:
         match = re.search(
-            r"- name: Invalidate affected current pull requests before dispatch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
-        program = match.group(1).replace("time.sleep(delay)", "None")
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None")
         self.assertNotIn("numbers[:", program)
         self.assertNotIn("len(numbers) >", program)
         for total, failed, expected in ((300, "", 0), (300, "150", 1), (451, "", 0), (600, "", 0)):

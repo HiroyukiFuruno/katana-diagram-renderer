@@ -1,12 +1,21 @@
 name: PR governance status writer
 
-run-name: source=${{ inputs.dispatcher_run_id }}
+run-name: source=${{ inputs.dispatcher_run_id }} scope=${{ inputs.scope }}
 
 on:
   workflow_dispatch:
     inputs:
       dispatcher_run_id:
         description: Immutable dispatcher run that created this writer request.
+        required: true
+        type: string
+      scope:
+        description: Trusted dispatcher scope; early is the event boundary and all is the full snapshot.
+        required: true
+        type: choice
+        options: [early, all]
+      target_numbers:
+        description: Canonical JSON target array; early requires its exact nonempty set and all requires [].
         required: true
         type: string
 
@@ -137,4 +146,6 @@ jobs:
           CHECK_WRITE_TOKEN: ${{ steps.check-token.outputs.token }}
           KRR_GOVERNANCE_CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
           GOVERNANCE_DISPATCHER_RUN_ID: ${{ inputs.dispatcher_run_id }}
+          GOVERNANCE_SCOPE: ${{ inputs.scope }}
+          GOVERNANCE_TARGET_NUMBERS: ${{ inputs.target_numbers }}
         run: python3 scripts/review/pr_governance_status_writer.py

@@ -1117,7 +1117,8 @@ def _latest_sensor_generation(
             "--paginate",
             "--slurp",
             f"repos/{repository}/actions/workflows/"
-            f"pr-governance-review-events.yml/runs?event={event_name}&per_page=100",
+            f"pr-governance-review-events.yml/runs?event={event_name}"
+            f"&head_sha={head}&per_page=100",
         )
         if not isinstance(payload, list) or not all(
             isinstance(page, Mapping) for page in payload
