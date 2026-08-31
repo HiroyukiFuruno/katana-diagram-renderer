@@ -1737,6 +1737,61 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.assertFalse((directory / "resolver-output").exists())
             self.assertEqual(state["mutations"], ["POST"])
 
+    def test_resolver_failure_barrier_rejects_reruns_before_any_mutation(self) -> None:
+        """A rerun must not arm a barrier that its rerun-skipped reconciler cannot release."""
+        job = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        condition = re.search(r"^    if: (?P<value>.+)$", job, re.MULTILINE)
+        self.assertIsNotNone(condition); assert condition is not None
+        self.assertEqual(
+            condition.group("value"),
+            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || "
+            "((github.event.workflow_run.name == 'PR governance review sensor' && "
+            "(github.event.workflow_run.event == 'pull_request' || "
+            "github.event.workflow_run.event == 'pull_request_review' || "
+            "github.event.workflow_run.event == 'pull_request_review_comment')) || "
+            "((github.event.workflow_run.name == 'CI' || "
+            "github.event.workflow_run.name == 'release-preflight') && "
+            "github.event.workflow_run.event == 'pull_request'))) }}",
+        )
+
+        def permitted(attempt: int, event_name: str, workflow_name: str = "", workflow_event: str = "") -> bool:
+            return attempt == 1 and (
+                event_name != "workflow_run"
+                or (
+                    workflow_name == "PR governance review sensor"
+                    and workflow_event in {"pull_request", "pull_request_review", "pull_request_review_comment"}
+                )
+                or (
+                    workflow_name in {"CI", "release-preflight"}
+                    and workflow_event == "pull_request"
+                )
+            )
+
+        fixtures = (
+            (1, "schedule", "", "", True),
+            (1, "workflow_run", "PR governance review sensor", "pull_request", True),
+            (1, "workflow_run", "PR governance review sensor", "pull_request_review", True),
+            (1, "workflow_run", "PR governance review sensor", "pull_request_review_comment", True),
+            (1, "workflow_run", "CI", "pull_request", True),
+            (1, "workflow_run", "release-preflight", "pull_request", True),
+            (1, "workflow_run", "CI", "push", False),
+            (2, "schedule", "", "", False),
+            (2, "workflow_run", "PR governance review sensor", "pull_request", False),
+            (2, "workflow_run", "CI", "pull_request", False),
+            (2, "workflow_run", "release-preflight", "pull_request", False),
+        )
+        for attempt, event_name, workflow_name, workflow_event, expected in fixtures:
+            with self.subTest(
+                attempt=attempt,
+                event_name=event_name,
+                workflow_name=workflow_name,
+                workflow_event=workflow_event,
+            ):
+                self.assertEqual(permitted(attempt, event_name, workflow_name, workflow_event), expected)
+
     def test_steady_priority_preinvalidates_before_fallible_marker_failure(self) -> None:
         """Setup failures defer the abort until both priority chunks are pending."""
         def step(name: str) -> str:

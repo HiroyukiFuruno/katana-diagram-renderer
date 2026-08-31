@@ -64,14 +64,14 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         expression = if_match.group("expression").strip()
         self.assertEqual(
             expression,
-            "${{ github.event_name != 'workflow_run' || ("
+            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
             "(github.event.workflow_run.name == 'PR governance review sensor' && "
             "(github.event.workflow_run.event == 'pull_request' || "
             "github.event.workflow_run.event == 'pull_request_review' || "
             "github.event.workflow_run.event == 'pull_request_review_comment')) || "
             "((github.event.workflow_run.name == 'CI' || "
             "github.event.workflow_run.name == 'release-preflight') && "
-            "github.event.workflow_run.event == 'pull_request')) }}",
+            "github.event.workflow_run.event == 'pull_request'))) }}",
         )
 
         allowed_events = {
@@ -84,22 +84,28 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
             "release-preflight": {"pull_request"},
         }
         fixtures = (
-            ("PR governance review sensor", "pull_request", True),
-            ("PR governance review sensor", "pull_request_review", True),
-            ("PR governance review sensor", "pull_request_review_comment", True),
-            ("CI", "pull_request", True),
-            ("release-preflight", "pull_request", True),
-            ("CI", "push", False),
-            ("release-preflight", "workflow_dispatch", False),
+            (1, "PR governance review sensor", "pull_request", True),
+            (1, "PR governance review sensor", "pull_request_review", True),
+            (1, "PR governance review sensor", "pull_request_review_comment", True),
+            (1, "CI", "pull_request", True),
+            (1, "release-preflight", "pull_request", True),
+            (1, "CI", "push", False),
+            (1, "release-preflight", "workflow_dispatch", False),
             # Reject name/event cross-products: the sensor-only events are
             # not CI/preflight inputs, and CI is not a review-sensor input.
-            ("CI", "pull_request_review", False),
-            ("release-preflight", "pull_request_review_comment", False),
-            ("PR governance review sensor", "workflow_dispatch", False),
+            (1, "CI", "pull_request_review", False),
+            (1, "release-preflight", "pull_request_review_comment", False),
+            (1, "PR governance review sensor", "workflow_dispatch", False),
+            (2, "PR governance review sensor", "pull_request", False),
+            (2, "CI", "pull_request", False),
+            (2, "release-preflight", "pull_request", False),
         )
-        for name, event, expected in fixtures:
-            with self.subTest(name=name, event=event):
-                self.assertEqual(event in allowed_events.get(name, set()), expected)
+        for attempt, name, event, expected in fixtures:
+            with self.subTest(attempt=attempt, name=name, event=event):
+                self.assertEqual(
+                    attempt == 1 and event in allowed_events.get(name, set()),
+                    expected,
+                )
 
     def test_success_re_reads_ci_generation_from_one_final_shared_snapshot_before_post(self) -> None:
         self.assertIn("final_evidence_for_pr(decision.head, initial_evidence)", self.writer)
