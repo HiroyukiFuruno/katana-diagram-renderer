@@ -118,6 +118,12 @@ push 後、最終 cloud review を依頼する直前に PR の current HEAD と�
 
 旧 HEAD の review、または同一 HEAD でも旧本文 digest の review は無効として扱う。新規指摘があれば 2〜5 を繰り返し、修正、検証、push、返信、resolve、最新 HEAD・本文に束縛した最終 review を完了する。
 
+## no-issues の Issue comment 証跡
+
+`Reviewed commit` の prefix は current HEAD に一致させます。
+
+review botの「no issues」はformal reviewではなく、trusted botがPR Issueへ投稿したcanonical commentだけを完了証跡として受理します。本文は `Codex Review: Didn't find any major issues...` または同じcanonical prefixの短文に続き、`**Reviewed commit:** \`<10〜40桁の小文字SHA prefix>\`` を含み、current HEADがそのprefixで始まらなければなりません。`created_at == updated_at` を必須とし、phase marker間のcanonical候補は高々1件、duplicateはfail-closedで拒否します。任意のdetailsは省略またはcanonicalな1つだけ（summary `ℹ️ About Codex in GitHub`、本文8192文字以内）を許可し、nested details、details外のclosing/sentinel文字列、重複canonical行は拒否します。reactionや任意のbot commentは証跡にしません。finalのno-issues証跡は参照Issueの最終`updated_at`より後でなければなりません。Codexが同一HEADの同一結果をduplicate suppressionした場合だけ、initial/final markerが同じHEAD・本文digestで、unresolved threadが0、かつIssue更新後かつfinal marker前に記録されたcanonical commentをinitial-to-final evidenceとして再利用できます。通常のformal reviewまたは指摘対応経路では、final marker後に別のreview完了証跡を取得します。
+
 ## 6. 完了判定
 
 最後に `just pr-ready-check "{pr_number}"` を実行し、最新 HEAD・本文 digest の post-marker bot review、未resolve thread 0、CI、DoD を機械確認する。この local gate は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）も先に検証する。writer/trusted Check Run の success evidence は、query中の current `pr_body_sha256` が **ちょうど1個** で完全一致する場合だけ有効である。欠落、duplicate、old digest、差異はいずれも fail-closed であり success と見なさない。CI green のみ、レビュー依頼済みのみ、または局所テスト通過のみでは完了としない。Ready化後はユーザーから**freshなmerge承認**を得て、同じ `just pr-ready-check "{pr_number}"` を直前に再実行してReady PRを再検証する。成功時のmergeはPR外のglobal skill `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/SKILL.md` が定める専用Appの `merge --apply` だけを使い、人間、UI、通常のGitHub CLI merge、admin bypassは禁止する。`prepare --apply` は保存済みの人間用`gh auth`だけを使う例外であり、activate/merge/finalize/verifyのlive operationはfresh JWTとscript自身がmint・検証するApp IATを必要とする。`merge` の`--apply`なしdry-runだけは、人間用authによるpublic readに限定する。pr-ready-check 成功後も、Draft 維持のまま main が最終差分と結果を報告する。

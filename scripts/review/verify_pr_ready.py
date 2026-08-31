@@ -35,6 +35,13 @@ _SELF_CHECK_NAMES = frozenset(
     }
 )
 _CODEX_REVIEW_TRIGGER = re.compile(r"(?m)^\s*@codex\s+review\s*$")
+_CODEX_NO_ISSUES_COMMENT = re.compile(
+    r"\ACodex Review: Didn't find any major issues(?:\.\.\.|\. [^.!?\r\n]+[.!?])\r?\n\r?\n"
+    r"\*\*Reviewed commit:\*\* `(?P<commit>[0-9a-f]{10,40})`"
+    r"(?:\Z|\r?\n\Z|\r?\n\r?\n"
+    r"<details>(?: <summary>|\r?\n<summary>)ℹ️ About Codex in GitHub</summary>\r?\n"
+    r"(?:(?!<details>|</details>|Codex Review:|\*\*Reviewed commit:\*\*)[\s\S]){0,8192}</details>(?:\r?\n)?\Z)"
+)
 _SHA = re.compile(r"[0-9a-fA-F]{40}")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
@@ -139,6 +146,166 @@ def _review_is_for(
 ) -> bool:
     return bool(
         _review_completion_times(reviews, review_bot, head, not_before, before)
+    )
+
+
+def _no_issues_comment_completion_times(
+    comments: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    not_before: object,
+    before: object | None = None,
+) -> list[datetime]:
+    """Return trusted Codex no-issues comments for one reviewed commit.
+
+    The review connector publishes no-issues results as Issue comments rather
+    than formal Pull Request reviews.  Treat only its canonical, immutable
+    result shape as evidence; reactions and arbitrary bot comments remain
+    insufficient for the merge gate.
+    """
+
+    not_before_time = _timestamp(not_before, "marker updated_at")
+    if not_before_time is None:
+        raise TypeError("marker updated_at must be an ISO-8601 timestamp")
+    before_time = _timestamp(before, "marker created_at")
+    completion_times: list[datetime] = []
+    for comment in comments:
+        if not _is_review_bot(_bot_login(comment.get("user")), review_bot):
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            continue
+        # Reject an otherwise-valid line if the same result fields were
+        # duplicated or malformed elsewhere in the body.
+        if (
+            body.count("Codex Review:") != 1
+            or body.count("**Reviewed commit:**") != 1
+        ):
+            continue
+        result = _CODEX_NO_ISSUES_COMMENT.match(body)
+        if result is None or not head.startswith(result.group("commit")):
+            continue
+        try:
+            created_at = _timestamp(
+                comment.get("created_at"), "no-issues comment created_at"
+            )
+            updated_at = _timestamp(
+                comment.get("updated_at"), "no-issues comment updated_at"
+            )
+        except (TypeError, ValueError):
+            continue
+        # Issue-comment bodies are mutable.  A no-issues result is durable
+        # evidence only when the GitHub timestamps prove it was never edited.
+        if (
+            created_at is None
+            or updated_at is None
+            or created_at.tzinfo is None
+            or updated_at.tzinfo is None
+            or created_at != updated_at
+        ):
+            continue
+        if (
+            created_at > not_before_time
+            and (before_time is None or created_at < before_time)
+        ):
+            completion_times.append(created_at)
+    return completion_times
+
+
+def _review_evidence_completion_times(
+    reviews: Sequence[Mapping[str, object]],
+    comments: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    not_before: object,
+    before: object | None = None,
+) -> list[datetime]:
+    """Return formal-review and canonical no-issues Issue-comment evidence."""
+
+    return [
+        *_review_completion_times(reviews, review_bot, head, not_before, before),
+        *_no_issues_comment_completion_times(
+            comments, review_bot, head, not_before, before
+        ),
+    ]
+
+
+def _no_issues_evidence_is_ambiguous(
+    comments: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    not_before: object,
+    before: object | None = None,
+) -> bool:
+    """Require one canonical no-issues comment at most in each phase window."""
+
+    return (
+        len(
+            _no_issues_comment_completion_times(
+                comments, review_bot, head, not_before, before
+            )
+        )
+        > 1
+    )
+
+
+def _review_evidence_is_for(
+    reviews: Sequence[Mapping[str, object]],
+    comments: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    not_before: object,
+    before: object | None = None,
+) -> bool:
+    return bool(
+        _review_evidence_completion_times(
+            reviews, comments, review_bot, head, not_before, before
+        )
+    )
+
+
+def _no_issues_evidence_is_reusable_for_final(
+    comments: Sequence[Mapping[str, object]],
+    review_bot: str,
+    head: str,
+    body_sha256: str,
+    initial: _ReviewMarker | None,
+    final: _ReviewMarker | None,
+    issue_updated_at: datetime | None,
+    *,
+    has_unresolved_threads: bool,
+) -> bool:
+    """Allow a duplicate-suppressed no-issues result to satisfy final review.
+
+    Codex deliberately suppresses a second identical no-issues response for
+    the same HEAD.  Reuse is safe only when both marker phases attest to that
+    unchanged HEAD/body contract, no review thread is open, and the result was
+    recorded after every relevant Issue update but before the final marker.
+    """
+
+    if (
+        initial is None
+        or final is None
+        or has_unresolved_threads
+        or initial[1] != head
+        or final[1] != head
+        or initial[2] != body_sha256
+        or final[2] != body_sha256
+    ):
+        return False
+    initial_time = _marker_updated_time(initial[3])
+    final_time = _marker_updated_time(final[3])
+    if initial_time is None or final_time is None or initial_time >= final_time:
+        return False
+    freshness_floor = max(initial_time, issue_updated_at or initial_time)
+    return bool(
+        _no_issues_comment_completion_times(
+            comments,
+            review_bot,
+            head,
+            freshness_floor.isoformat(),
+            _marker_updated_at(final[3]),
+        )
     )
 
 
@@ -455,6 +622,7 @@ def _required_timestamp_text(value: object, field: str) -> str:
 
 def _final_review_evidence_is_fresh(
     reviews: Sequence[Mapping[str, object]],
+    comments: Sequence[Mapping[str, object]],
     review_bot: str,
     head: str,
     comment: Mapping[str, object],
@@ -479,8 +647,8 @@ def _final_review_evidence_is_fresh(
         marker_time,
         issue_updated_at or marker_time,
     )
-    review_times = _review_completion_times(
-        reviews, review_bot, head, _marker_updated_at(comment)
+    review_times = _review_evidence_completion_times(
+        reviews, comments, review_bot, head, _marker_updated_at(comment)
     )
     return any(submitted_at > freshness_floor for submitted_at in review_times)
 
@@ -913,6 +1081,12 @@ def readiness_errors(
             else:
                 latest_initial = latest_initial_candidates[0]
 
+    if latest_initial is not None:
+        if latest_initial[1] != head:
+            errors.append("initial review marker が最新HEADを指していません")
+        if body_sha256 is None or latest_initial[2] != body_sha256:
+            errors.append("initial review marker のPR本文digestが現在値と一致しません")
+
     latest_final: _ReviewMarker | None = None
     if final_markers:
         # The newest final marker is authoritative even when it names an old
@@ -933,6 +1107,24 @@ def readiness_errors(
             ]
             if len(latest_final_candidates) == 1:
                 latest_final = latest_final_candidates[0]
+
+    if latest_initial is not None and latest_final is not None:
+        if _no_issues_evidence_is_ambiguous(
+            comments,
+            review_bot,
+            latest_initial[1],
+            _marker_updated_at(latest_initial[3]),
+            _marker_updated_at(latest_final[3]),
+        ):
+            errors.append("initial-final間の no-issues review evidence が曖昧です")
+    if latest_final is not None and _no_issues_evidence_is_ambiguous(
+        comments,
+        review_bot,
+        head,
+        _marker_updated_at(latest_final[3]),
+    ):
+        errors.append("final review後の no-issues review evidence が曖昧です")
+
     if not final_markers:
         errors.append("final review marker がありません")
     elif latest_final is None:
@@ -948,10 +1140,20 @@ def readiness_errors(
         errors.append("final review marker が参照Issue更新後ではありません")
     elif not _final_review_evidence_is_fresh(
             typed_reviews,
+            comments,
             review_bot,
             head,
             latest_final[3],
             issue_updated_at,
+        ) and not _no_issues_evidence_is_reusable_for_final(
+            comments,
+            review_bot,
+            head,
+            body_sha256,
+            latest_initial,
+            latest_final,
+            issue_updated_at,
+            has_unresolved_threads=bool(unresolved),
         ):
         errors.append("final review に参照Issue更新後の review bot 完了記録がありません")
 
@@ -960,10 +1162,9 @@ def readiness_errors(
         final_time = _marker_updated_time(latest_final[3])
         if initial_time is None or final_time is None or initial_time >= final_time:
             errors.append("initial review marker は最新 final review marker より前である必要があります")
-        elif body_sha256 is None or latest_initial[2] != body_sha256:
-            errors.append("initial review marker のPR本文digestが現在値と一致しません")
-        elif not _review_is_for(
+        elif not _review_evidence_is_for(
             typed_reviews,
+            comments,
             review_bot,
             latest_initial[1],
             _marker_updated_at(latest_initial[3]),

@@ -82,6 +82,12 @@ PR 作成は `/create_pull_request` に委譲し、Ready PR を直接作成し�
 
 CI green だけでは review 完了、Ready 化、または merge の条件を満たしません。self-review、lint、テスト、coverage、OpenSpec / DoD、最新 HEAD の cloud review、未 resolve thread 0 を個別に確認します。
 
+## no-issues 証跡の共通契約
+
+`Reviewed commit` の prefix は current HEAD に一致させます。
+
+review botの「no issues」はformal reviewではなく、trusted botがPR Issueへ投稿したcanonical commentだけを完了証跡として受理します。本文は `Codex Review: Didn't find any major issues...` または同じcanonical prefixの短文に続き、`**Reviewed commit:** \`<10〜40桁の小文字SHA prefix>\`` を含み、current HEADがそのprefixで始まらなければなりません。`created_at == updated_at` を必須とし、phase marker間のcanonical候補は高々1件、duplicateはfail-closedで拒否します。任意のdetailsは省略またはcanonicalな1つだけ（summary `ℹ️ About Codex in GitHub`、本文8192文字以内）を許可し、nested details、details外のclosing/sentinel文字列、重複canonical行は拒否します。reactionや任意のbot commentは証跡にしません。finalのno-issues証跡は参照Issueの最終`updated_at`より後でなければなりません。Codexが同一HEADの同一結果をduplicate suppressionした場合だけ、initial/final markerが同じHEAD・本文digestで、unresolved threadが0、かつIssue更新後かつfinal marker前に記録されたcanonical commentをinitial-to-final evidenceとして再利用できます。通常のformal reviewまたは指摘対応経路では、final marker後に別のreview完了証跡を取得します。
+
 ## 6. 持ち込まないもの
 
 KDR には次の katana 固有スキルを持ち込みません。

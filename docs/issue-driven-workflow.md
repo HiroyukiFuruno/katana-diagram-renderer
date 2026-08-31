@@ -129,6 +129,12 @@ unset KRR_GOVERNANCE_APP_JWT
 
 最終レビューでは `phase=final` と最新HEAD SHA、現在のPR本文をUTF-8でSHA-256化した小文字hexを使う。initial/finalの完了証跡は、対応するmarker投稿後かつ最新HEAD・本文digestに対してbot reviewが提出された場合だけとする。本文を同一HEADで変更したら、本文digestを更新したinitial markerからレビューをやり直し、initial reviewとfinal reviewの両方を新しい本文digestへ束縛する。trusted Check Runの`pr_body_sha256`がmissing、duplicate、stale、またはcurrent digestと不一致になった場合も旧successを失効させ、新しいinitial marker→bot review→final marker→bot reviewを完了するまでReady化・mergeしてはならない。`eyes`等のreactionは受付中を示す補助表示であり、永続的な完了証跡として受理しない。レビュー指摘へのreplyとresolveを省略したままReady化してはならない。
 
+#### no-issues Issue commentのcanonical契約
+
+review botの「no issues」はformal reviewではなく、trusted botがPR Issueへ投稿したcanonical commentだけを完了証跡として扱う。本文は `Codex Review: Didn't find any major issues...` または同じcanonical prefixの短文に続き、`**Reviewed commit:** \`<10〜40桁の小文字SHA prefix>\`` を含み、current HEADがそのprefixで始まることを必須とする。`created_at == updated_at` でないcomment、reactionだけの表示、任意のbot commentは受理しない。phaseのmarker間にcanonical候補は高々1件でなければならない。
+
+任意のdetailsは省略またはcanonicalな1つだけを許可する（summaryは `ℹ️ About Codex in GitHub`、本文は8192文字以内）。details内のnested `<details>`、許可されたclosing tag以外の`</details>`、`Codex Review:`、`**Reviewed commit:**` の追加出現などのsentinel/重複はfail-closedで拒否する。finalのno-issues完了は参照Issueの最終`updated_at`より後でなければならない。Codexが同一HEADの同一結果をduplicate suppressionした場合だけ、initial/final markerのHEAD・本文digestが同一で、unresolved threadが0、かつIssue更新後かつfinal marker前に記録されたcanonical commentをinitial-to-final evidenceとして再利用できる。通常のformal reviewまたは指摘対応経路では、final marker後に別のreview完了証跡を取得する。
+
 ### オーケストレーションとハーネス
 
 変更ファイルを先に棚卸しし、利用可能な並列枠を確認する。実装、テスト、調査、文書化が互いに独立している場合は、それぞれを別subagentへ委譲する。利用不可のモデルを選ばず、限定実装はLuna、複雑な設計・統合分析はTerraへ切り替える。main agentは結果を鵜呑みにせず、差分、追加fixture、完全ゲートで再検証する。

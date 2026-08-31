@@ -510,27 +510,62 @@ const CURRENT_TRUSTED_BODY_EVIDENCE_TERMS: &[RequiredTerm] = &[
     RequiredTerm::Exact("fail-closed"),
 ];
 
+const NO_ISSUES_EVIDENCE_TERMS: &[RequiredTerm] = &[
+    RequiredTerm::Alternatives(&[
+        "trusted bot の Issue comment",
+        "trusted review bot の Issue comment",
+        "trusted botがPR Issue",
+    ]),
+    RequiredTerm::Exact("created_at == updated_at"),
+    RequiredTerm::Alternatives(&[
+        "phase windowごとの候補一意性",
+        "phase window の候補を一意",
+        "各 phase window の候補は一意",
+        "各 phase windowの候補一意",
+        "各phase windowの候補一意",
+        "各 phase windowで一意",
+        "各 phase window で一意",
+        "各phase windowで一意",
+        "候補一意性",
+        "高々1件",
+    ]),
+    RequiredTerm::Alternatives(&["重複", "duplicate"]),
+    RequiredTerm::Exact("fail-closed"),
+    RequiredTerm::Alternatives(&["Issue freshness", "Issue更新後"]),
+    RequiredTerm::Alternatives(&["未resolve", "未 resolve", "未解決", "unresolved"]),
+    RequiredTerm::Alternatives(&[
+        "同一current HEAD・body digest",
+        "同一current HEAD・同一PR body digest",
+        "current HEAD/body digest が同一",
+        "current HEAD/body digest同一",
+        "同一 current HEAD・同一 PR body digest",
+        "current HEAD/body digest が両 marker で同一",
+        "current HEAD/body digest 同一",
+        "同じHEAD・本文digest",
+        "同じ HEAD・本文digest",
+        "同じHEAD/body digest",
+        "最新HEAD・本文digest",
+    ]),
+    RequiredTerm::Alternatives(&["再利用", "reuse"]),
+    RequiredTerm::Alternatives(&["formal review/指摘経路", "formal review", "指摘経路"]),
+    RequiredTerm::Alternatives(&[
+        "final marker後の別",
+        "final marker 後の別",
+        "final後の別",
+        "final marker後に別",
+        "final marker 後に別",
+    ]),
+    RequiredTerm::Alternatives(&["8192", "8192 bytes"]),
+    RequiredTerm::Alternatives(&["nested details", "nested/sentinel", "nested"]),
+    RequiredTerm::Alternatives(&["sentinel", "closing/sentinel"]),
+    RequiredTerm::Alternatives(&["reaction", "リアクション"]),
+];
+
 fn assert_review_evidence_contract(root: &Path) -> TestResult {
     let mut missing = Vec::new();
-    for path in REVIEW_EVIDENCE_SKILL_PATHS {
-        let skill = std::fs::read_to_string(root.join(path))?;
-        collect_missing_review_evidence_terms(&skill, path, &mut missing);
-    }
-
-    for (agents_path, codex_path) in MIRRORED_REVIEW_SKILLS {
-        let agents_skill = std::fs::read_to_string(root.join(agents_path))?;
-        let codex_skill = std::fs::read_to_string(root.join(codex_path))?;
-        if review_evidence_signature(&agents_skill) != review_evidence_signature(&codex_skill) {
-            missing.push(format!(
-                "{agents_path} and {codex_path} must mirror the strict marker and trusted body-evidence contract"
-            ));
-        }
-    }
-
-    for path in ["AGENTS.md", "docs/issue-driven-workflow.md"] {
-        let document = std::fs::read_to_string(root.join(path))?;
-        collect_missing_review_evidence_terms(&document, path, &mut missing);
-    }
+    collect_skill_evidence(root, &mut missing)?;
+    collect_mirror_evidence(root, &mut missing)?;
+    collect_document_evidence(root, &mut missing)?;
 
     if missing.is_empty() {
         Ok(())
@@ -543,10 +578,57 @@ fn assert_review_evidence_contract(root: &Path) -> TestResult {
     }
 }
 
+fn collect_skill_evidence(root: &Path, missing: &mut Vec<String>) -> TestResult {
+    for path in REVIEW_EVIDENCE_SKILL_PATHS {
+        let skill = std::fs::read_to_string(root.join(path))?;
+        collect_missing_review_evidence_terms(&skill, path, missing);
+        collect_missing_terms(&skill, path, NO_ISSUES_EVIDENCE_TERMS, missing);
+    }
+    Ok(())
+}
+
+fn collect_mirror_evidence(root: &Path, missing: &mut Vec<String>) -> TestResult {
+    for (agents_path, codex_path) in MIRRORED_REVIEW_SKILLS {
+        let agents_skill = std::fs::read_to_string(root.join(agents_path))?;
+        let codex_skill = std::fs::read_to_string(root.join(codex_path))?;
+        if review_evidence_signature(&agents_skill) != review_evidence_signature(&codex_skill) {
+            missing.push(format!(
+                "{agents_path} and {codex_path} must mirror the strict marker and trusted body-evidence contract"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_document_evidence(root: &Path, missing: &mut Vec<String>) -> TestResult {
+    for path in ["AGENTS.md", "docs/issue-driven-workflow.md"] {
+        let document = std::fs::read_to_string(root.join(path))?;
+        collect_missing_review_evidence_terms(&document, path, missing);
+        collect_missing_terms(document.as_str(), path, NO_ISSUES_EVIDENCE_TERMS, missing);
+    }
+    Ok(())
+}
+
+fn collect_missing_terms(
+    text: &str,
+    path: &str,
+    required_terms: &[RequiredTerm],
+    missing: &mut Vec<String>,
+) {
+    for required in required_terms {
+        if !required.is_present(text) {
+            missing.push(format!(
+                "{path} must contain no-issues evidence contract term {required:?}"
+            ));
+        }
+    }
+}
+
 fn review_evidence_signature(text: &str) -> Vec<bool> {
     STRICT_REVIEW_MARKER_TERMS
         .iter()
         .chain(CURRENT_TRUSTED_BODY_EVIDENCE_TERMS)
+        .chain(NO_ISSUES_EVIDENCE_TERMS)
         .map(|required| required.is_present(text))
         .collect()
 }

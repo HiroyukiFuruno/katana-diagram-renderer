@@ -84,6 +84,8 @@ gh pr comment "${pr_url}" --body "${review_body}"
 
 Draft が `true` であることを確認してから初回 review を依頼します。cloud review を正とし、全 review thread を取得して指摘を分類します。各指摘は責務単位で subagent に委譲し、修正・検証・push 後に該当 thread へ reply して resolve します。
 
+Codex の no-issues 応答は formal review ではなく trusted bot の Issue comment とする。canonical body 全体一致、`Reviewed commit` の10〜40桁hex prefixとcurrent HEADの一致、未編集（`created_at == updated_at`）、各phase windowの候補一意（重複はfail-closed）を確認する。optional details footerはlive canonical summary/structure一致、nested/sentinel拒否、8192文字以下の場合だけ許可する。同一current HEAD・同一PR body digest・unresolved thread 0・Issue freshness（Issue更新後）が揃う場合に限り、initial marker後かつfinal marker前のno-issues証跡をfinalに再利用する。reactionは証跡にせず、formal review/指摘経路はfinal marker後の別evidenceを必須とする。strict marker、App-only merge、initial→final順序を維持する。
+
 ## Phase 5: PR gate
 
 初回指摘への対応後、または指摘が無い場合でも、merge 前に最新 HEAD へ最終 review を依頼します。

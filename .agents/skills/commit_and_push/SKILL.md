@@ -87,6 +87,8 @@ PR に紐付く変更では、push 成功や CI green だけで review 完了・
 
 initial review は `create_pull_request` スキルの担当とし、このスキルでは push 後の review 循環へ戻ります。markerは `krr-review phase=<initial|final> head=<40 lowercase hex> body-sha256=<64 lowercase hex>` のstrict形式とし、bodyはGitHub APIから取得したcurrent PR body文字列を正規化せずUTF-8 bytesとしてSHA-256化します。
 
+Codex の no-issues 応答は formal review ではなく trusted bot の Issue comment とする。canonical body 全体一致、`Reviewed commit` の10〜40桁hex prefixとcurrent HEADの一致、未編集（`created_at == updated_at`）、initial/final各phase windowの候補一意（重複はfail-closed）を確認する。optional details footerはlive canonical summary/structure一致、nested/sentinel拒否、8192文字以下の場合だけ許可する。同一current HEAD・同一PR body digest・unresolved thread 0・Issue freshness（Issue更新後）が揃う場合に限りinitial marker後かつfinal marker前のno-issues証跡をfinalに再利用できる。reactionは証跡にせず、formal review/指摘対応経路はfinal marker後の別bot review/thread evidenceを必須とする。strict marker、App-only merge、initial→final順序を維持する。
+
 1. 最新 push 後、依頼直前にGitHub APIからcurrent PRのhead/bodyを再取得し、body digestを計算してコメント本文へ次のmarkerと `@codex review` を含めてfinal reviewを依頼します。
 
    ```bash

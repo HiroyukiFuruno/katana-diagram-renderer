@@ -21,6 +21,10 @@ INITIAL_HEAD = "b" * 40
 BOT = "chatgpt-codex-connector"
 BODY = "Closes #64"
 BODY_SHA256 = hashlib.sha256(BODY.encode("utf-8")).hexdigest()
+NO_ISSUES_PREFIX = "Codex Review: Didn't find any major issues"
+NO_ISSUES_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "no_issues_comment_contract.v1.json"
+)
 
 
 def marker(
@@ -41,6 +45,30 @@ def marker(
         "created_at": created_at,
         "updated_at": updated_at or created_at,
         "user": {"login": "HiroyukiFuruno"},
+    }
+
+
+def no_issues_review(
+    comment_id: int,
+    head: str,
+    *,
+    login: str = BOT,
+    prefix_length: int = 10,
+    created_at: str = "2026-08-29T03:01:30Z",
+    updated_at: str | None = None,
+    body: str | None = None,
+    result: str = "Hooray!",
+    footer: str = "",
+) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "body": body or (
+            f"{NO_ISSUES_PREFIX}. {result}\n\n"
+            f"**Reviewed commit:** `{head[:prefix_length]}`{footer}"
+        ),
+        "created_at": created_at,
+        "updated_at": updated_at or created_at,
+        "user": {"login": login},
     }
 
 
@@ -67,7 +95,7 @@ def successful_state() -> tuple[
         "reviews": [
             {
                 "author": {"login": BOT},
-                "commit": {"oid": INITIAL_HEAD},
+                "commit": {"oid": HEAD},
                 "state": "COMMENTED",
                 "submittedAt": "2026-08-29T03:01:30Z",
             },
@@ -81,7 +109,7 @@ def successful_state() -> tuple[
     }
     threads = [{"id": "thread-1", "isResolved": True}]
     comments = [
-        marker(1, "initial", INITIAL_HEAD),
+        marker(1, "initial", HEAD),
         marker(2, "final", HEAD),
     ]
     return pull_request, threads, comments
@@ -138,6 +166,369 @@ class VerifyPrReadyTest(unittest.TestCase):
     def test_accepts_two_phase_review_on_current_head(self) -> None:
         self.assertEqual(self.errors(), [])
 
+    def test_rejects_latest_initial_marker_for_old_head_even_with_current_final_review(self) -> None:
+        pull_request, threads, comments = successful_state()
+        comments[0] = marker(1, "initial", INITIAL_HEAD)
+        reviews = pull_request["reviews"]
+        assert isinstance(reviews, list)
+        reviews[0]["commit"] = {"oid": INITIAL_HEAD}
+        errors = self.errors(
+            pull_request=pull_request,
+            threads=threads,
+            comments=comments,
+        )
+        self.assertTrue(
+            errors,
+            "an old-head initial marker must not authorize current final evidence",
+        )
+
+    def test_accepts_trusted_no_issues_review_in_both_phases(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        comments = [
+            marker(1, "initial", HEAD),
+            no_issues_review(
+                3, HEAD, created_at="2026-08-29T03:01:30Z"
+            ),
+            marker(2, "final", HEAD),
+        ]
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request, threads=threads, comments=comments
+            ),
+            [],
+        )
+
+    def test_no_issues_comment_contract_fixture_matches_completion_parser(self) -> None:
+        with NO_ISSUES_FIXTURE.open(encoding="utf-8") as fixture_file:
+            fixture = json.load(fixture_file)
+        self.assertIsInstance(fixture, dict)
+        self.assertEqual(set(fixture), {"version", "cases"})
+        self.assertEqual(fixture["version"], 1)
+        cases = fixture["cases"]
+        self.assertIsInstance(cases, list)
+        self.assertGreater(len(cases), 0)
+
+        for case in cases:
+            with self.subTest(case=case.get("name")):
+                self.assertIsInstance(case, dict)
+                self.assertEqual(
+                    set(case), {"name", "head", "after", "before", "accepted", "comment"}
+                )
+                self.assertIsInstance(case["name"], str)
+                head = case["head"]
+                self.assertIsInstance(head, str)
+                self.assertRegex(head, r"^[0-9a-f]{40}$")
+                after = case["after"]
+                before = case["before"]
+                self.assertIsInstance(after, str)
+                self.assertIsInstance(before, str)
+                after_time = subject._timestamp(after, "fixture after")
+                before_time = subject._timestamp(before, "fixture before")
+                self.assertIsNotNone(after_time)
+                self.assertIsNotNone(before_time)
+                assert after_time is not None and before_time is not None
+                self.assertIsNotNone(after_time.tzinfo)
+                self.assertIsNotNone(before_time.tzinfo)
+                self.assertLess(after_time, before_time)
+                accepted = case["accepted"]
+                self.assertIs(type(accepted), bool)
+
+                comment = case["comment"]
+                self.assertIsInstance(comment, dict)
+                self.assertEqual(
+                    set(comment), {"body", "created_at", "updated_at", "user"}
+                )
+                self.assertIsInstance(comment["body"], str)
+                self.assertIsInstance(comment["created_at"], str)
+                self.assertIsInstance(comment["updated_at"], str)
+                self.assertIsInstance(comment["user"], dict)
+                self.assertEqual(set(comment["user"]), {"login"})
+                self.assertIsInstance(comment["user"]["login"], str)
+
+                completion_times = subject._no_issues_comment_completion_times(
+                    [comment], BOT, head, after, before
+                )
+                self.assertEqual(bool(completion_times), accepted)
+
+    def test_accepts_no_issues_evidence_after_first_api_page(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        filler = [
+            {
+                "id": index,
+                "body": f"unrelated comment {index}",
+                "created_at": "2026-08-29T03:00:00Z",
+                "updated_at": "2026-08-29T03:00:00Z",
+                "user": {"login": "reviewer"},
+            }
+            for index in range(1, 101)
+        ]
+        comments = filler + [
+            marker(1, "initial", HEAD),
+            no_issues_review(3, HEAD, created_at="2026-08-29T03:01:30Z"),
+            marker(2, "final", HEAD),
+        ]
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request, threads=threads, comments=comments
+            ),
+            [],
+        )
+
+    def test_accepts_no_issues_evidence_after_final_marker_too(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        comments = [
+            marker(1, "initial", HEAD),
+            no_issues_review(3, HEAD, created_at="2026-08-29T03:01:30Z"),
+            marker(2, "final", HEAD),
+            no_issues_review(4, HEAD, created_at="2026-08-29T03:02:30Z"),
+        ]
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request, threads=threads, comments=comments
+            ),
+            [],
+        )
+
+    def test_accepts_live_no_issues_result_variants(self) -> None:
+        for result in ("Hooray!", "Delightful!"):
+            with self.subTest(result=result):
+                pull_request, threads, _ = successful_state()
+                pull_request["reviews"] = []
+                comments = [
+                    marker(1, "initial", HEAD),
+                    no_issues_review(3, HEAD, result=result),
+                    marker(2, "final", HEAD),
+                ]
+                self.assertEqual(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    ),
+                    [],
+                )
+
+    def test_accepts_live_no_issues_footer_and_trailing_newline(self) -> None:
+        footer = (
+            "\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+            "Generated by Codex.\n</details>"
+        )
+        for suffix in (footer, footer + "\n"):
+            with self.subTest(suffix=repr(suffix)):
+                pull_request, threads, _ = successful_state()
+                pull_request["reviews"] = []
+                comments = [
+                    marker(1, "initial", HEAD),
+                    no_issues_review(3, HEAD, footer=suffix),
+                    marker(2, "final", HEAD),
+                ]
+                self.assertEqual(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    ),
+                    [],
+                )
+
+    def test_rejects_unbounded_or_noncanonical_no_issues_footer(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        variants = {
+            "nested details": (
+                "\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+                "<details>nested</details>\n</details>"
+            ),
+            "sentinel": (
+                "\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+                "Codex Review: injected\n</details>"
+            ),
+            "oversize": (
+                "\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+                + "x" * 8193
+                + "</details>"
+            ),
+            "wrong summary": (
+                "\n\n<details> <summary>Review details</summary>\n"
+                "Generated by Codex.\n</details>"
+            ),
+        }
+        for name, footer in variants.items():
+            with self.subTest(name=name):
+                comments = [
+                    marker(1, "initial", HEAD),
+                    no_issues_review(3, HEAD, footer=footer),
+                    marker(2, "final", HEAD),
+                ]
+                self.assertTrue(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    )
+                )
+
+    def test_rejects_edited_no_issues_comment_timestamp(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        evidence = no_issues_review(3, HEAD, created_at="2026-08-29T03:00:30Z")
+        evidence["updated_at"] = "2026-08-29T03:01:30Z"
+        comments = [
+            marker(1, "initial", HEAD),
+            evidence,
+            marker(2, "final", HEAD),
+        ]
+        self.assertTrue(
+            self.errors(pull_request=pull_request, threads=threads, comments=comments)
+        )
+
+    def test_rejects_duplicate_no_issues_evidence_in_initial_final_window(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        comments = [
+            marker(1, "initial", HEAD),
+            no_issues_review(3, HEAD, created_at="2026-08-29T03:01:30Z"),
+            no_issues_review(4, HEAD, created_at="2026-08-29T03:01:31Z"),
+            marker(2, "final", HEAD),
+        ]
+        self.assertTrue(
+            self.errors(pull_request=pull_request, threads=threads, comments=comments)
+        )
+
+    def test_rejects_duplicate_no_issues_evidence_after_final_marker(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        comments = [
+            marker(1, "initial", HEAD),
+            no_issues_review(3, HEAD, created_at="2026-08-29T03:01:30Z"),
+            marker(2, "final", HEAD),
+            no_issues_review(4, HEAD, created_at="2026-08-29T03:02:30Z"),
+            no_issues_review(5, HEAD, created_at="2026-08-29T03:02:31Z"),
+        ]
+        self.assertTrue(
+            self.errors(pull_request=pull_request, threads=threads, comments=comments)
+        )
+
+    def test_no_issues_evidence_requires_matching_strict_timestamps(self) -> None:
+        variants = {
+            "missing created_at": {"created_at": "__missing__"},
+            "missing updated_at": {"updated_at": "__missing__"},
+            "null created_at": {"created_at": None},
+            "null updated_at": {"updated_at": None},
+            "mismatch": {"updated_at": "2026-08-29T03:01:31Z"},
+            "reverse": {"created_at": "2026-08-29T03:02:00Z"},
+        }
+        for name, changes in variants.items():
+            with self.subTest(name=name):
+                pull_request, threads, _ = successful_state()
+                pull_request["reviews"] = []
+                evidence = no_issues_review(3, HEAD)
+                evidence.update(changes)
+                for field in ("created_at", "updated_at"):
+                    if evidence.get(field) == "__missing__":
+                        evidence.pop(field)
+                comments = [
+                    marker(1, "initial", HEAD),
+                    evidence,
+                    marker(2, "final", HEAD),
+                ]
+                self.assertTrue(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    )
+                )
+
+    def test_rejects_untrusted_or_malformed_no_issues_evidence(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        valid = no_issues_review(3, HEAD)
+        variants = {
+            "other author": no_issues_review(3, HEAD, login="reviewer"),
+            "different head": no_issues_review(3, INITIAL_HEAD),
+            "short prefix": no_issues_review(3, HEAD, prefix_length=9),
+            "before marker": no_issues_review(
+                3, HEAD, created_at="2026-08-29T03:00:59Z"
+            ),
+            "marker boundary": no_issues_review(
+                3, HEAD, created_at="2026-08-29T03:01:00Z"
+            ),
+            "phase confusion": no_issues_review(
+                3, HEAD, created_at="2026-08-29T03:02:30Z"
+            ),
+            "malformed body": no_issues_review(
+                3,
+                HEAD,
+                body=(
+                    "Codex Review: Didn't find any major issues\n"
+                    "**Reviewed commit:** `aaaaaaaaa`"
+                ),
+            ),
+            "prefix only": no_issues_review(
+                3, HEAD, body=NO_ISSUES_PREFIX
+            ),
+            "missing reviewed commit": no_issues_review(
+                3, HEAD, body=f"{NO_ISSUES_PREFIX}. Hooray!"
+            ),
+            "duplicate result": no_issues_review(
+                3, HEAD, body=(
+                    f"{NO_ISSUES_PREFIX}. Hooray! Delightful!\n\n"
+                    f"**Reviewed commit:** `{HEAD[:10]}`"
+                ),
+            ),
+            "duplicate review line": no_issues_review(
+                3, HEAD, body=(
+                    f"{NO_ISSUES_PREFIX}. Hooray!\n"
+                    f"{NO_ISSUES_PREFIX}. Hooray!\n\n"
+                    f"**Reviewed commit:** `{HEAD[:10]}`"
+                ),
+            ),
+            "duplicate reviewed commit": no_issues_review(
+                3, HEAD, body=(
+                    f"{NO_ISSUES_PREFIX}. Hooray!\n\n"
+                    f"**Reviewed commit:** `{HEAD[:10]}`\n"
+                    f"**Reviewed commit:** `{HEAD[:10]}`"
+                ),
+            ),
+            "sentence injection": no_issues_review(
+                3, HEAD, body=(
+                    f"{NO_ISSUES_PREFIX}.\nInjected sentence.\n\n"
+                    f"**Reviewed commit:** `{HEAD[:10]}`"
+                ),
+            ),
+            "reaction only": {**valid, "body": "LGTM", "reactions": {"+1": 1}},
+        }
+        for name, evidence in variants.items():
+            with self.subTest(name=name):
+                comments = [
+                    marker(1, "initial", HEAD),
+                    evidence,
+                    marker(2, "final", HEAD),
+                ]
+                self.assertTrue(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    )
+                )
+
+    def test_rejects_no_issues_evidence_for_wrong_phase_after_final_marker(self) -> None:
+        pull_request, threads, _ = successful_state()
+        pull_request["reviews"] = []
+        comments = [
+            marker(1, "initial", HEAD),
+            no_issues_review(3, HEAD, created_at="2026-08-29T03:02:30Z"),
+            marker(2, "final", HEAD),
+        ]
+        self.assertTrue(
+            self.errors(pull_request=pull_request, threads=threads, comments=comments)
+        )
+
     def test_rejects_same_head_pr_body_edit_with_stale_marker_digests(self) -> None:
         pull_request, _, comments = successful_state()
         pull_request["body"] = "Closes #65"
@@ -149,7 +540,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         body = "Closes #64\n本文"
         pull_request, _, comments = successful_state()
         pull_request["body"] = body
-        comments[0] = marker(1, "initial", INITIAL_HEAD, body=body)
+        comments[0] = marker(1, "initial", HEAD, body=body)
         comments[1] = marker(2, "final", HEAD, body=body)
         self.assertEqual(self.errors(pull_request=pull_request, comments=comments), [])
 
@@ -1532,7 +1923,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             "reviews": [
                 {
                     "author": {"login": BOT},
-                    "commit": {"oid": INITIAL_HEAD},
+                    "commit": {"oid": HEAD},
                     "state": "COMMENTED",
                     "submittedAt": "2026-08-29T03:01:30Z",
                 },
@@ -1557,7 +1948,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             {
                 "id": 31,
                 "body": (
-                    f"<!-- krr-review phase=initial head={INITIAL_HEAD} "
+                    f"<!-- krr-review phase=initial head={HEAD} "
                     f"body-sha256={BODY_SHA256} -->\n@codex review"
                 ),
                 "created_at": "2026-08-29T03:01:00Z",
@@ -1651,7 +2042,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                                         "nodes": [
                                             {
                                                 "author": {"login": BOT},
-                                                "commit": {"oid": INITIAL_HEAD},
+                                                "commit": {"oid": HEAD},
                                                 "state": "COMMENTED",
                                                 "submittedAt": "2026-08-29T03:01:30Z",
                                             },
