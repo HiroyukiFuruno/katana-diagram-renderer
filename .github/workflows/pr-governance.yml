@@ -23,6 +23,96 @@ permissions:
   pull-requests: read
 
 jobs:
+  preflight-workflow-run-source:
+    # A foreign or deleted-fork workflow_run is outside this repository's
+    # governance domain.  Classify it before entering the cancelling shared
+    # dispatcher lock, so such an event cannot cancel a local generation.
+    name: Preflight workflow_run governance source
+    if: ${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ((github.event.workflow_run.name == 'PR governance review sensor' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review' || github.event.workflow_run.event == 'pull_request_review_comment')) || ((github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'release-preflight') && github.event.workflow_run.event == 'pull_request'))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      reconcile: ${{ steps.scope.outputs.reconcile }}
+      valid: ${{ steps.scope.outputs.valid }}
+    steps:
+      - name: Exclude unavailable fork sources before dispatcher lock
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          repository_valid = re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
+          event_name = os.environ.get("EVENT_NAME", "")
+          reconcile = True
+          valid = True
+
+          def request(path):
+              result = subprocess.run(
+                  ["gh", "api", "--hostname", "github.com", path],
+                  capture_output=True, text=True, check=False,
+              )
+              if result.returncode != 0:
+                  return None
+              try:
+                  value = json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  return None
+              return value if isinstance(value, dict) else None
+
+          if event_name == "workflow_run":
+              run_id = os.environ.get("WORKFLOW_RUN_ID", "")
+              if not repository_valid or re.fullmatch(r"[1-9][0-9]*", run_id) is None:
+                  valid = False
+              else:
+                  repo = request(f"repos/{repository}")
+                  default_branch = repo.get("default_branch") if isinstance(repo, dict) else None
+                  run = request(f"repos/{repository}/actions/runs/{run_id}")
+                  pulls = run.get("pull_requests") if isinstance(run, dict) else None
+                  source = pulls[0] if isinstance(pulls, list) and len(pulls) == 1 and isinstance(pulls[0], dict) else None
+                  number = source.get("number") if isinstance(source, dict) else None
+                  if not isinstance(default_branch, str) or not default_branch or type(number) is not int or number < 1:
+                      valid = False
+                  else:
+                      pull = request(f"repos/{repository}/pulls/{number}")
+                      base = pull.get("base") if isinstance(pull, dict) else None
+                      head = pull.get("head") if isinstance(pull, dict) else None
+                      if not isinstance(pull, dict) or type(pull.get("number")) is not int or pull.get("number") != number or not isinstance(head, dict) or "repo" not in head:
+                          valid = False
+                      else:
+                          head_repo = head["repo"]
+                          # Only explicit, well-formed foreign/deleted sources
+                          # bypass reconciliation. Every ambiguity arms first.
+                          if head_repo is None:
+                              reconcile = False
+                          elif not isinstance(head_repo, dict):
+                              valid = False
+                          else:
+                              head_name = head_repo.get("full_name")
+                              if not isinstance(head_name, str) or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", head_name) is None:
+                                  valid = False
+                              elif head_name != repository:
+                                  reconcile = False
+                          if reconcile and valid:
+                              if not isinstance(base, dict) or "repo" not in base or not isinstance(base["repo"], dict):
+                                  valid = False
+                              elif base["repo"].get("full_name") != repository or base.get("ref") != default_branch:
+                                  valid = False
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("reconcile=" + ("true" if reconcile else "false") + "\n")
+              output.write("valid=" + ("true" if valid else "false") + "\n")
+          PY
+
   establish-resolver-failure-barrier:
     # `resolve_event` has to inspect the mutable open-PR snapshot before it
     # can choose a targeted invalidation.  Put the App-bound repository-wide
@@ -30,7 +120,8 @@ jobs:
     # cancellation can then only leave this context required, never expose a
     # former trusted success.
     name: Establish resolver-failure merge barrier
-    if: ${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ((github.event.workflow_run.name == 'PR governance review sensor' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review' || github.event.workflow_run.event == 'pull_request_review_comment')) || ((github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'release-preflight') && github.event.workflow_run.event == 'pull_request'))) }}
+    needs: preflight-workflow-run-source
+    if: ${{ needs.preflight-workflow-run-source.outputs.reconcile == 'true' && github.run_attempt == 1 && (github.event_name != 'workflow_run' || ((github.event.workflow_run.name == 'PR governance review sensor' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review' || github.event.workflow_run.event == 'pull_request_review_comment')) || ((github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'release-preflight') && github.event.workflow_run.event == 'pull_request'))) }}
     environment: pr-governance
     runs-on: ubuntu-latest
     # Share the arbiter generation lock before creating marker credentials.
@@ -44,7 +135,7 @@ jobs:
     outputs:
       default_branch: ${{ steps.source.outputs.default_branch }}
       default_head: ${{ steps.source.outputs.default_head }}
-      reconcile: ${{ steps.scope.outputs.reconcile }}
+      reconcile: ${{ needs.preflight-workflow-run-source.outputs.reconcile }}
     steps:
       - name: Bind resolver-failure barrier to trusted default workflow source
         id: source
@@ -102,80 +193,7 @@ jobs:
               output.write(f"default_head={workflow_sha.lower()}\n")
           PY
 
-      - name: Exclude unavailable fork sources before barrier mutation
-        id: scope
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
-          DEFAULT_BRANCH: ${{ steps.source.outputs.default_branch }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-
-          repository = os.environ["GITHUB_REPOSITORY"]
-          event_name = os.environ.get("EVENT_NAME", "")
-          default_branch = os.environ.get("DEFAULT_BRANCH", "")
-          reconcile = True
-
-          def request(path):
-              result = subprocess.run(
-                  ["gh", "api", "--hostname", "github.com", path],
-                  capture_output=True, text=True, check=False,
-              )
-              if result.returncode != 0:
-                  raise SystemExit("Unable to bind resolver-failure barrier event source.")
-              try:
-                  return json.loads(result.stdout)
-              except json.JSONDecodeError as error:
-                  raise SystemExit("Resolver-failure barrier event source is not JSON.") from error
-
-          if event_name == "workflow_run":
-              run_id = os.environ.get("WORKFLOW_RUN_ID", "")
-              if re.fullmatch(r"[1-9][0-9]*", run_id) is None:
-                  raise SystemExit("Resolver-failure barrier workflow_run id is invalid.")
-              run = request(f"repos/{repository}/actions/runs/{run_id}")
-              pulls = run.get("pull_requests") if isinstance(run, dict) else None
-              source = pulls[0] if isinstance(pulls, list) and len(pulls) == 1 and isinstance(pulls[0], dict) else None
-              number = source.get("number") if isinstance(source, dict) else None
-              if type(number) is not int or number < 1:
-                  raise SystemExit("Resolver-failure barrier workflow_run source is invalid.")
-              pull = request(f"repos/{repository}/pulls/{number}")
-              base = pull.get("base") if isinstance(pull, dict) else None
-              head = pull.get("head") if isinstance(pull, dict) else None
-              if not isinstance(pull, dict) or pull.get("number") != number or not isinstance(head, dict) or "repo" not in head:
-                  raise SystemExit("Resolver-failure barrier workflow_run source is invalid.")
-              head_repo = head["repo"]
-              # A deleted fork is represented by null. A well-formed foreign
-              # full_name is likewise outside this repository's domain.
-              if head_repo is None:
-                  reconcile = False
-              elif not isinstance(head_repo, dict):
-                  raise SystemExit("Resolver-failure barrier local source is invalid.")
-              else:
-                  head_name = head_repo.get("full_name")
-                  if isinstance(head_name, str) and head_name != repository:
-                      reconcile = False
-                  elif not isinstance(head_name, str):
-                      raise SystemExit("Resolver-failure barrier local source is invalid.")
-              # Local/default-base metadata remains fail-closed. Do not turn
-              # a malformed local source into a fork no-op.
-              if reconcile:
-                  if not isinstance(base, dict) or "repo" not in base or not isinstance(base["repo"], dict):
-                      raise SystemExit("Resolver-failure barrier local source is invalid.")
-                  if base["repo"].get("full_name") != repository:
-                      raise SystemExit("Resolver-failure barrier local source is invalid.")
-                  if default_branch and base.get("ref") != default_branch:
-                      raise SystemExit("Resolver-failure barrier local source is invalid.")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("reconcile=" + ("true" if reconcile else "false") + "\n")
-          PY
-
       - name: Create resolver-failure barrier marker write token
-        if: steps.scope.outputs.reconcile == 'true'
         id: marker-write
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -186,7 +204,6 @@ jobs:
           permission-checks: write
 
       - name: Create resolver-failure barrier marker read token
-        if: steps.scope.outputs.reconcile == 'true'
         id: marker-read
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -197,7 +214,6 @@ jobs:
           permission-checks: read
 
       - name: Publish resolver-failure barrier App marker
-        if: steps.scope.outputs.reconcile == 'true'
         env:
           CHECK_WRITE_TOKEN: ${{ steps.marker-write.outputs.token }}
           CHECK_READ_TOKEN: ${{ steps.marker-read.outputs.token }}
@@ -242,7 +258,6 @@ jobs:
           PY
 
       - name: Create resolver-failure barrier branch-protection token
-        if: steps.scope.outputs.reconcile == 'true'
         id: protection-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -253,7 +268,6 @@ jobs:
           permission-administration: write
 
       - name: Activate resolver-failure merge barrier
-        if: steps.scope.outputs.reconcile == 'true'
         env:
           ADMIN_TOKEN: ${{ steps.protection-token.outputs.token }}
           DEFAULT_BRANCH: ${{ steps.source.outputs.default_branch }}
@@ -312,6 +326,17 @@ jobs:
           expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[*expected_required["checks"],{"context":context,"app_id":app_id}]; expected_required["contexts"]=[*expected_required["contexts"],context]
           if response is None or after_records.count((context,app_id))!=1 or canonical(after)!=canonical(expected):
               raise SystemExit("Resolver-failure barrier atomic activation failed; manual recovery is required.")
+          PY
+
+      - name: Fail closed after classification barrier activation
+        env:
+          EVENT_SOURCE_VALID: ${{ needs.preflight-workflow-run-source.outputs.valid }}
+        run: |
+          python3 - <<'PY'
+          import os
+
+          if os.environ.get("EVENT_SOURCE_VALID") != "true":
+              raise SystemExit("Workflow_run governance source classification is invalid; barrier remains active.")
           PY
 
   resolve_event:

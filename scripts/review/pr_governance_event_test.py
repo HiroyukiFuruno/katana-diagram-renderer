@@ -1072,24 +1072,48 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
     def test_workflow_run_fork_scope_is_resolved_before_barrier_mutation(self) -> None:
         """Fork workflow_run sources must be a pre-barrier no-op, not a late failure."""
         scope_match = re.search(
-            r"- name: Exclude unavailable fork sources before barrier mutation.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
             re.DOTALL,
         )
         self.assertIsNotNone(scope_match); assert scope_match is not None
+        preflight = self.workflow[
+            self.workflow.index("  preflight-workflow-run-source:"):
+            self.workflow.index("  establish-resolver-failure-barrier:")
+        ]
+        self.assertNotIn("environment:", preflight)
+        self.assertNotIn("secrets.", preflight)
+        self.assertNotIn("concurrency:", preflight)
+        self.assertRegex(
+            preflight,
+            r"permissions:\n      actions: read\n      contents: read\n      pull-requests: read",
+        )
+        establish = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        self.assertIn("needs: preflight-workflow-run-source", establish)
+        self.assertIn("needs.preflight-workflow-run-source.outputs.reconcile == 'true'", establish)
+        self.assertIn("needs.preflight-workflow-run-source.outputs.valid", establish)
+        self.assertLess(establish.index("concurrency:"), establish.index("Create resolver-failure barrier marker write token"))
+        self.assertLess(establish.index("Activate resolver-failure merge barrier"), establish.index("Fail closed after classification barrier activation"))
+        self.assertIn("EVENT_SOURCE_VALID: ${{ needs.preflight-workflow-run-source.outputs.valid }}", establish)
+        self.assertIn("needs: establish-resolver-failure-barrier", self.workflow[self.workflow.index("  resolve_event:"):])
+        self.assertIn("needs: resolve_event", self.workflow[self.workflow.index("  reconcile-all-open:"):])
         marker = self.workflow.index("- name: Create resolver-failure barrier marker write token")
-        scope = self.workflow.index("- name: Exclude unavailable fork sources before barrier mutation")
+        scope = self.workflow.index("- name: Exclude unavailable fork sources before dispatcher lock")
         self.assertLess(scope, marker)
 
-        def run_scope(run: dict[str, object], pull: dict[str, object] | None, expected_code: int, expected_reconcile: str | None) -> None:
+        def run_scope(run: dict[str, object], pull: dict[str, object] | None, expected_reconcile: str, expected_valid: str, mode: str = "") -> None:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 output = directory / "scope-output"
                 fake = directory / "gh"
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
-                    "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
-                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                    "  *'/actions/runs/9'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${RUN}\" ;;\n"
+                    "  *'/pulls/'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${PULL}\" ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\n"
                     "esac\n",
                     encoding="utf-8",
@@ -1103,6 +1127,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "GITHUB_OUTPUT": str(output),
                     "RUN": json.dumps(run),
                     "PULL": json.dumps(pull),
+                    "MODE": mode,
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run(
@@ -1112,10 +1137,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     text=True,
                     check=False,
                 )
-                self.assertEqual(result.returncode, expected_code, result.stderr)
-                if expected_reconcile is not None:
-                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
-                    self.assertEqual(values["reconcile"], expected_reconcile)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(values["reconcile"], expected_reconcile)
+                self.assertEqual(values["valid"], expected_valid)
+                self.assertNotIn("\\n", output.read_text(encoding="utf-8"))
 
         def workflow_run(name: str, event: str) -> dict[str, object]:
             return {
@@ -1148,14 +1174,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("PR governance review sensor", "pull_request_review_comment"),
         ):
             with self.subTest(name=name, event=event, source="fork"):
-                run_scope(workflow_run(name, event), fork_pull, 0, "false")
+                run_scope(workflow_run(name, event), fork_pull, "false", "true")
             with self.subTest(name=name, event=event, source="deleted-fork"):
-                run_scope(workflow_run(name, event), unavailable_fork_pull, 0, "false")
+                run_scope(workflow_run(name, event), unavailable_fork_pull, "false", "true")
             with self.subTest(name=name, event=event, source="local"):
-                run_scope(workflow_run(name, event), local_pull, 0, "true")
+                run_scope(workflow_run(name, event), local_pull, "true", "true")
 
-        # Ambiguous or malformed metadata must fail closed while the old
-        # barrier remains untouched; it must not be treated as a fork no-op.
+        # Ambiguous or malformed metadata arms the barrier but marks the
+        # source invalid; the later fence must fail closed before resolution.
         malformed_sources = (
             ("missing-pull-requests", {key: value for key, value in workflow_run("CI", "pull_request").items() if key != "pull_requests"}, local_pull),
             ("empty-pull-requests", {**workflow_run("CI", "pull_request"), "pull_requests": []}, local_pull),
@@ -1166,16 +1192,26 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("head-repo-key-missing", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40}}),
             ("head-repo-wrong-type", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": "invalid"}}),
             ("malformed-local-head", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {}}}),
+            ("empty-foreign-name", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {"full_name": ""}}}),
+            ("whitespace-foreign-name", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {"full_name": " "}}}),
+            ("nul-foreign-name", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {"full_name": "fork/\x00repo"}}}),
+            ("extra-segment-foreign-name", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repo/extra"}}}),
+            ("invalid-slug-foreign-name", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {"full_name": "fork repo"}}}),
+            ("boolean-source-number", {**workflow_run("CI", "pull_request"), "pull_requests": [{"number": True}]}, local_pull),
+            ("boolean-pull-number", {**workflow_run("CI", "pull_request"), "pull_requests": [{"number": 1}]}, {**local_pull, "number": True}),
             ("non-default-base", workflow_run("CI", "pull_request"), {**local_pull, "base": {"ref": "release/v0.4", "repo": {"full_name": "owner/repository"}}}),
         )
         for label, run, pull in malformed_sources:
             with self.subTest(source=label):
-                run_scope(run, pull, 1, None)
+                run_scope(run, pull, "true", "false")
+        for mode in ("api-failure", "invalid-json"):
+            with self.subTest(source=mode):
+                run_scope(workflow_run("CI", "pull_request"), local_pull, "true", "false", mode)
 
     def test_workflow_run_out_of_scope_race_keeps_reconciliation_without_workflow_blob(self) -> None:
         """A resolver re-read may observe a deleted fork after scope accepted its local source."""
         scope_match = re.search(
-            r"- name: Exclude unavailable fork sources before barrier mutation.*?python3 - <<'PY'\n(.*?)\n          PY",
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
             re.DOTALL,
         )
@@ -1223,6 +1259,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                 "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                 "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                 "  *'/contents/'*) echo blob >> \"${GH_LOG}\"; exit 92 ;;\n"
                 "  *'--method POST'*|*'--method PATCH'*|*'/protection/'*) echo mutation >> \"${GH_LOG}\"; exit 93 ;;\n"
                 "  *) exit 91 ;;\nesac\n",
@@ -1492,9 +1529,16 @@ raise SystemExit(91)
                     "continuation_index": environment_for(name, branch).get("CONTINUATION_INDEX", "1"),
                 }), encoding="utf-8")
                 environment = os.environ | environment_for(name, branch) | {
-                    "PULLS": json.dumps(fixture_pages), "GH_LOG": str(log), "GH_STATE": str(state),
+                    "GH_LOG": str(log), "GH_STATE": str(state),
                     "GITHUB_OUTPUT": str(output), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
+                # Keep the 600-PR fixture on disk: Linux rejects a single
+                # execve environment string at roughly 128 KiB (E2BIG).
+                self.assertNotIn("PULLS", environment)
+                self.assertTrue(all(
+                    len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024
+                    for key, value in environment.items()
+                ))
                 result = subprocess.run([sys.executable, "-c", programs[name]], env=environment, capture_output=True, text=True, check=False)
                 mutations = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
                 return result, mutations, output.read_text(encoding="utf-8") if output.exists() else ""
@@ -2196,7 +2240,7 @@ raise SystemExit(91)
         self.assertIsNotNone(condition); assert condition is not None
         self.assertEqual(
             condition.group("value"),
-            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
+            "${{ needs.preflight-workflow-run-source.outputs.reconcile == 'true' && github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
             "(github.event.workflow_run.name == 'PR governance review sensor' && "
             "(github.event.workflow_run.event == 'pull_request' || "
             "github.event.workflow_run.event == 'pull_request_review' || "

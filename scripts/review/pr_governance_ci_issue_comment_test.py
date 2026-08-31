@@ -43,36 +43,56 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         self.assertRegex(push.group("body"), r"(?m)^    paths:")
 
     def test_workflow_run_filter_is_job_level_and_allows_only_trusted_pr_events(self) -> None:
-        """Allow only the workflow/event pairs that can affect an open PR."""
-        barrier = re.search(
-            r"(?ms)^  establish-resolver-failure-barrier:\n"
-            r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
-            self.dispatcher,
-        )
-        self.assertIsNotNone(barrier)
-        body = barrier.group("body")
-        if_match = re.search(r"(?m)^    if:\s*(?P<expression>.+)$", body)
-        self.assertIsNotNone(
-            if_match,
-            "The workflow_run allowlist must guard the barrier job itself, before steps start.",
-        )
-        steps_position = body.find("\n    steps:")
-        self.assertGreater(steps_position, -1)
-        assert if_match is not None
-        self.assertLess(if_match.start(), steps_position)
+        """Classify the source before the shared barrier can be mutated."""
+        job_bodies = {}
+        for job in ("preflight-workflow-run-source", "establish-resolver-failure-barrier"):
+            match = re.search(
+                rf"(?ms)^  {re.escape(job)}:\n"
+                rf"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
+                self.dispatcher,
+            )
+            self.assertIsNotNone(match, job)
+            assert match is not None
+            job_bodies[job] = match.group("body")
 
-        expression = if_match.group("expression").strip()
-        self.assertEqual(
-            expression,
-            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
+        allowlist = (
+            "github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
             "(github.event.workflow_run.name == 'PR governance review sensor' && "
             "(github.event.workflow_run.event == 'pull_request' || "
             "github.event.workflow_run.event == 'pull_request_review' || "
             "github.event.workflow_run.event == 'pull_request_review_comment')) || "
             "((github.event.workflow_run.name == 'CI' || "
             "github.event.workflow_run.name == 'release-preflight') && "
-            "github.event.workflow_run.event == 'pull_request'))) }}",
+            "github.event.workflow_run.event == 'pull_request')))"
         )
+        expected = "${{ " + allowlist + " }}"
+        preflight = job_bodies["preflight-workflow-run-source"]
+        barrier = job_bodies["establish-resolver-failure-barrier"]
+        for body, label in ((preflight, "preflight"), (barrier, "barrier")):
+            if_match = re.search(r"(?m)^    if:\s*(?P<expression>.+)$", body)
+            self.assertIsNotNone(if_match, label)
+            steps_position = body.find("\n    steps:")
+            self.assertGreater(steps_position, -1, label)
+            assert if_match is not None
+            self.assertLess(if_match.start(), steps_position, label)
+            expression = if_match.group("expression").strip()
+            self.assertEqual(
+                expression,
+                expected
+                if label == "preflight"
+                else "${{ needs.preflight-workflow-run-source.outputs.reconcile == 'true' && "
+                + allowlist
+                + " }}",
+            )
+
+        self.assertIn("outputs:\n      reconcile: ${{ steps.scope.outputs.reconcile }}", preflight)
+        self.assertIn("valid: ${{ steps.scope.outputs.valid }}", preflight)
+        self.assertIn("id: scope", preflight)
+        self.assertIn('output.write("reconcile="', preflight)
+        self.assertIn('output.write("valid="', preflight)
+        self.assertIn("EVENT_SOURCE_VALID: ${{ needs.preflight-workflow-run-source.outputs.valid }}", barrier)
+        self.assertIn('if os.environ.get("EVENT_SOURCE_VALID") != "true":', barrier)
+        self.assertIn("barrier remains active", barrier)
 
         allowed_events = {
             "PR governance review sensor": {
