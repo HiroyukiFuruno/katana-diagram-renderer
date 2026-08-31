@@ -341,6 +341,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         pulls = [[
             {"number": 72, "state": "open", "body": "Fixes #64", **local},
             {"number": 73, "state": "open", "body": "Closes #64", **local},
+            {"number": 74, "state": "open", "body": "Fixes #64", "base": local["base"], "head": {"repo": None}},
         ]]
         cases = (
             ("CI", ".github/workflows/test-and-build.yml@master", "pull_request", "[]"),
@@ -1029,6 +1030,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             {"number": 64, "state": "open", "body": "Fixes #1", "draft": False, "base": local_base, "head": {"sha": "d" * 40, "repo": {"full_name": "owner/repository"}}},
             {"number": 65, "state": "open", "body": "Fixes #2", "draft": False, "base": local_base, "head": {"sha": "e" * 40, "repo": {"full_name": "owner/repository"}}},
             {"number": 66, "state": "open", "body": "Fixes #3", "draft": False, "base": local_base, "head": {"repo": {"full_name": "fork/repository"}}},
+            # Deleted/unavailable fork metadata is outside this repository's
+            # governance domain and must not fail the all-open local scan.
+            {"number": 67, "state": "open", "body": "Fixes #4", "draft": False, "base": local_base, "head": {"repo": None}},
         ]]
         for pages, expected in ((pulls, 0), ([[pulls[0][0]], [pulls[0][0]]], 1)):
             with self.subTest(duplicate=expected == 1), tempfile.TemporaryDirectory() as temporary:
@@ -1065,6 +1069,200 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     self.assertEqual(values["writer_head"], "a" * 40)
                     self.assertEqual(values["default_branch"], "master")
 
+    def test_workflow_run_fork_scope_is_resolved_before_barrier_mutation(self) -> None:
+        """Fork workflow_run sources must be a pre-barrier no-op, not a late failure."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before barrier mutation.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        marker = self.workflow.index("- name: Create resolver-failure barrier marker write token")
+        scope = self.workflow.index("- name: Exclude unavailable fork sources before barrier mutation")
+        self.assertLess(scope, marker)
+
+        def run_scope(run: dict[str, object], pull: dict[str, object] | None, expected_code: int, expected_reconcile: str | None) -> None:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                output = directory / "scope-output"
+                fake = directory / "gh"
+                fake.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                    "  *) exit 91 ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": "owner/repository",
+                    "EVENT_NAME": "workflow_run",
+                    "WORKFLOW_RUN_ID": "9",
+                    "DEFAULT_BRANCH": "master",
+                    "GITHUB_OUTPUT": str(output),
+                    "RUN": json.dumps(run),
+                    "PULL": json.dumps(pull),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run(
+                    [sys.executable, "-c", self._workflow_program(scope_match)],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, expected_code, result.stderr)
+                if expected_reconcile is not None:
+                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(values["reconcile"], expected_reconcile)
+
+        def workflow_run(name: str, event: str) -> dict[str, object]:
+            return {
+                "name": name,
+                "event": event,
+                "status": "completed",
+                "id": 9,
+                "run_number": 1,
+                "run_attempt": 1,
+                "pull_requests": [{"number": 72}],
+            }
+
+        local_pull = {
+            "number": 72,
+            "state": "open",
+            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+            "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+        }
+        fork_pull = {
+            **local_pull,
+            "head": {"sha": "a" * 40, "repo": {"full_name": "fork/repository"}},
+        }
+        unavailable_fork_pull = {**local_pull, "head": {"sha": "a" * 40, "repo": None}}
+
+        for name, event in (
+            ("CI", "pull_request"),
+            ("release-preflight", "pull_request"),
+            ("PR governance review sensor", "pull_request"),
+            ("PR governance review sensor", "pull_request_review"),
+            ("PR governance review sensor", "pull_request_review_comment"),
+        ):
+            with self.subTest(name=name, event=event, source="fork"):
+                run_scope(workflow_run(name, event), fork_pull, 0, "false")
+            with self.subTest(name=name, event=event, source="deleted-fork"):
+                run_scope(workflow_run(name, event), unavailable_fork_pull, 0, "false")
+            with self.subTest(name=name, event=event, source="local"):
+                run_scope(workflow_run(name, event), local_pull, 0, "true")
+
+        # Ambiguous or malformed metadata must fail closed while the old
+        # barrier remains untouched; it must not be treated as a fork no-op.
+        malformed_sources = (
+            ("missing-pull-requests", {key: value for key, value in workflow_run("CI", "pull_request").items() if key != "pull_requests"}, local_pull),
+            ("empty-pull-requests", {**workflow_run("CI", "pull_request"), "pull_requests": []}, local_pull),
+            ("multiple-pull-requests", {**workflow_run("CI", "pull_request"), "pull_requests": [{"number": 72}, {"number": 73}]}, local_pull),
+            ("missing-source-number", {**workflow_run("CI", "pull_request"), "pull_requests": [{}]}, local_pull),
+            ("missing-head", workflow_run("CI", "pull_request"), {key: value for key, value in local_pull.items() if key != "head"}),
+            ("head-not-object", workflow_run("CI", "pull_request"), {**local_pull, "head": "invalid"}),
+            ("head-repo-key-missing", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40}}),
+            ("head-repo-wrong-type", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": "invalid"}}),
+            ("malformed-local-head", workflow_run("CI", "pull_request"), {**local_pull, "head": {"sha": "a" * 40, "repo": {}}}),
+            ("non-default-base", workflow_run("CI", "pull_request"), {**local_pull, "base": {"ref": "release/v0.4", "repo": {"full_name": "owner/repository"}}}),
+        )
+        for label, run, pull in malformed_sources:
+            with self.subTest(source=label):
+                run_scope(run, pull, 1, None)
+
+    def test_workflow_run_out_of_scope_race_keeps_reconciliation_without_workflow_blob(self) -> None:
+        """A resolver re-read may observe a deleted fork after scope accepted its local source."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before barrier mutation.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        resolver_match = re.search(
+            r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); self.assertIsNotNone(resolver_match)
+        assert scope_match is not None and resolver_match is not None
+        scope_program = self._workflow_program(scope_match)
+        resolver_program = self._workflow_program(resolver_match)
+        base = {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}}
+        local_head = {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}
+        local_source = {"number": 72, "state": "open", "base": base, "head": local_head}
+        resolver_source = {"number": 72, "base": base, "head": {"sha": "a" * 40, "repo": None}}
+        resolver_run = {
+            "name": "CI", "event": "pull_request", "status": "completed", "id": 9,
+            "run_number": 1, "run_attempt": 1, "head_sha": "a" * 40,
+            "path": ".github/workflows/test-and-build.yml@master",
+            "repository": {"full_name": "owner/repository"}, "pull_requests": [resolver_source],
+        }
+        all_open = [[
+            {**local_source, "body": "Fixes #64", "draft": False, "head": {"sha": "a" * 40, "repo": None}},
+            {"number": 73, "state": "open", "body": "Fixes #65", "draft": False, "base": base, "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}}},
+        ]]
+
+        def execute(program: str, run: dict[str, object], output: Path, directory: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-c", program],
+                env=os.environ | {
+                    "GITHUB_REPOSITORY": "owner/repository", "EVENT_NAME": "workflow_run",
+                    "WORKFLOW_RUN_ID": "9", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                    "RUN": json.dumps(run), "PULL": json.dumps(local_source), "PULLS": json.dumps(all_open),
+                    "GH_LOG": str(directory / "gh.log"), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                },
+                capture_output=True, text=True, check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            fake = directory / "gh"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                "  *'/contents/'*) echo blob >> \"${GH_LOG}\"; exit 92 ;;\n"
+                "  *'--method POST'*|*'--method PATCH'*|*'/protection/'*) echo mutation >> \"${GH_LOG}\"; exit 93 ;;\n"
+                "  *) exit 91 ;;\nesac\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            scope_output = directory / "scope-output"
+            scope_run = {"id": 9, "pull_requests": [{"number": 72}]}
+            scope = execute(scope_program, scope_run, scope_output, directory)
+            self.assertEqual(scope.returncode, 0, scope.stderr)
+            self.assertIn("reconcile=true", scope_output.read_text(encoding="utf-8"))
+
+            resolver_output = directory / "resolver-output"
+            resolved = execute(resolver_program, resolver_run, resolver_output, directory)
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            values = dict(line.split("=", 1) for line in resolver_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["reconcile"], "true")
+            self.assertEqual(values["event_targets"], "[]")
+            self.assertEqual(values["priority_targets"], "[]")
+            log = (directory / "gh.log").read_text(encoding="utf-8") if (directory / "gh.log").exists() else ""
+            self.assertNotIn("blob", log)
+            self.assertNotIn("mutation", log)
+
+            for label, malformed_head in (
+                ("missing-head", None),
+                ("head-not-object", "invalid"),
+                ("repo-key-missing", {"sha": "a" * 40}),
+                ("repo-wrong-type", {"sha": "a" * 40, "repo": "invalid"}),
+            ):
+                with self.subTest(shape=label):
+                    malformed_source = dict(resolver_source)
+                    if malformed_head is None:
+                        malformed_source.pop("head")
+                    else:
+                        malformed_source["head"] = malformed_head
+                    result = execute(resolver_program, {**resolver_run, "pull_requests": [malformed_source]}, directory / f"{label}-output", directory)
+                    self.assertNotEqual(result.returncode, 0)
+                    log = (directory / "gh.log").read_text(encoding="utf-8") if (directory / "gh.log").exists() else ""
+                    self.assertNotIn("mutation", log)
+
     def test_priority_event_preempts_the_current_reconciler_and_preserves_affected_order(self) -> None:
         # sourceを持つeventだけが全件走査を中断する。通常の全件走査は
         # current snapshotを取り直すが、event由来のcloser集合はwriterへ順序を渡す。
@@ -1075,6 +1273,256 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn("AFFECTED: ${{ steps.current-targets.outputs.all_invalidation_chunk_1 }}", self.workflow)
         self.assertIn("cancel-in-progress: ${{ needs.resolve_event.outputs.priority_targets != '[]' }}", self.workflow)
         self.assertIn("WRITER_TARGETS: ${{ steps.current-targets.outputs.event_targets }}", self.workflow)
+
+    def test_every_governance_snapshot_has_explicit_nullable_fork_boundary(self) -> None:
+        """Every embedded snapshot program executes null-fork and malformed-shape cases."""
+        step_names = (
+            "Resolve current open pull requests from the trusted default branch",
+            "Re-enumerate every current local governance pull request",
+            "Release complete affected-head merge barrier only after full pending coverage",
+            "Dispatch one repository-wide governance arbiter segment",
+            "Dispatch second repository-wide governance arbiter segment",
+            "Dispatch third repository-wide governance arbiter segment",
+            "Dispatch fourth repository-wide governance arbiter segment",
+        )
+        programs: dict[str, str] = {}
+        for name in step_names:
+            match = re.search(
+                rf"- name: {re.escape(name)}.*?python3 - <<'PY'\n(.*?)\n          PY",
+                self.workflow,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, name); assert match is not None
+            programs[name] = self._workflow_program(match)
+
+        all_targets = list(range(1, 601))
+        heads = {number: f"{number:040x}" for number in all_targets}
+        snapshots = [[number, heads[number], False] for number in all_targets]
+        manifest = [[number, 100_000 + number] for number in all_targets]
+
+        def pages(head: object, branch: str, count: int) -> list[list[dict[str, object]]]:
+            values = [[
+                {
+                    "number": number,
+                    "state": "open",
+                    "draft": False,
+                    "base": {"ref": branch, "repo": {"full_name": "owner/repository"}},
+                    "head": {"sha": heads[number], "repo": {"full_name": "owner/repository"}},
+                }
+                for number in range(start, min(start + 100, count + 1))
+            ] for start in range(1, count + 1, 100)]
+            values[0].append({
+                "number": 1001,
+                "state": "open",
+                "draft": False,
+                "base": {"ref": branch, "repo": {"full_name": "owner/repository"}},
+                "head": head,
+            })
+            return values
+
+        fake_gh = """#!/usr/bin/env python3
+import json, os, sys
+
+arguments = sys.argv[1:]
+joined = " ".join(arguments)
+with open(os.path.join(os.path.dirname(__file__), "fixture.json"), encoding="utf-8") as fixture_file:
+    fixture = json.load(fixture_file)
+repository = os.environ.get("GITHUB_REPOSITORY", fixture["repository"])
+branch = os.environ.get("DEFAULT_BRANCH", fixture["branch"])
+log = fixture["log"]
+state = fixture["state"]
+head = "a" * 40
+context = "KRR / PR governance affected-head barrier"
+app_id = 4_766_933
+bot = "katana-rust-pr-governance-hf[bot]"
+
+def record(value):
+    with open(log, "a", encoding="utf-8") as output:
+        output.write(value + "\\n")
+
+def load_state():
+    try:
+        with open(state, encoding="utf-8") as source:
+            return json.load(source)
+    except FileNotFoundError:
+        return {"dispatched": False, "barrier": True}
+
+def save_state(value):
+    with open(state, "w", encoding="utf-8") as output:
+        json.dump(value, output)
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")))
+    raise SystemExit(0)
+
+source = {"id": 9, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@" + branch, "event": "issues", "status": "in_progress", "run_attempt": 1, "run_number": 1, "head_branch": branch, "head_sha": head, "repository": {"full_name": repository}, "created_at": "2026-09-01T00:00:00Z"}
+
+if "pulls?state=open" in joined:
+    emit(fixture["pulls"])
+if joined.endswith("/git/ref/heads/" + branch):
+    emit({"object": {"sha": head}})
+if joined.endswith("repos/" + repository):
+    emit({"default_branch": branch})
+if "/contents/" in joined:
+    emit({"sha": "b" * 40})
+if "/check-runs/" in joined:
+    identifier = int(joined.rsplit("/", 1)[1])
+    number = identifier - 100_000
+    pull_head = f"{number:040x}"
+    emit({"id": identifier, "name": "KRR / PR governance (trusted check)", "head_sha": pull_head, "external_id": f"krr-governance/v1/{pull_head}/dispatcher-9", "status": "in_progress", "conclusion": None, "app": {"id": app_id}, "details_url": f"https://github.com/{repository}/actions/runs/9?dispatcher_run_id=9&carry_pending=0"})
+if "/branches/" in joined and "/protection" in joined:
+    value = load_state()
+    if "--method DELETE" in joined:
+        record("release")
+        value["barrier"] = False
+        save_state(value)
+        emit([])
+    if "--method POST" in joined:
+        record("protection-post")
+        value["barrier"] = True
+        save_state(value)
+        emit([context])
+    checks = [{"context": context, "app_id": app_id}] if value["barrier"] else []
+    emit({"required_status_checks": {"checks": checks, "contexts": [item["context"] for item in checks], "strict": True}})
+if "/actions/runs/" in joined:
+    identifier = int(joined.rsplit("/", 1)[1])
+    if identifier == 9:
+        emit(source)
+    index = identifier - 90_000
+    emit({"id": identifier, "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={index}", "path": ".github/workflows/pr-governance-status-writer.yml@" + branch, "event": "workflow_dispatch", "repository": {"full_name": repository}, "head_branch": branch, "head_sha": head, "status": "completed", "conclusion": "success", "run_number": index, "run_attempt": 1, "actor": {"login": bot, "type": "Bot"}, "triggering_actor": {"login": bot, "type": "Bot"}})
+if "/actions/workflows/pr-governance.yml/runs?" in joined:
+    emit([{"workflow_runs": [source]}])
+if "/actions/workflows/pr-governance-status-writer.yml/runs?" in joined:
+    value = load_state()
+    completed = json.loads(os.environ.get("COMPLETED_WRITER_RUN_IDS", fixture["completed"]))
+    runs = [{"id": identifier, "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={identifier - 90_000}", "path": ".github/workflows/pr-governance-status-writer.yml@" + branch, "event": "workflow_dispatch", "repository": {"full_name": repository}, "head_branch": branch, "head_sha": head, "status": "completed", "conclusion": "success", "run_number": identifier - 90_000, "run_attempt": 1, "actor": {"login": bot, "type": "Bot"}, "triggering_actor": {"login": bot, "type": "Bot"}} for identifier in completed]
+    if value["dispatched"]:
+        index = int(os.environ.get("CONTINUATION_INDEX", fixture["continuation_index"]))
+        runs.append({"id": 90_000 + index, "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={index}", "path": ".github/workflows/pr-governance-status-writer.yml@" + branch, "event": "workflow_dispatch", "repository": {"full_name": repository}, "head_branch": branch, "head_sha": head, "status": "queued", "run_number": index, "run_attempt": 1})
+    emit([{"workflow_runs": runs}])
+if "/dispatches" in joined and "--method POST" in joined:
+    record("dispatch")
+    value = load_state()
+    value["dispatched"] = True
+    save_state(value)
+    emit({})
+if "/check-runs" in joined and "--method POST" in joined:
+    record("check-run-terminal")
+    emit({})
+raise SystemExit(91)
+"""
+
+        def environment_for(name: str, branch: str) -> dict[str, str]:
+            common = {
+                "GITHUB_REPOSITORY": "owner/repository",
+                "DEFAULT_BRANCH": branch,
+                "WRITER_HEAD": "a" * 40,
+                "DEFAULT_HEAD": "a" * 40,
+                "DISPATCHER_RUN_ID": "9",
+                "GITHUB_SERVER_URL": "https://github.com",
+                "CHECK_APP_ID": "4766933",
+                "READ_TOKEN": "read",
+                "ADMIN_TOKEN": "admin",
+                "WORKFLOW_REF": f"owner/repository/.github/workflows/pr-governance.yml@refs/heads/{branch}",
+                "WORKFLOW_SHA": "a" * 40,
+                "EVENT_TARGETS": "[]",
+                "EVENT_PRIORITY_TARGETS": "[]",
+            }
+            if name == step_names[0]:
+                return common | {"EVENT_NAME": "schedule"}
+            if name == step_names[1]:
+                return common
+            if name == step_names[2]:
+                barrier_targets = [1]
+                barrier_snapshots = [snapshots[0]]
+                barrier_manifest = [manifest[0]]
+                return common | {
+                    "TARGETS": json.dumps(barrier_targets, separators=(",", ":")),
+                    "TARGET_SNAPSHOTS": json.dumps(barrier_snapshots, separators=(",", ":")),
+                    "PRE_MANIFEST_1": "[]", "PRE_MANIFEST_2": "[]",
+                    "TAIL_MANIFEST_1": json.dumps(barrier_manifest, separators=(",", ":")),
+                    "TAIL_MANIFEST_2": "[]", "DUPLICATE_GOVERNED_HEADS": "[]",
+                }
+            index = step_names.index(name) - 3 + 1
+            completed = list(range(90_001, 90_000 + index))
+            common |= {
+                "WRITER_TARGETS": "[]",
+                "WRITER_ALL_OPEN_SNAPSHOTS": json.dumps(snapshots, separators=(",", ":")),
+                "WRITER_PRESERVED_TARGETS": "[]", "PRESERVED_WRITER_RUN_ID": "0",
+                "WRITER_CHECK_MANIFEST": json.dumps(manifest, separators=(",", ":")),
+                "WRITER_TERMINAL_ORDER": json.dumps(all_targets, separators=(",", ":")),
+                "COMPLETED_WRITER_RUN_IDS": json.dumps(completed, separators=(",", ":")),
+                "TERMINAL_BATCH": json.dumps(all_targets[(index - 1) * 150:index * 150], separators=(",", ":")),
+                "CONTINUATION_INDEX": str(index), "APP_BOT_LOGIN": "katana-rust-pr-governance-hf[bot]",
+            }
+            if index == 1:
+                return common | {
+                    "WRITER_SCOPE": "all", "WRITER_ALL_OPEN_TARGETS": json.dumps(all_targets, separators=(",", ":")),
+                    "WRITER_PREINVALIDATE_TARGETS": "[]", "WRITER_PRE_CHECK_MANIFEST_1": "[]", "WRITER_PRE_CHECK_MANIFEST_2": "[]",
+                    "WRITER_TAIL_CHECK_MANIFEST_1": json.dumps(manifest, separators=(",", ":")), "WRITER_TAIL_CHECK_MANIFEST_2": "[]",
+                    "WRITER_PRESERVED_CHECK_MANIFEST": "[]", "WRITER_CARRY_TARGET_NUMBERS_1": "[]", "WRITER_CARRY_TARGET_NUMBERS_2": "[]",
+                }
+            return common
+
+        missing_head = object()
+        malformed_heads: tuple[tuple[str, object], ...] = (
+            ("missing-head", missing_head),
+            ("head-not-object", "invalid"),
+            ("repo-key-missing", {"sha": "f" * 40}),
+            ("repo-wrong-type", {"sha": "f" * 40, "repo": "invalid"}),
+        )
+
+        def execute(name: str, head: object, branch: str = "master") -> tuple[subprocess.CompletedProcess[str], list[str], str]:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                fake = directory / "gh"; log = directory / "gh.log"; state = directory / "gh.state"; output = directory / "output"
+                fake.write_text(fake_gh, encoding="utf-8")
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                unavailable = {"sha": "f" * 40, "repo": None}
+                count = 1 if name == step_names[2] else len(all_targets)
+                if head is missing_head:
+                    fixture_pages = pages(unavailable, branch, count)
+                    del fixture_pages[0][-1]["head"]
+                else:
+                    fixture_pages = pages(unavailable if head is None else head, branch, count)
+                fixture = directory / "fixture.json"
+                fixture.write_text(json.dumps({
+                    "repository": "owner/repository", "branch": branch, "log": str(log), "state": str(state),
+                    "pulls": fixture_pages, "completed": environment_for(name, branch).get("COMPLETED_WRITER_RUN_IDS", "[]"),
+                    "continuation_index": environment_for(name, branch).get("CONTINUATION_INDEX", "1"),
+                }), encoding="utf-8")
+                environment = os.environ | environment_for(name, branch) | {
+                    "PULLS": json.dumps(fixture_pages), "GH_LOG": str(log), "GH_STATE": str(state),
+                    "GITHUB_OUTPUT": str(output), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", programs[name]], env=environment, capture_output=True, text=True, check=False)
+                mutations = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+                return result, mutations, output.read_text(encoding="utf-8") if output.exists() else ""
+
+        for branch in ("master", "release/v0.5"):
+            for name in step_names:
+                with self.subTest(step=name, branch=branch, shape="nullable-fork"):
+                    result, mutations, output = execute(name, None, branch)
+                    self.assertEqual(result.returncode, 0, f"{result.stderr}\nmutations={mutations}")
+                    if name == step_names[0]:
+                        self.assertIn("reconcile=true", output)
+                    if name == step_names[1]:
+                        values = dict(line.split("=", 1) for line in output.splitlines())
+                        self.assertEqual(json.loads(values["targets"]), all_targets)
+                    if name == step_names[2]:
+                        self.assertEqual(mutations, ["release"])
+                    else:
+                        self.assertNotIn("release", mutations)
+                        if name in step_names[3:]:
+                            self.assertEqual(mutations, ["dispatch"])
+                        else:
+                            self.assertEqual(mutations, [])
+
+                for label, malformed in malformed_heads:
+                    with self.subTest(step=name, branch=branch, shape=label):
+                        result, mutations, _output = execute(name, malformed, branch)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(mutations, [], result.stderr)
 
     def test_priority_preinvalidation_precedes_drain_and_normal_drain_preserves_token_boundaries(self) -> None:
         preinvalidate = self.workflow.index("Pre-invalidate priority event heads")
@@ -1395,6 +1843,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "pulls": [
                 {"number": 72, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}},
                 {"number": 73, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": other, "repo": {"full_name": "owner/repository"}}},
+                {"number": 74, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "c" * 40, "repo": None}},
             ],
         }
         run = {"id": 99, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@master", "event": "issue_comment", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": head, "run_attempt": 1, "status": "in_progress", "created_at": "2026-08-30T00:00:00Z"}
@@ -1747,8 +2196,8 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIsNotNone(condition); assert condition is not None
         self.assertEqual(
             condition.group("value"),
-            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || "
-            "((github.event.workflow_run.name == 'PR governance review sensor' && "
+            "${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ("
+            "(github.event.workflow_run.name == 'PR governance review sensor' && "
             "(github.event.workflow_run.event == 'pull_request' || "
             "github.event.workflow_run.event == 'pull_request_review' || "
             "github.event.workflow_run.event == 'pull_request_review_comment')) || "
@@ -3190,6 +3639,16 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                  "head": {"sha": heads[number], "repo": {"full_name": "owner/repository"}}}
                 for number in range(start, min(start + 100, 601))
             ] for start in range(1, 601, 100)]
+            # The continuation snapshots must ignore an unavailable fork
+            # without changing the governed 600-target manifest.
+            pages[0].append({
+                "number": 1001,
+                "state": "open",
+                "body": "Fixes #64",
+                "draft": False,
+                "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": "f" * 40, "repo": None},
+            })
 
             def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
                 return subprocess.CompletedProcess([], code, json.dumps(value), "")
