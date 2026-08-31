@@ -42,6 +42,35 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         self.assertIsNotNone(push)
         self.assertRegex(push.group("body"), r"(?m)^    paths:")
 
+    def test_workflow_run_filter_is_job_level_and_allows_only_review_sensor_events(self) -> None:
+        """Do not arm the barrier for unrelated CI/release workflow_run traffic."""
+        barrier = re.search(
+            r"(?ms)^  establish-resolver-failure-barrier:\n"
+            r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
+            self.dispatcher,
+        )
+        self.assertIsNotNone(barrier)
+        body = barrier.group("body")
+        if_match = re.search(r"(?m)^    if:\s*(?P<expression>.+)$", body)
+        self.assertIsNotNone(
+            if_match,
+            "The workflow_run allowlist must guard the barrier job itself, before steps start.",
+        )
+        steps_position = body.find("\n    steps:")
+        self.assertGreater(steps_position, -1)
+        assert if_match is not None
+        self.assertLess(if_match.start(), steps_position)
+
+        expression = if_match.group("expression").strip()
+        self.assertEqual(
+            expression,
+            "${{ github.event_name != 'workflow_run' || ("
+            "github.event.workflow_run.name == 'PR governance review sensor' && "
+            "(github.event.workflow_run.event == 'pull_request' || "
+            "github.event.workflow_run.event == 'pull_request_review' || "
+            "github.event.workflow_run.event == 'pull_request_review_comment')) }}",
+        )
+
     def test_success_re_reads_ci_generation_from_one_final_shared_snapshot_before_post(self) -> None:
         self.assertIn("final_evidence_for_pr(decision.head, initial_evidence)", self.writer)
         # The final shared snapshot must build the query through urlencode so
