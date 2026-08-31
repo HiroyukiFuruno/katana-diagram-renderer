@@ -71,7 +71,7 @@ KDR の品質ゲートは、描画ランタイム、runtime asset、CLI、crate 
 
 PR を作る前に `/self-review` と必要な品質ゲートを終えます。
 PR 作成は `/create_pull_request` を使い、ベースブランチは現在のブランチ名と作業文脈から決めます。
-Draftでのreview、指摘のreply/resolve、最新HEADのfinal reviewを終えたら、`just pr-ready-check "<pr>"` を実行してReady化します。Ready化後にmerge承認を得た場合も、`gh pr merge` の直前に同じコマンドを再実行し、Ready PRの最新Issue/marker/thread/CI/base/headを再検証します。
+Draftでのreview、指摘のreply/resolve、最新HEADのfinal reviewを終えたら、`just pr-ready-check "<pr>"` を実行してReady化します。Ready化後はユーザーから**freshなmerge承認**を得て、専用Appの `merge --apply` の**直前**に同じコマンドを再実行し、Ready PRの最新Issue/marker/thread/CI/base/headを再検証します。成功時のmergeはPR外のglobal skill `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/SKILL.md` が定める専用Appの `merge --apply` だけを使い、人間、UI、通常のGitHub CLI merge、admin bypassは禁止です。`prepare --apply` は保存済みの人間用`gh auth`だけを使う例外であり、activate/merge/finalize/verifyのlive operationはfresh JWTとscript自身がmint・検証するApp IATを必要とします。`merge` の`--apply`なしdry-runだけは、人間用authによるpublic readに限定します。
 
 ## 6. 持ち込まないもの
 

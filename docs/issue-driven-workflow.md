@@ -50,18 +50,20 @@ Pull Requestは、Issue契約とレビュー結果を同じ変更履歴として
 3. レビュー結果とreview threadを全件取得し、P0/P1/P2などの優先度と対応要否を分類する。CI greenだけではレビュー完了と判定しない。
 4. 分離可能な指摘修正は、ファイルまたは非重複責務単位でsubagentへ並列委譲する。main agentは指摘を直列実装せず、各担当の変更範囲を重複させない。
 5. 各指摘を修正したら、担当範囲の検証、全体検証、push、該当threadへのreply、threadのresolveを順に行う。P0/P1は必須対応とする。
-6. pushでHEADが変わるたび、旧HEADのレビューを有効な最終レビューとみなさない。最新HEADに対してfinal markerと `@codex review` を付けて再レビューを依頼し、新しい指摘がなくなるまで4〜5を繰り返す。
+6. pushでHEADが変わるたび、旧HEADのレビューを有効な最終レビューとみなさない。latest initial markerのHEAD・本文digestもcurrent PRと完全一致させ、古いinitial markerと新しいfinal markerを組み合わせない。最新HEADに対してinitial markerからレビューをやり直し、final markerと `@codex review` を付けて再レビューを依頼し、新しい指摘がなくなるまで4〜5を繰り返す。
 7. 最新HEAD、レビュー完了、未resolve thread 0、CI、Issue/DoDを次のゲートで機械確認する。ゲートはまず参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査する。
 
 ```bash
 just pr-ready-check 72
 ```
 
-8. `pr-ready-check` 成功後にだけReady化する。Ready化後のmergeはユーザーの明示承認を得てから行い、`gh pr merge` の直前に同じ `just pr-ready-check 72` を再実行して現在のReady PRを再検証する。
+8. `pr-ready-check` 成功後にだけReady化する。Ready化後のmergeはユーザーの明示承認を得てから行い、mergeの直前に同じ `just pr-ready-check 72` を再実行して現在のReady PRを再検証する。mergeはPR checkout外のglobal bootstrap skillが提供する `merge --apply` だけを使う。UI、通常のGitHub CLI merge、人間/admin bypassは使用しない。
 
 ```bash
 gh pr ready 72
 ```
+
+active rulesetは更新操作専用であり、exact Integration Appのbypass actor（`bypass_mode=pull_request`）だけを許可し、人間/admin/UI/通常のGitHub CLIによるprotected default branchの更新・mergeとAppによる直接ref更新を拒否する。required checkとconversationの実施主体はclassic branch protectionに置く。classic branch protectionは`enforce_admins=true`、`required_conversation_resolution=true`、`strict=true`を維持し、required contextsをフェーズごとにApp bindingする。bootstrap中は`KRR / PR governance bootstrap`を専用App ID、finalize後は`KRR / PR governance (trusted check)`を専用App ID、`KRR / PR governance review latch`をGitHub Actions `app_id=15368`に固定する。dynamic barrierはdefense-in-depthであり、cold-stateのmerge authorityではない。
 
 ### Governance bootstrapの限定例外
 
@@ -69,7 +71,7 @@ gh pr ready 72
 
 bootstrap PRのReady化とmergeには、上記一時Check Runの成功に加えて、最新HEADのfinal review完了、未resolve thread 0、既存CI、DoDを全て要求する。PR内のallowlist、自己承認、`verify_push_issue.py` の緩和、PR由来workflowによるbootstrap Check Runの発行は禁止する。merge直後に一時Check Runをrequired checkから除去し、専用App IDに固定した `KRR / PR governance (trusted check)` とGitHub Actions `app_id=15368` に固定した `KRR / PR governance review latch` をrequiredへ切り替える。使い捨てPRで両checkを実機smokeし、改変後のfinal review証跡が旧Check Runを失効させることまで確認して完了とする。
 
-操作は次のCLIに固定し、`activate`（merge前）→保護されたmerge→`finalize`（merge後）→使い捨てsmoke PRのmerge→`verify`（smoke PR merge後）の順序を崩さない。`--apply` はrequired checkを書き換える`activate`/`finalize`だけに付け、各操作の直前にaction-time confirmationを取得する。App token/private keyを引数へ直書きしてはならない。PR checkoutのコードはbootstrap evidenceとして実行しない。activate/finalizeは別々の`KRR_GOVERNANCE_APP_JWT`と`KRR_GOVERNANCE_APP_TOKEN`を環境変数から受け取り、CLI引数・出力へ出してはならない。
+操作は次のCLIに固定し、`prepare --apply`（保存済みhuman `gh auth`、expected default branch確認、App-only ruleset先行作成）→`activate --apply`（preexisting exact rulesetと固定証跡のverify-only）→`merge --apply`（App-only保護merge）→`finalize --apply`（merge後再読）→使い捨てsmoke PRの同じApp-only merge route→`verify`の順序を崩さない。各`--apply`の直前にfresh action-time confirmationを取得し、prepareと非mutating `merge` dry-runだけJWT不要、activate/merge/finalize/verifyのlive operationは各実行直前にfreshな`KRR_GOVERNANCE_APP_JWT`だけを環境から受け取る。script自身が各operationのexact KRR repository向けleast-privilege短期IATをmintし、responseのidentity、`expires_at`、scope、permissionsをstrict検証する。mergeは固定base/head/diff/完全allowlist、最新PR本文digest、review完了、未resolve thread 0、Issue OPEN/契約、CI、trusted check、latch、active rulesetのexact Integration App bypass、Contents write、merge APIのexpected head SHAを再取得・照合する。dry-runはmutation 0を確認し、merge API成功後およびfinalize/verifyでmerge commit、ruleset、classic protectionを再取得して永続状態を確認する。JWT/private key/Installation tokenを引数・出力へ出してはならず、PR checkoutのコードをbootstrap evidenceとして実行せず、rollbackでrulesetを外してはならない。
 
 ```bash
 SCRIPT=/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py
@@ -87,15 +89,33 @@ bootstrap_args=(
   --allowed-workflow .github/workflows/test-and-build.yml
   --expected-diff-sha256 <64-character-diff-sha256>
 )
-export KRR_GOVERNANCE_APP_JWT="${KRR_GOVERNANCE_APP_JWT:?set the App JWT outside the command line}"
-export KRR_GOVERNANCE_APP_TOKEN="${KRR_GOVERNANCE_APP_TOKEN:?set the installation token outside the command line}"
+# prepare --apply uses stored human gh auth and no JWT; confirm immediately before mutation.
+python3 "$SCRIPT" prepare \
+  --repository HiroyukiFuruno/katana-render-runtime --pr <bootstrap-pr-number> \
+  --expected-default-branch <default-branch> --expected-app-id <governance-app-id> --apply
+unset KRR_GOVERNANCE_APP_JWT
+# Inject a fresh JWT immediately before activate --apply.
+# The skill script mints a bounded IAT. Never echo, persist, or pass either credential as an argument.
+export KRR_GOVERNANCE_APP_JWT="${FRESH_JWT:?inject a fresh App JWT outside the command line}"
 # action-time confirmation required immediately before this protected mutation
 python3 "$SCRIPT" activate "${bootstrap_args[@]}" --apply
+unset KRR_GOVERNANCE_APP_JWT
+# Run only after the user has approved and the final gate has passed.
+# Inject a different fresh JWT before this --apply.
+export KRR_GOVERNANCE_APP_JWT="${FRESH_JWT:?inject a fresh App JWT outside the command line}"
+# action-time confirmation required immediately before this protected mutation
+python3 "$SCRIPT" merge "${bootstrap_args[@]}" --apply
+unset KRR_GOVERNANCE_APP_JWT
 # Run only after the bootstrap PR has been merged through the protected gate.
+# Inject a different fresh JWT before this --apply.
+export KRR_GOVERNANCE_APP_JWT="${FRESH_JWT:?inject a fresh App JWT outside the command line}"
 # action-time confirmation required immediately before this protected mutation
 python3 "$SCRIPT" finalize "${bootstrap_args[@]}" --apply
+unset KRR_GOVERNANCE_APP_JWT
 # Run only after the disposable smoke PR has also been merged.
+export KRR_GOVERNANCE_APP_JWT="${FRESH_JWT:?inject a fresh App JWT outside the command line}"
 python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
+unset KRR_GOVERNANCE_APP_JWT
 ```
 
 このCLIも通常gateの代替ではない。固定HEAD、Issue OPEN、依存更新証跡、PR range契約、Draft/review/CIを検証し、workflow allowlistの完全一致に失敗したら停止する。PR内のworkflow/branch/Issueを条件にした自己例外、`verify_push_issue.py`の緩和、Actions tokenによるbootstrap status発行は禁止する。
@@ -127,7 +147,7 @@ python3 "$SCRIPT" verify "${bootstrap_args[@]}" --smoke-pr <smoke-pr-number>
 - trusted PR range検証は`.github/workflows/**`配下の追加、変更、rename、削除をすべて拒否する。sensor workflowがPR merge refで実行されても、改変には新HEADが必要で、そのHEADには専用App Check Runの成功が存在しない。trusted writerが完全なPR range検証後に発行するCheck Runだけがlatchを解放できる。
 - `pr-ready-check` がtrusted default SHAを判定するときは、GraphQLの`defaultBranchRef.target`にあるCommit `oid`を正本として使う。compare対象のpathsは固定したbase...headの範囲を取得し、300件境界を超える、欠落する、または応答が曖昧な場合はfail-closedにする。
 
-bootstrap PRでは、merge前に専用Appをinstallし、一時Check Run `KRR / PR governance bootstrap` を当該App IDに固定したrequired checkとして設定する。PR外の専用Appが固定HEADのCheck Runをcompleted-successにしたことを確認してからだけmergeする。merge直後は一時Check Run設定を除去し、`KRR / PR governance (trusted check)` を専用App IDに、`KRR / PR governance review latch` をGitHub Actions `app_id=15368` に固定したrequired checkへ即時切替する。Check Runは同一HEADをPATCH再利用し、1000件のstatus永続上限を作らない。strict checks、conversation resolution、必要なadmin enforcementを維持し、使い捨てPRのsmoke完了まで公開運用を完了扱いにしない。
+bootstrap PRでは、merge前に専用Appをinstallし、一時Check Run `KRR / PR governance bootstrap` をclassic branch protectionのbootstrap phase required contextとして当該App IDに固定する。PR外の専用Appが固定HEADのCheck Runをcompleted-successにしたことを確認してからだけmergeする。merge直後はbootstrap contextを除去し、classic branch protectionのfinalized phase required contextsを`KRR / PR governance (trusted check)`は専用App ID、`KRR / PR governance review latch`はGitHub Actions `app_id=15368`に固定して即時切替する。active rulesetは更新操作専用であり、`enforce_admins=true`、`required_conversation_resolution=true`、`strict=true`を含むclassic protectionを人間/admin/UI/通常CLIで緩和しない。Check Runは同一HEADをPATCH再利用し、1000件のstatus永続上限を作らない。使い捨てPRのsmoke完了まで公開運用を完了扱いにしない。
 
 ### Single-arbiter reconciliation（現行）
 

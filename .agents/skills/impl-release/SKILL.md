@@ -9,7 +9,7 @@ description: katana-diagram-renderer で指定バージョンの実装、品質�
 この repository は `release/vX.Y.Z` から `master` へ取り込み依頼（Pull Request）を作り、merge 後に自動リリースします。
 初回公開版は `v0.1.0` から開始します。
 
-governance bootstrap はPR外の絶対path `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py` の `activate` / `finalize` / `verify` を使用する。`--expected-base --expected-head --expected-app-id --expected-diff-sha256` と完全な `--allowed-workflow` を固定し、前2者だけ `--apply`、verifyだけ `--smoke-pr` を指定する。activate/finalizeの前に別々の `KRR_GOVERNANCE_APP_JWT` と `KRR_GOVERNANCE_APP_TOKEN` を環境変数へ設定し、CLI引数・出力へ出さない。PR checkoutのコードをevidenceとして実行せず、token/private keyを引数へ渡さない。通常の `pr-ready-check` は緩和しない。
+governance bootstrap と保護mergeは、PR外の絶対path `/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py` の `prepare` / `activate` / `merge` / `finalize` / `verify` に限定する。`prepare --apply` は保存済みの人間用 `gh auth` でexpected default branchを確認してApp-only rulesetを先行作成するためJWT不要、非mutating `merge` dry-runも保存済み認証によるpublic readだけを使う。`activate --apply` はそのrulesetと固定証跡のverify-only、`merge --apply` はApp-only merge、`finalize --apply` はmerge後の再読、`verify` はsmoke確認とする。activate/merge/finalize/verifyの各実行直前にfreshな `KRR_GOVERNANCE_APP_JWT` だけを環境へ設定し、script自身がexact KRR repository・operation-specific least-privilegeで短期IATをmintする。IAT responseのidentity・expiry・scope・permissionsをstrict検証し、JWT/private key/IATをCLI引数・出力へ出さない。`--expected-base --expected-head --expected-app-id --expected-diff-sha256`、expected default branch、完全な `--allowed-workflow`、current body digest/review/thread/Issue/CI/trusted/latch、ruleset exact App bindingを固定し、merge APIにはexpected head SHAを渡して成功後にmerge commit/rulesetを再読する。人間/admin/UI/通常のGitHub CLI merge（`gh pr merge`を含む）は禁止し、PR checkoutのコードをevidenceとして実行しない。通常の `pr-ready-check` は緩和しない。
 
 ## 実行ルール
 
@@ -126,20 +126,32 @@ CI green だけでは Ready 条件を満たしません。指摘が出た場合�
 just pr-ready-check "<number>" && gh pr ready "${pr_url}"
 ```
 
-`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。Ready 化前と `gh pr merge` 直前の両方で、review markerのHEAD/body digestとtrusted Check Run evidenceのHEAD/external_idを同一境界に一致させる。trusted evidence の query にある `pr_body_sha256` は **ちょうど1個** の64桁小文字hexで、GitHub APIから再取得した current PR本文の strict UTF-8 SHA-256 と完全一致しなければならない。missing、duplicate、old digest、または異なるdigestは fail-closed である。Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認後、`gh pr merge` の直前に同じ `just pr-ready-check "<number>"` を再実行し、Ready PRの最新Issue/marker/thread/CI/base/headとこの一意なtrusted digest bindingを再検証します。承認前に merge してはいけません。
+`pr-ready-check` は参照Issueが OPEN であること、依存更新証跡が揃っていること、PR range の Issue contract が完全一致すること（不足・余分を含む）を先に検証します。Ready 化前とglobal bootstrap skillの `merge --apply` 直前の両方で、review markerのHEAD/body digestとtrusted Check Run evidenceのHEAD/external_idを同一境界に一致させる。trusted evidence の query にある `pr_body_sha256` は **ちょうど1個** の64桁小文字hexで、GitHub APIから再取得した current PR本文の strict UTF-8 SHA-256 と完全一致しなければならない。missing、duplicate、old digest、または異なるdigestは fail-closed である。Ready 化前に merge 承認を求めず、Ready 化後にユーザーの merge 承認を得ます。承認後、同じ `just pr-ready-check "<number>"` をmergeの直前に再実行し、Ready PRの最新Issue/marker/thread/CI/base/headとこの一意なtrusted digest bindingを再検証してから、PR checkout外のApp-only `merge --apply`を実行します。承認前に merge してはいけません。
 
 ### governance workflow の初回 bootstrap
 
-PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、通常の `pr-ready-check` の代替を曖昧に設けてはいけません。PR 外の専用 GitHub App が、対象 PR の固定 HEAD SHA、Issue OPEN、依存更新証跡、PR range の Issue contract、最新 review、未 resolve thread 0、既存 CI / DoD を独立検証し、同じ固定 SHA に一時 Check Run `KRR / PR governance bootstrap` を App ID 付きでcompleted/successにします。PR 内の workflow、branch 名、Issue、Check Runを自己承認の根拠にしてはいけません。
+PR が `.github/workflows/` の governance workflow 自体を追加・変更する初回 bootstrap に限り、専用skill scriptをPR checkout外で次の順序に固定します。通常PRへ例外を拡張せず、PR内のworkflow、branch名、Issue、Check Runを自己承認の根拠にしません。
 
-この一時 Check Runを保護ブランチのApp ID固定required checkに追加してReady/mergeを進める場合も、通常のreviewとCI gateを省略しません。merge直後にbootstrap Check Run設定を除去し、専用Appの `KRR / PR governance (trusted check)` とGitHub Actions App ID `15368` の `KRR / PR governance review latch` をrequiredに切り替え、使い捨てPRでsmoke検証します。bootstrap以外の通常PRは必ず `just pr-ready-check "<number>"` を通します。
+1. `prepare --apply`: 保存済みの人間用 `gh auth` でexpected default branchを確認し、App-only active rulesetを先行作成する。fresh JWTは不要です。
+2. `activate --apply`: fresh JWTを環境変数に設定し、scriptがexact repository・operation-specific least-privilegeでmintした短期IATのresponse identity/expiry/scope/permissionsをstrict検証したうえで、一時Check Runと固定base/head/diff/allowlistをverify-only確認する。
+3. Ready化後、ユーザーのfresh merge承認を取得し、同じ`pr-ready-check`を直前に再実行してから`merge --apply`を実行する。mergeはactive rulesetのexact Integration App bypassとclassic branch protectionのrequired conversation resolution、phase-exact trusted/latch、最新body digest/review/thread/Issue/CIを再検証し、Contents writeを含む短期IATとmerge API expected SHAを検証してから行う。
+4. `finalize --apply`: merge後にmerge commit、ruleset、classic protectionを再取得し、永続required contextsを確認する。
+5. 同じApp-only merge routeで使い捨てsmoke PRをmergeし、別のfresh JWTからread-only IATをmintして`verify`でsmoke結果を確認する。
+
+active rulesetは更新操作専用であり、exact Integration Appのbypass actor（`bypass_mode=pull_request`）だけを許可し、人間/admin/UI/通常のGitHub CLIによるprotected default branchの更新・mergeとAppによる直接ref更新を拒否します。required checkとconversationの実施主体はclassic branch protectionに置きます。classic branch protectionは`enforce_admins=true`、`required_conversation_resolution=true`、`strict=true`を維持し、required contextsをフェーズごとにApp bindingします。bootstrap中は`KRR / PR governance bootstrap`を専用App ID、finalize後は`KRR / PR governance (trusted check)`を専用App ID、`KRR / PR governance review latch`をGitHub Actions App ID `15368`に固定します。dry-runはmutation 0を証明します。人間/admin/UI/通常のGitHub CLI merge（`gh pr merge`を含む）は禁止し、dynamic barrierはdefense-in-depthであってcold-stateのmerge authorityではありません。各`--apply`の直前にfresh confirmationを取得し、prepare以外の各コマンドではfresh JWTのみを環境へ設定します。JWT/private key/IATをargv・出力へ出さず、rollbackでもrulesetを外しません。
 
 ## Phase 7: merge と自動リリース
 
-承認後は、直前の `just pr-ready-check "<number>"` が成功した場合だけ通常の merge を実行し、release 前に archive 済みの OpenSpec change と Release workflow の結果を確認します。
+承認後は、直前の `just pr-ready-check "<number>"` が成功した場合だけ、PR checkout外のglobal bootstrap skillによるApp-only `merge --apply`を実行し、release 前に archive 済みの OpenSpec change と Release workflow の結果を確認します。merge APIにはcurrent expected head SHAを渡し、merge commitとactive rulesetを再取得します。
 
 ```bash
-gh pr merge --merge --delete-branch "${pr_url}"
+SCRIPT=/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py
+python3 "$SCRIPT" merge \
+  --repository <owner>/<repo> --pr "<number>" \
+  --expected-base <base-sha> --expected-head <head-sha> \
+  --expected-app-id <governance-app-id> \
+  --allowed-workflow <every-changed-workflow-path> \
+  --expected-diff-sha256 <binary-full-index-diff-digest> --apply
 gh run list --workflow Release --limit 5
 ```
 
@@ -150,5 +162,5 @@ gh run list --workflow Release --limit 5
 - [ ] 最新 HEAD/body digest の final marker bot review と未 resolve 0
 - [ ] CI / DoD / `release-target-check` / `pr-ready-check` PASS
 - [ ] `just pr-ready-check "<number>"`（Issue OPEN / 依存更新証跡 / PR range Issue contract / current `pr_body_sha256` exactly one を含む）後に Ready 化
-- [ ] Ready 化後に merge 承認を得て、`gh pr merge` 直前の `just pr-ready-check "<number>"` 成功後に merge
+- [ ] Ready 化後に merge 承認を得て、global bootstrap skillの `merge --apply` 直前の `just pr-ready-check "<number>"` 成功後にApp-only merge
 - [ ] release-check / pre-pr の前に対象 version 以前の完了済み OpenSpec change を archive し、Release workflow を確認

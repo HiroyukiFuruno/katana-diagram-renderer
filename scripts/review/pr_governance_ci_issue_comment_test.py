@@ -85,16 +85,47 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         root = Path(__file__).parents[2]
         for relative in (
             "AGENTS.md",
+            "docs/issue-driven-workflow.md",
             ".codex/skills/impl-release/SKILL.md",
             ".agents/skills/impl-release/SKILL.md",
             ".codex/skills/create_pull_request/SKILL.md",
             ".agents/skills/create_pull_request/SKILL.md",
+            ".codex/skills/kdr-workflow-guide/SKILL.md",
+            ".agents/skills/kdr-workflow-guide/SKILL.md",
+            ".codex/skills/gh-address-comments/SKILL.md",
         ):
             with self.subTest(path=relative):
                 text = (root / relative).read_text(encoding="utf-8")
-                self.assertIn("gh pr merge", text)
+                self.assertIn("merge --apply", text)
                 self.assertIn("just pr-ready-check", text)
                 self.assertIn("直前", text)
+                self.assertRegex(
+                    text,
+                    r"(?:gh pr merge|GitHub CLI merge|通常のGitHub CLI merge).*(?:禁止|使わない|bypass)",
+                )
+                self.assertRegex(text, r"(?:UI|ブラウザ).*(?:禁止|bypass)")
+                self.assertRegex(text, r"(?:人間|human).*(?:禁止|bypass)")
+                self.assertRegex(text, r"admin.*(?:禁止|bypass)")
+
+    def test_bootstrap_mirrors_require_a_fresh_app_jwt_for_verify(self) -> None:
+        root = Path(__file__).parents[2]
+        for relative in (
+            "AGENTS.md",
+            "docs/issue-driven-workflow.md",
+            ".codex/skills/impl-release/SKILL.md",
+            ".agents/skills/impl-release/SKILL.md",
+            ".codex/skills/create_pull_request/SKILL.md",
+            ".agents/skills/create_pull_request/SKILL.md",
+            ".codex/skills/kdr-workflow-guide/SKILL.md",
+            ".agents/skills/kdr-workflow-guide/SKILL.md",
+            ".codex/skills/gh-address-comments/SKILL.md",
+        ):
+            with self.subTest(path=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertIn("activate/merge/finalize/verify", text)
+                self.assertIn("fresh", text)
+                self.assertNotIn("activate/merge/finalizeだけ", text)
+                self.assertNotIn("activate/merge/finalizeの各apply", text)
 
 
 if __name__ == "__main__":

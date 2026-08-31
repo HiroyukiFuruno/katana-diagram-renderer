@@ -28,6 +28,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             textwrap.dedent(match.group(1))
             .replace("time.sleep(2)", "None")
             .replace("time.sleep(5)", "None")
+            .replace("time.sleep(8.1)", "None")
             .replace("time.sleep(30)", "None")
             .replace('subprocess.run(["sleep", "2"], check=False)', "None")
             .replace('subprocess.run(["sleep", "5"], check=False)', "None")
@@ -384,7 +385,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             {"number": 73, "state": "open", "body": "Closes https://github.com/owner/repository/issues/64", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}},
         ]]
         for event_name, issue, expected in (
-            ("issues", "999", {"reconcile": "false", "event_targets": "[]", "priority_targets": "[]"}),
+            ("issues", "999", {"reconcile": "true", "event_targets": "[]", "priority_targets": "[]"}),
             ("issues", "64", {"reconcile": "true", "event_targets": "[72,73]", "priority_targets": "[72,73]"}),
             ("issue_comment", "64", {"reconcile": "true", "event_targets": "[72,73]", "priority_targets": "[72,73]"}),
         ):
@@ -450,7 +451,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("opened", current, {"reconcile": "true", "event_targets": "[73,72]", "priority_targets": "[73,72]"}),
             ("edited", current, {"reconcile": "true", "event_targets": "[73,72]", "priority_targets": "[73,72]"}),
             ("closed", {**current, "state": "closed"}, {"reconcile": "true", "event_targets": "[73,72]", "priority_targets": "[73,72]"}),
-            ("edited", {**current, "head": {"sha": head, "repo": {"full_name": "fork/repository"}}}, {"reconcile": "false", "event_targets": "[]", "priority_targets": "[]"}),
+            ("edited", {**current, "head": {"sha": head, "repo": {"full_name": "fork/repository"}}}, {"reconcile": "true", "event_targets": "[]", "priority_targets": "[]"}),
         ):
             with self.subTest(action=action, source=source["head"]["repo"]["full_name"]), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
@@ -995,8 +996,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertNotIn("/statuses/", self.workflow)
 
     def test_relevant_event_is_read_only_until_singleton_reconciles_every_current_local_pr(self) -> None:
-        resolver = self.workflow[:self.workflow.index("  reconcile-all-open:")]
-        self.assertNotIn("concurrency:", resolver)
+        resolver = self.workflow[
+            self.workflow.index("  resolve_event:"):
+            self.workflow.index("  reconcile-all-open:")
+        ]
+        self.assertIn(
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            resolver,
+        )
         self.assertIn("reconcile: ${{ steps.targets.outputs.reconcile }}", resolver)
         self.assertIn("if: needs.resolve_event.outputs.reconcile == 'true'", self.workflow)
         self.assertIn("group: pr-governance-dispatcher-${{ github.repository_id }}", self.workflow)
@@ -1554,6 +1561,182 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertNotIn("steps.current-targets.outputs.has_preinvalidate_targets == 'false'", condition.group("value"))
         self.assertLess(self.workflow.index("Publish periodic static affected-head barrier App marker"), self.workflow.index("Activate complete affected-head merge barrier"))
 
+    def test_resolver_snapshot_failure_keeps_an_app_bound_global_barrier_and_stops_handoff(self) -> None:
+        """The fallible resolver cannot run before an App-bound merge fence."""
+        job = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        resolver = re.search(
+            r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        activate = re.search(
+            r"- name: Activate resolver-failure merge barrier.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        source = re.search(
+            r"- name: Bind resolver-failure barrier to trusted default workflow source.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(resolver); self.assertIsNotNone(activate); self.assertIsNotNone(source)
+        assert resolver is not None and activate is not None and source is not None
+        self.assertIn("needs: establish-resolver-failure-barrier", self.workflow)
+        self.assertIn("if: needs.resolve_event.outputs.reconcile == 'true'", self.workflow)
+        resolver_job = self.workflow[
+            self.workflow.index("  resolve_event:"):
+            self.workflow.index("  reconcile-all-open:")
+        ]
+        reconciler_job = self.workflow[self.workflow.index("  reconcile-all-open:"):]
+        generation_lock = (
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n"
+            "      cancel-in-progress: true"
+        )
+        # An arriving barrier event cancels both an older resolver and an
+        # older reconciler. Thus an old resolver cannot wake after the new
+        # barrier arm and acquire a stale reconciliation/release generation.
+        self.assertIn(generation_lock, job)
+        self.assertIn(generation_lock, resolver_job)
+        self.assertIn("group: pr-governance-dispatcher-${{ github.repository_id }}", reconciler_job)
+        self.assertIn("cancel-in-progress: ${{ needs.resolve_event.outputs.priority_targets != '[]' }}", reconciler_job)
+        self.assertIn(
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            job,
+        )
+        self.assertNotIn("actions/checkout", job)
+        self.assertNotIn("github.event.pull_request", job)
+        self.assertIn("repos/{repository}/git/ref/heads/{branch}", job)
+        self.assertIn("contents/.github/workflows/pr-governance.yml?ref={workflow_sha}", job)
+        for step in (
+            "Create resolver-failure barrier marker write token",
+            "Create resolver-failure barrier marker read token",
+            "Publish resolver-failure barrier App marker",
+            "Create resolver-failure barrier branch-protection token",
+            "Activate resolver-failure merge barrier",
+        ):
+            self.assertIn(step, job)
+        # This predecessor deliberately does not defer token, marker, or
+        # branch-protection failures: a failed prerequisite skips resolver,
+        # dispatcher, writer, and release while an already-active barrier is
+        # retained for the next schedule recovery.
+        self.assertNotIn("continue-on-error: true", job)
+
+        def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        barrier = "KRR / PR governance affected-head barrier"
+        state: dict[str, object] = {
+            "protection": {
+                "required_status_checks": {
+                    "strict": True,
+                    "contexts": ["CI / test"],
+                    "checks": [{"context": "CI / test", "app_id": None}],
+                },
+            },
+            "mutations": [],
+        }
+
+        def route(arguments: list[str]) -> str:
+            endpoints = [value for value in arguments if isinstance(value, str) and value.startswith("repos/")]
+            self.assertEqual(len(endpoints), 1, arguments)
+            return endpoints[0]
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(arguments[:4], ["gh", "api", "--hostname", "github.com"])
+            environment = kwargs.get("env"); self.assertIsInstance(environment, dict)
+            self.assertEqual(environment.get("GH_TOKEN"), "admin")  # type: ignore[union-attr]
+            endpoint = route(arguments)
+            if endpoint == "repos/owner/repository/branches/master/protection":
+                return response(state["protection"])
+            if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks/contexts":
+                self.assertEqual(arguments[arguments.index("--method") + 1], "POST")
+                self.assertEqual(json.loads(str(kwargs["input"])), {"contexts": [barrier]})
+                required = state["protection"]["required_status_checks"]  # type: ignore[index]
+                self.assertIsInstance(required, dict)
+                contexts = required["contexts"]; checks = required["checks"]
+                self.assertIsInstance(contexts, list); self.assertIsInstance(checks, list)
+                if barrier not in contexts:
+                    contexts.append(barrier); checks.append({"context": barrier, "app_id": 4_766_933})
+                state["mutations"].append("POST")  # type: ignore[index]
+                return response(contexts)
+            raise AssertionError(arguments)
+
+        def run(code: str, environment: dict[str, str]) -> int:
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                try:
+                    exec(code, {"__name__": "__main__"})
+                except SystemExit:
+                    return 1
+                return 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source_output = directory / "source-output"
+            source_state = {"head": "a" * 40}
+
+            def fake_source_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(arguments[:4], ["gh", "api", "--hostname", "github.com"])
+                environment = kwargs.get("env"); self.assertIsInstance(environment, dict)
+                self.assertEqual(environment.get("GH_TOKEN"), "source")  # type: ignore[union-attr]
+                endpoint = route(arguments)
+                if endpoint == "repos/owner/repository":
+                    return response({"default_branch": "master"})
+                if endpoint == "repos/owner/repository/git/ref/heads/master":
+                    return response({"object": {"sha": source_state["head"]}})
+                if endpoint == "repos/owner/repository/contents/.github/workflows/pr-governance.yml?ref=" + "a" * 40:
+                    return response({"sha": "b" * 40})
+                raise AssertionError(arguments)
+
+            source_environment = {
+                "GITHUB_REPOSITORY": "owner/repository", "GH_TOKEN": "source", "PATH": os.environ["PATH"],
+                "GITHUB_OUTPUT": str(source_output),
+                "WORKFLOW_REF": "owner/repository/.github/workflows/pr-governance.yml@refs/heads/master",
+                "WORKFLOW_SHA": "a" * 40,
+            }
+            with patch.dict(os.environ, source_environment, clear=True), patch("subprocess.run", side_effect=fake_source_run):
+                exec(self._workflow_program(source), {"__name__": "__main__"})
+            source_values = dict(line.split("=", 1) for line in source_output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(source_values, {"default_branch": "master", "default_head": "a" * 40})
+            source_state["head"] = "c" * 40
+            changed_source_output = directory / "changed-source-output"
+            with patch.dict(os.environ, source_environment | {"GITHUB_OUTPUT": str(changed_source_output)}, clear=True), patch("subprocess.run", side_effect=fake_source_run):
+                with self.assertRaises(SystemExit):
+                    exec(self._workflow_program(source), {"__name__": "__main__"})
+            self.assertFalse(changed_source_output.exists())
+
+            activation_environment = {
+                "GITHUB_REPOSITORY": "owner/repository", "PATH": os.environ["PATH"],
+                "ADMIN_TOKEN": "admin", "DEFAULT_BRANCH": "master", "CHECK_APP_ID": "4766933",
+            }
+            self.assertEqual(run(self._workflow_program(activate), activation_environment), 0)
+            protection = state["protection"]["required_status_checks"]  # type: ignore[index]
+            self.assertIsInstance(protection, dict)
+            records = protection["checks"]; self.assertIsInstance(records, list)
+            self.assertIn({"context": barrier, "app_id": 4_766_933}, records)
+            self.assertNotEqual({entry["context"] for entry in records}, {"CI / test"})
+
+            # Failure injection happens only after the barrier mutation. The
+            # resolver has no output and the downstream job's `needs`/`if`
+            # contract means it cannot dispatch a writer or release the
+            # barrier from this failed generation.
+            failed_gh = directory / "gh"
+            failed_gh.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            failed_gh.chmod(failed_gh.stat().st_mode | stat.S_IXUSR)
+            failed = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(resolver)],
+                env={
+                    "GITHUB_REPOSITORY": "owner/repository", "EVENT_NAME": "schedule",
+                    "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(directory / "resolver-output"),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}", "GH_TOKEN": "read",
+                }, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((directory / "resolver-output").exists())
+            self.assertEqual(state["mutations"], ["POST"])
+
     def test_steady_priority_preinvalidates_before_fallible_marker_failure(self) -> None:
         """Setup failures defer the abort until both priority chunks are pending."""
         def step(name: str) -> str:
@@ -1820,7 +2003,23 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     def test_invalidator_preempts_priority_dispatchers_and_paces_every_check_write(self) -> None:
         dispatcher_group = "group: pr-governance-dispatcher-${{ github.repository_id }}"
-        self.assertEqual(self.workflow.count(dispatcher_group), 1)
+        self.assertEqual(self.workflow.count(dispatcher_group), 3)
+        establish = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        self.assertIn(
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            establish,
+        )
+        resolver = self.workflow[
+            self.workflow.index("  resolve_event:"):
+            self.workflow.index("  reconcile-all-open:")
+        ]
+        self.assertIn(
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            resolver,
+        )
         self.assertIn(
             "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: ${{ needs.resolve_event.outputs.priority_targets != '[]' }}",
             self.workflow,
@@ -2266,26 +2465,51 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 if log.exists():
                     self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), total)
 
-    def test_global_serialized_rate_model_bounds_every_sliding_hour_at_445_writes(self) -> None:
+    def test_global_serialized_rate_model_bounds_barrier_and_check_writes_at_445_per_hour(self) -> None:
         pace_seconds = 8.1
         writer_first_write_delay = 8.1
-        # 直列lock内ではinvalidator完了後にwriterへ遷移する。実際に生成
-        # される時刻列から、任意window (t-3600, t] の最大件数を求める。
-        for all_open, expected_maximum in ((300, 301), (451, 445), (600, 445)):
+        establish = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        self.assertIn("check-runs/{identifier}", establish)
+        self.assertIn("branches/{branch}/protection", establish)
+        marker_names = (
+            "Publish resolver-failure barrier App marker",
+            "Publish periodic static affected-head barrier App marker",
+        )
+        for marker_name in marker_names:
+            match = re.search(
+                rf"- name: {re.escape(marker_name)}.*?python3 - <<'PY'\n(.*?)\n          PY",
+                self.workflow, re.DOTALL,
+            )
+            self.assertIsNotNone(match, marker_name); assert match is not None
+            self.assertIn("time.sleep(8.1)", textwrap.dedent(match.group(1)))
+
+        # The shared generation lock puts the resolver-failure marker, its
+        # normal reconciliation marker, invalidations, and the first writer
+        # mutation on one 8.1s timeline. The marker re-read and protection
+        # read/POST/read are explicit control-plane calls above; only Check
+        # Run writes consume this 445/hour budget.
+        barrier_writes = 2
+        for all_open, expected_maximum in ((300, 303), (451, 445), (600, 445)):
             with self.subTest(all_open=all_open):
-                invalidator_writes = [(index + 1) * pace_seconds for index in range(all_open)]
-                writer_first_write = invalidator_writes[-1] + writer_first_write_delay
-                writes = [*invalidator_writes, writer_first_write]
+                marker_writes = [(index + 1) * pace_seconds for index in range(barrier_writes)]
+                invalidator_writes = [(barrier_writes + index + 1) * pace_seconds for index in range(all_open)]
+                writer_first_write = invalidator_writes[-1] + writer_first_write_delay if invalidator_writes else None
+                writes = [*marker_writes, *invalidator_writes, *([writer_first_write] if writer_first_write is not None else [])]
                 maximum = max(
                     sum(window_end - 3600 < write <= window_end for write in writes)
                     for window_end in writes
                 )
+                self.assertEqual(len(marker_writes), barrier_writes)
                 self.assertEqual(len(invalidator_writes), all_open)
                 self.assertTrue(all(
                     later - earlier >= pace_seconds - 1e-9
-                    for earlier, later in zip(invalidator_writes, invalidator_writes[1:])
+                    for earlier, later in zip(writes, writes[1:])
                 ))
-                self.assertGreaterEqual(writer_first_write - invalidator_writes[-1], writer_first_write_delay - 1e-9)
+                if writer_first_write is not None:
+                    self.assertGreaterEqual(writer_first_write - invalidator_writes[-1], writer_first_write_delay - 1e-9)
                 self.assertEqual(maximum, expected_maximum)
                 self.assertLessEqual(maximum, 445)
 

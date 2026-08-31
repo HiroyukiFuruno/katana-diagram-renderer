@@ -35,22 +35,22 @@ fn release_verify_tests_the_packaged_library_sources() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn release_target_check_requires_v0_4_19_intent() -> Result<(), Box<dyn std::error::Error>> {
+fn release_target_check_requires_v0_4_20_intent() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root()?;
-    assert!(release_target_check(root, "0.4.19", "0.4.18", "HEAD")?);
-    assert!(release_target_check(root, "0.4.19", "0.4.19", "HEAD")?);
+    assert!(release_target_check(root, "0.4.20", "0.4.19", "HEAD")?);
+    assert!(release_target_check(root, "0.4.20", "0.4.20", "HEAD")?);
     assert!(!release_target_check(
         root,
+        "0.4.20",
         "0.4.19",
-        "0.4.18",
         "missing-release-head",
     )?);
     for version in [
         "0.3.9", "0.4.0", "0.4.1", "0.4.2", "0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8",
         "0.4.9", "0.4.10", "0.4.11", "0.4.12", "0.4.13", "0.4.14", "0.4.15", "0.4.16", "0.4.17",
-        "0.4.18", "0.5.0", "1.0.0", "2.0.0",
+        "0.4.18", "0.4.19", "0.5.0", "1.0.0", "2.0.0",
     ] {
-        assert!(!release_target_check(root, version, "0.4.18", "HEAD",)?);
+        assert!(!release_target_check(root, version, "0.4.19", "HEAD",)?);
     }
     Ok(())
 }
@@ -829,6 +829,10 @@ fn assert_pr_ready_recipe_documentation(root: &Path) -> TestResult {
 fn assert_governance_bootstrap_documentation(root: &Path) -> TestResult {
     let agents = std::fs::read_to_string(root.join("AGENTS.md"))?;
     let workflow = std::fs::read_to_string(root.join("docs/issue-driven-workflow.md"))?;
+    assert!(
+        !agents.contains("KRR_GOVERNANCE_APP_TOKEN"),
+        "AGENTS.md must not require an externally supplied installation token"
+    );
     assert_bootstrap_overview_terms(&agents, &workflow);
     assert_bootstrap_protection_is_pre_merge(&workflow);
     assert_bootstrap_cli_boundary(&workflow);
@@ -848,6 +852,8 @@ fn assert_bootstrap_overview_terms(agents: &str, workflow: &str) {
             "KRR / PR governance review latch",
             "app_id=15368",
             "使い捨てPR",
+            "latest initial marker",
+            "current PR",
         ] {
             assert!(
                 document.contains(required),
@@ -864,29 +870,52 @@ fn assert_bootstrap_protection_is_pre_merge(workflow: &str) {
     );
 }
 
+const BOOTSTRAP_CLI_BOUNDARY_TERMS: &[&str] = &[
+    "通常gateの代替ではない",
+    "PR内のworkflow/branch/Issueを条件にした自己例外",
+    "/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py",
+    "--expected-base",
+    "--expected-diff-sha256",
+    "--allowed-workflow",
+    "activate",
+    "finalize",
+    "verify",
+    "--apply",
+    "--smoke-pr",
+    "KRR_GOVERNANCE_APP_JWT",
+    "prepare",
+    "prepare --apply",
+    "merge",
+    "merge --apply",
+    "freshな",
+    "expires_at",
+    "scope",
+    "permissions",
+    "least-privilege",
+    "exact Integration App",
+    "bypass_mode=pull_request",
+    "Appによる直接ref更新",
+    "classic branch protection",
+    "enforce_admins=true",
+    "required_conversation_resolution=true",
+    "strict=true",
+    "人間/admin/UI/通常のGitHub CLI",
+    "JWT/private key/Installation token",
+    "引数・出力へ出してはならず",
+    "PR checkoutのコードをbootstrap evidenceとして実行せず",
+];
+
 fn assert_bootstrap_cli_boundary(workflow: &str) {
-    for required in [
-        "通常gateの代替ではない",
-        "PR内のworkflow/branch/Issueを条件にした自己例外",
-        "/Users/hiroyuki_furuno/.codex/skills/krr-pr-governance-bootstrap/scripts/bootstrap_pr_governance.py",
-        "--expected-base",
-        "--expected-diff-sha256",
-        "--allowed-workflow",
-        "activate",
-        "finalize",
-        "verify",
-        "--apply",
-        "--smoke-pr",
-        "KRR_GOVERNANCE_APP_JWT",
-        "KRR_GOVERNANCE_APP_TOKEN",
-        "CLI引数・出力へ出してはならない",
-        "PR checkoutのコードはbootstrap evidenceとして実行しない",
-    ] {
+    for required in BOOTSTRAP_CLI_BOUNDARY_TERMS {
         assert!(
             workflow.contains(required),
             "bootstrap boundary must document {required}"
         );
     }
+    assert!(
+        !workflow.contains("KRR_GOVERNANCE_APP_TOKEN"),
+        "bootstrap boundary must not use an externally supplied installation token"
+    );
 }
 
 fn assert_no_legacy_pr_ready_invocation(root: &Path) -> TestResult {

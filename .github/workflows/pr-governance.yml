@@ -23,9 +23,228 @@ permissions:
   pull-requests: read
 
 jobs:
+  establish-resolver-failure-barrier:
+    # `resolve_event` has to inspect the mutable open-PR snapshot before it
+    # can choose a targeted invalidation.  Put the App-bound repository-wide
+    # context in front of that fallible read: a bad page, API outage, or
+    # cancellation can then only leave this context required, never expose a
+    # former trusted success.
+    name: Establish resolver-failure merge barrier
+    environment: pr-governance
+    runs-on: ubuntu-latest
+    # Share the arbiter generation lock before creating marker credentials.
+    # A newly arrived event cancels an older reconciliation before that run
+    # can release the context between this event's observation and its arm.
+    concurrency:
+      group: pr-governance-dispatcher-${{ github.repository_id }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    outputs:
+      default_branch: ${{ steps.source.outputs.default_branch }}
+      default_head: ${{ steps.source.outputs.default_head }}
+    steps:
+      - name: Bind resolver-failure barrier to trusted default workflow source
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          workflow_ref = os.environ.get("WORKFLOW_REF", "")
+          workflow_sha = os.environ.get("WORKFLOW_SHA", "")
+          prefix = f"{repository}/.github/workflows/pr-governance.yml@refs/heads/"
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or not workflow_ref.startswith(prefix):
+              raise SystemExit("Resolver-failure barrier workflow source is invalid.")
+          branch = workflow_ref[len(prefix):]
+          if (
+              re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is None
+              or branch in {".", ".."}
+              or branch.startswith("/")
+              or "//" in branch
+              or any(part in {"", ".", ".."} for part in branch.split("/"))
+              or re.fullmatch(r"[0-9a-fA-F]{40}", workflow_sha) is None
+          ):
+              raise SystemExit("Resolver-failure barrier workflow source is invalid.")
+          source_env={"GH_TOKEN":os.environ.get("GH_TOKEN", ""),"PATH":os.environ["PATH"]}
+          if not source_env["GH_TOKEN"]:
+              raise SystemExit("Resolver-failure barrier source token is invalid.")
+          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env)
+          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env)
+          if repository_result.returncode!=0 or reference_result.returncode!=0:
+              raise SystemExit("Unable to bind resolver-failure barrier default branch source.")
+          try:
+              current_branch=json.loads(repository_result.stdout).get("default_branch"); current_head=json.loads(reference_result.stdout).get("object",{}).get("sha")
+          except json.JSONDecodeError as error:
+              raise SystemExit("Resolver-failure barrier default branch source is not JSON.") from error
+          if current_branch!=branch or not isinstance(current_head,str) or current_head.lower()!=workflow_sha.lower():
+              raise SystemExit("Resolver-failure barrier default branch source changed.")
+          blob_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={workflow_sha}"],capture_output=True,text=True,check=False,env=source_env)
+          if blob_result.returncode!=0:
+              raise SystemExit("Unable to bind resolver-failure barrier workflow blob.")
+          try:
+              blob=json.loads(blob_result.stdout).get("sha")
+          except json.JSONDecodeError as error:
+              raise SystemExit("Resolver-failure barrier workflow blob is not JSON.") from error
+          if not isinstance(blob,str) or re.fullmatch(r"[0-9a-fA-F]{40}",blob) is None:
+              raise SystemExit("Resolver-failure barrier workflow blob is invalid.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"default_branch={branch}\n")
+              output.write(f"default_head={workflow_sha.lower()}\n")
+          PY
+
+      - name: Create resolver-failure barrier marker write token
+        id: marker-write
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+
+      - name: Create resolver-failure barrier marker read token
+        id: marker-read
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: read
+
+      - name: Publish resolver-failure barrier App marker
+        env:
+          CHECK_WRITE_TOKEN: ${{ steps.marker-write.outputs.token }}
+          CHECK_READ_TOKEN: ${{ steps.marker-read.outputs.token }}
+          DEFAULT_HEAD: ${{ steps.source.outputs.default_head }}
+          DISPATCHER_RUN_ID: ${{ github.run_id }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, time
+          from urllib.parse import urlencode
+
+          repository=os.environ["GITHUB_REPOSITORY"]; head=os.environ.get("DEFAULT_HEAD", ""); dispatcher=os.environ.get("DISPATCHER_RUN_ID", ""); configured_app=os.environ.get("CHECK_APP_ID", "")
+          write_token=os.environ.get("CHECK_WRITE_TOKEN", ""); read_token=os.environ.get("CHECK_READ_TOKEN", "")
+          context="KRR / PR governance affected-head barrier"; app_id=4_766_933
+          if configured_app!=str(app_id) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or re.fullmatch(r"[1-9][0-9]*",dispatcher) is None or not write_token or not read_token or write_token==read_token:
+              raise SystemExit("Resolver-failure barrier marker identity is invalid.")
+          external=f"krr-governance-affected-head-barrier/v1/{head.lower()}/resolver-{dispatcher}"
+          details=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}?"+urlencode({"barrier_marker":"resolver"})
+          write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}; read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}
+          # This job shares the dispatcher generation lock with every
+          # invalidator/writer. Pace the marker Check Run as part of that
+          # single App write budget rather than creating an uncounted burst.
+          time.sleep(8.1)
+          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+          if created.returncode!=0:
+              raise SystemExit("Unable to publish resolver-failure barrier marker.")
+          try:
+              posted=json.loads(created.stdout); identifier=posted.get("id") if isinstance(posted,dict) else None
+          except json.JSONDecodeError as error:
+              raise SystemExit("Resolver-failure barrier marker is not JSON.") from error
+          if type(identifier) is not int or identifier<1 or posted.get("name")!=context or posted.get("head_sha")!=head or posted.get("external_id")!=external or posted.get("status")!="completed" or posted.get("conclusion")!="success" or posted.get("details_url")!=details or not isinstance(posted.get("app"),dict) or posted["app"].get("id")!=app_id:
+              raise SystemExit("Resolver-failure barrier marker is invalid.")
+          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+          if reread.returncode!=0:
+              raise SystemExit("Unable to re-read resolver-failure barrier marker.")
+          try:
+              marker=json.loads(reread.stdout)
+          except json.JSONDecodeError as error:
+              raise SystemExit("Resolver-failure barrier marker re-read is not JSON.") from error
+          if not isinstance(marker,dict) or marker.get("id")!=identifier or marker.get("name")!=context or marker.get("head_sha")!=head or marker.get("external_id")!=external or marker.get("status")!="completed" or marker.get("conclusion")!="success" or marker.get("details_url")!=details or not isinstance(marker.get("app"),dict) or marker["app"].get("id")!=app_id:
+              raise SystemExit("Resolver-failure barrier marker re-read is invalid.")
+          PY
+
+      - name: Create resolver-failure barrier branch-protection token
+        id: protection-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+          private-key: ${{ secrets.KRR_GOVERNANCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: write
+
+      - name: Activate resolver-failure merge barrier
+        env:
+          ADMIN_TOKEN: ${{ steps.protection-token.outputs.token }}
+          DEFAULT_BRANCH: ${{ steps.source.outputs.default_branch }}
+          CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
+        run: |
+          python3 - <<'PY'
+          import copy, json, os, re, subprocess
+
+          repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); configured_app=os.environ.get("CHECK_APP_ID", "")
+          context="KRR / PR governance affected-head barrier"; app_id=4_766_933
+          if configured_app!=str(app_id) or re.fullmatch(r"[A-Za-z0-9._/-]+",branch) is None:
+              raise SystemExit("Resolver-failure barrier identity is invalid.")
+          token=os.environ.get("ADMIN_TOKEN", "")
+          if not token:
+              raise SystemExit("Resolver-failure barrier token is invalid.")
+          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          def request(arguments):
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0:
+                  raise SystemExit("Resolver-failure barrier API request failed.")
+              try:
+                  return json.loads(result.stdout)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Resolver-failure barrier API response is not JSON.") from error
+          def canonical(value):
+              return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)
+          def records(protection):
+              required=protection.get("required_status_checks") if isinstance(protection,dict) else None; checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
+              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool:
+                  raise SystemExit("Resolver-failure barrier branch protection is invalid.")
+              result=[]
+              for item in checks:
+                  if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int):
+                      raise SystemExit("Resolver-failure barrier branch protection is invalid.")
+                  result.append((item["context"],item["app_id"]))
+              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts:
+                  raise SystemExit("Resolver-failure barrier branch protection is invalid.")
+              return result
+          def mutate():
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","POST",contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0:
+                  return None
+              try:
+                  value=json.loads(result.stdout)
+              except json.JSONDecodeError:
+                  return None
+              return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) and context in value else None
+          before=request([protection_endpoint]); before_records=records(before); matches=[record for record in before_records if record[0]==context]
+          if matches==[(context,app_id)]:
+              raise SystemExit(0)
+          if matches:
+              raise SystemExit("Resolver-failure barrier has an unexpected App source.")
+          response=mutate(); after=request([protection_endpoint]); after_records=records(after)
+          if not any(record[0]==context for record in after_records):
+              response=mutate(); after=request([protection_endpoint]); after_records=records(after)
+          expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[*expected_required["checks"],{"context":context,"app_id":app_id}]; expected_required["contexts"]=[*expected_required["contexts"],context]
+          if response is None or after_records.count((context,app_id))!=1 or canonical(after)!=canonical(expected):
+              raise SystemExit("Resolver-failure barrier atomic activation failed; manual recovery is required.")
+          PY
+
   resolve_event:
     name: Resolve relevant governance event
+    needs: establish-resolver-failure-barrier
     runs-on: ubuntu-latest
+    # Keep target resolution in the same generation as its barrier. Otherwise
+    # a resolver from an older event could wake after a newer barrier arm and
+    # obtain the reconciler lock with a stale release candidate.
+    concurrency:
+      group: pr-governance-dispatcher-${{ github.repository_id }}
+      cancel-in-progress: true
     permissions:
       actions: read
       contents: read
@@ -315,9 +534,11 @@ jobs:
               )
           priority_targets = ordered_targets if priority_event else []
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              # 後続の優先イベントが静的必須contextを固定Appへ束縛できるよう、
-              # open PRがない場合も既定branchのmarkerを定期更新する。
-              output.write("reconcile=" + ("true" if affected or event_name in {"schedule", "workflow_dispatch"} else "false") + "\n")
+              # resolver-failure barrier is armed before this mutable
+              # snapshot. Even an event with no current direct target needs
+              # the complete reconciliation below to prove it may release
+              # that repository-wide required context.
+              output.write("reconcile=true\n")
               output.write("event_targets=" + json.dumps(ordered_targets, separators=(",", ":")) + "\n")
               output.write("priority_targets=" + json.dumps(priority_targets, separators=(",", ":")) + "\n")
           PY
@@ -550,7 +771,7 @@ jobs:
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, time
           repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("DEFAULT_HEAD", ""); workflow_ref=os.environ.get("WORKFLOW_REF", ""); workflow_sha=os.environ.get("WORKFLOW_SHA", "")
           if not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or workflow_ref!=f"{repository}/.github/workflows/pr-governance.yml@refs/heads/{branch}" or workflow_sha.lower()!=head.lower(): raise SystemExit("Governance barrier workflow source is not the trusted default branch.")
           source_env={"GH_TOKEN":os.environ["GH_TOKEN"],"PATH":os.environ["PATH"]}
@@ -611,6 +832,10 @@ jobs:
           write_token=os.environ.get("CHECK_WRITE_TOKEN", ""); read_token=os.environ.get("CHECK_READ_TOKEN", "")
           if configured_app!=str(app_id) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or re.fullmatch(r"[1-9][0-9]*",dispatcher) is None or not write_token or not read_token or write_token==read_token: raise SystemExit("Affected-head barrier marker identity is invalid.")
           write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}; read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; external=f"krr-governance-affected-head-barrier/v1/{head.lower()}/scheduler-{dispatcher}"; details=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}?"+urlencode({"barrier_marker":"periodic"})
+          # This marker is also a Check Run write in the globally serialized
+          # dispatcher generation, so it uses the same rate budget as every
+          # synchronous invalidation and terminal writer mutation.
+          time.sleep(8.1)
           created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
           if created.returncode!=0: raise SystemExit("Unable to publish affected-head barrier marker.")
           try: posted=json.loads(created.stdout); identifier=posted.get("id") if isinstance(posted,dict) else None
