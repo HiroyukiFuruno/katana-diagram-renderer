@@ -271,6 +271,35 @@ fn pull_requests_require_draft_review_completion_before_ready()
     Ok(())
 }
 
+#[test]
+fn every_push_restarts_review_from_current_initial_snapshot() -> TestResult {
+    let root = workspace_root()?;
+    for path in [
+        ".agents/skills/commit_and_push/SKILL.md",
+        ".codex/skills/commit_and_push/SKILL.md",
+    ] {
+        let skill = std::fs::read_to_string(root.join(path))?;
+        assert_in_order(
+            &skill,
+            &[
+                RequiredTerm::Exact("push 後、GitHub API から current PR"),
+                RequiredTerm::Exact("新しい push は新しい HEAD と current 本文に対する **initial review**"),
+                RequiredTerm::Exact("以前の final reviewを同一修正循環へ持ち越さない"),
+                RequiredTerm::Exact("phase=initial head=<40-lowerhex> body-sha256=<64-lowerhex>"),
+                RequiredTerm::Exact("@codex review"),
+                RequiredTerm::Exact("initial review の指摘を解消して thread reply/resolve"),
+                RequiredTerm::Exact("marker投稿直前に current PR の HEAD・本文を再取得"),
+                RequiredTerm::Exact("取得値が initial marker と異なる場合は final を投稿せず、新しい initial review からやり直す"),
+                RequiredTerm::Exact("phase=final head=<40-lowerhex> body-sha256=<64-lowerhex>"),
+                RequiredTerm::Exact("initial/final のいずれでも新規指摘が出たら"),
+                RequiredTerm::Exact("修正 → push → 新HEAD・本文の initial review から反復する"),
+            ],
+        )
+        .map_err(|error| format!("{path}: {error}"))?;
+    }
+    Ok(())
+}
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[derive(Debug)]

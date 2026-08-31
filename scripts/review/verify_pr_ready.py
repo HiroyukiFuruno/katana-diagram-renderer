@@ -485,6 +485,14 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
                 raise TypeError("open pull request isDraft must be a boolean")
             if not isinstance(body, str):
                 raise TypeError("open pull request body must be a string")
+            if "headRepository" not in node:
+                raise TypeError("open pull request headRepository is missing")
+            seen_numbers.add(number)
+            # GitHub can return null when the head repository was deleted or
+            # is otherwise unavailable.  It cannot be a governed PR, so
+            # scope it out before validating governance-only metadata.
+            if head_repository is None:
+                continue
             if not _safe_branch_name(base_ref):
                 raise TypeError("open pull request baseRefName is invalid")
             if not isinstance(head, str) or _SHA.fullmatch(head) is None:
@@ -494,7 +502,6 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             head_repository_name = head_repository.get("nameWithOwner")
             if not isinstance(head_repository_name, str) or not head_repository_name:
                 raise TypeError("open pull request headRepository name is invalid")
-            seen_numbers.add(number)
             # Only same-repository PRs targeting the default branch are
             # governed.  Two such PRs sharing a head would share one Check
             # Run namespace, so readiness must stop before a stale success

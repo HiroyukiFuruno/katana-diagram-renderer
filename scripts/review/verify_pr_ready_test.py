@@ -836,13 +836,39 @@ class VerifyPrReadyTest(unittest.TestCase):
             "base": {**valid, "baseRefName": None},
             "base-unsafe": {**valid, "baseRefName": "master\n"},
             "head": {**valid, "headRefOid": "not-a-sha"},
-            "repository": {**valid, "headRepository": None},
             "repository-name": {**valid, "headRepository": {"nameWithOwner": ""}},
         }
         for name, node in variants.items():
             with self.subTest(name=name), patch.object(subject, "_gh_json", return_value=response(node)):
                 with self.assertRaises(TypeError):
                     subject._open_pull_requests("owner/repo")
+
+    def test_open_closer_snapshot_skips_unavailable_head_repository(self) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [
+                            {
+                                "number": 71, "isDraft": True, "body": "Closes #64",
+                                "baseRefName": "master", "headRefOid": "not-a-sha",
+                                "headRepository": None,
+                            },
+                            {
+                                "number": 72, "isDraft": True, "body": "Closes #64",
+                                "baseRefName": "master", "headRefOid": "a" * 40,
+                                "headRepository": {"nameWithOwner": "owner/repo"},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            snapshot = subject._open_pull_requests("owner/repo")
+        self.assertEqual([item["number"] for item in snapshot], [72])
 
     def test_open_closer_snapshot_rejects_duplicate_ungoverned_pull_request_numbers(self) -> None:
         node = {
