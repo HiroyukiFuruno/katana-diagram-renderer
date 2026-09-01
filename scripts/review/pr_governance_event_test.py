@@ -213,7 +213,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             '"PR governance review sensor"', '"CI"', '"release-preflight"',
             '".github/workflows/test-and-build.yml"', '".github/workflows/release-preflight.yml"',
             'run.get("path")', 'run.get("run_attempt")', 'len(pulls) == 1',
-            'workflow_run workflow differs from its trusted base.',
+            'workflow_run current default source drifted.',
         ):
             self.assertIn(text, validation)
 
@@ -225,15 +225,18 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
-                pull = {"number": 72, "base": {"sha": base, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}}}
+                pull = {"number": 72, "state": "open", "base": {"sha": base, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}}}
                 run = {"name": "CI", "path": path, "event": "pull_request", "status": "completed", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repo}, "head": {"sha": head, "repo": source_repo}}]}
                 fake.write_text(
-                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "#!/bin/sh\necho \"$*\" >> \"${CALL_LOG}\"\ncase \"$*\" in\n"
                     "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/dispatcher-9\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0\"}' ;;\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                     "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                    "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
+                    "  *'/compare/'*) printf '%s' '{\"status\":\"identical\",\"base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"merge_base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"head_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' '[]' ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(pull), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
@@ -260,22 +263,24 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}},
         }
         pulls = [[pull]]
-        for status in ("requested", "waiting", "pending"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+        for status, current_base_sha in (("requested", base), ("waiting", base), ("pending", "d" * 40)):
+            with self.subTest(status=status, current_base_sha=current_base_sha), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 source_repository = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
                 run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": status, "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repository}, "head": {"sha": head, "repo": source_repository}}]}
                 fake.write_text(
-                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "#!/bin/sh\necho \"$*\" >> \"${CALL_LOG}\"\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                    "  *'git/ref/heads/master'*) printf '%s' \"${REF}\" ;;\n"
+                    "  *'/compare/'*) printf '%s' \"${COMPARE}\" ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
-                    "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
                     "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-                environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(pull), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+                current_pull = {**pull, "base": {**pull["base"], "sha": current_base_sha}}
+                environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(current_pull), "PULLS": json.dumps(pulls), "REF": json.dumps({"object": {"sha": current_base_sha}}), "COMPARE": json.dumps({"status": "identical" if current_base_sha == base else "ahead", "base_commit": {"sha": base}, "merge_base_commit": {"sha": base}, "head_commit": {"sha": current_base_sha}}), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
                 result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 resolved = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
@@ -358,7 +363,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
-                current_pull = {"number": 72, "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
+                current_pull = {"number": 72, "state": "open", "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
                 run = {
                     "name": name, "path": path, "event": event, "status": "completed",
                     "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head,
@@ -369,8 +374,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                     "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                    "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
+                    "  *'/compare/'*) printf '%s' '{\"status\":\"identical\",\"base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"merge_base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"head_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n",
                     encoding="utf-8",
                 )
@@ -386,6 +394,87 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(values["event_targets"], "[72,73]")
                 self.assertEqual(values["priority_targets"], expected_priority)
+
+    def test_workflow_run_current_default_binding_matches_preflight_contract(self) -> None:
+        """Resolver revalidates the same B<H<T source boundary after the lock."""
+        match = re.search(
+            r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        base, head, tip = "b" * 40, "a" * 40, "d" * 40
+        source_repository = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+        run = {
+            "name": "CI", "path": ".github/workflows/test-and-build.yml@master", "event": "pull_request",
+            "status": "completed", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head,
+            "repository": {"id": 101, "full_name": "owner/repository"},
+            "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repository}, "head": {"sha": head, "repo": source_repository}}],
+        }
+        local_pull = {
+            "number": 72, "state": "open",
+            "base": {"sha": tip, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}},
+            "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}},
+        }
+
+        def execute(
+            label: str, pull: dict[str, object], *, comparison: dict[str, object] | None = None,
+            tip_blob: str = "c" * 40, final_tip: str | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); output = directory / "output"; fake = directory / "gh"
+                fake.write_text(
+                    "#!/bin/sh\necho \"$*\" >> \"${CALL_LOG}\"\ncase \"$*\" in\n"
+                    "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
+                    "  *'pulls?state=open'*) printf '%s' '[]' ;;\n"
+                    "  *'git/ref/heads/master'*) if [ -e \"${REF_STATE}\" ]; then printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
+                    "  *'/compare/'*) printf '%s' \"${COMPARE}\" ;;\n"
+                    "  *'/contents/'*'ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
+                    "  *'/contents/'*'ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
+                    "  *'/contents/'*) printf '%s' \"${TIP_BLOB}\" ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                    "  *) exit 91 ;;\nesac\n",
+                    encoding="utf-8",
+                )
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                compare = comparison if comparison is not None else {
+                    "status": "ahead", "base_commit": {"sha": base},
+                    "merge_base_commit": {"sha": base}, "head_commit": {"sha": tip},
+                }
+                environment = os.environ | {
+                    "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1",
+                    "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                    "RUN": json.dumps(run), "PULL": json.dumps(pull), "INITIAL_REF": json.dumps({"object": {"sha": tip}}),
+                    "FINAL_REF": json.dumps({"object": {"sha": final_tip if final_tip is not None else tip}}),
+                    "COMPARE": json.dumps(compare), "TIP_BLOB": json.dumps({"sha": tip_blob}), "REF_STATE": str(directory / "ref-state"),
+                    "CALL_LOG": str(directory / "calls"),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+                calls = (directory / "calls").read_text(encoding="utf-8").splitlines()
+                ref_indexes = [index for index, call in enumerate(calls) if "/git/ref/heads/master" in call]
+                compare_indexes = [index for index, call in enumerate(calls) if "/compare/" in call]
+                if compare_indexes:
+                    self.assertGreaterEqual(len(ref_indexes), 2, label)
+                    self.assertLess(compare_indexes[-1], ref_indexes[-1], label)
+                if result.returncode == 0:
+                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(values["reconcile"], "true", label)
+                return result
+
+        self.assertEqual(execute("base-forward", local_pull).returncode, 0)
+        rejected = (
+            ("rewound-or-diverged", local_pull, {"comparison": {"status": "diverged", "base_commit": {"sha": base}, "merge_base_commit": {"sha": "e" * 40}, "head_commit": {"sha": tip}}}),
+            ("current-base-not-tip", {**local_pull, "base": {**local_pull["base"], "sha": "e" * 40}}, {}),
+            ("current-workflow-blob", local_pull, {"tip_blob": "e" * 40}),
+            ("default-ref-race", local_pull, {"final_tip": "e" * 40}),
+            ("head-drift", {**local_pull, "head": {**local_pull["head"], "sha": "e" * 40}}, {}),
+            ("head-repository-drift", {**local_pull, "head": {"sha": head, "repo": {"id": 202, "full_name": "fork/repository"}}}, {}),
+        )
+        for label, pull, options in rejected:
+            with self.subTest(source=label):
+                self.assertNotEqual(execute(label, pull, **options).returncode, 0)
 
     def test_issue_and_issue_comment_priority_all_closers_of_the_changed_issue(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
@@ -439,11 +528,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
         run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": "requested", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repo}, "head": {"sha": head, "repo": source_repo}}]}
         local = {"base": {"ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"repo": {"id": 101, "full_name": "owner/repository"}}}
-        current_pull = {"number": 72, "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
+        current_pull = {"number": 72, "state": "open", "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
         pulls = [[{"number": 72, "state": "open", "body": "Fixes #64; closes #65", **local}, {"number": 73, "state": "open", "body": "Fixes #64", **local}, {"number": 74, "state": "open", "body": "Fixes #65", **local}]]
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
-            fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n  *'/compare/'*) printf '%s' '{\"status\":\"identical\",\"base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"merge_base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"head_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(current_pull), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1127,17 +1216,34 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             expected_reconcile: str, expected_valid: str, mode: str = "",
             expected_priority: str = "true", trigger_action: str = "completed",
             source_attempt: str = "1", base_blob: str | None = None, head_blob: str | None = None,
+            tip_blob: str | None = None, default_tip: str | None = None,
+            final_tip: str | None = None, comparison: str | None = None,
         ) -> None:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 output = directory / "scope-output"
                 fake = directory / "gh"
+                current_base = pull.get("base") if isinstance(pull, dict) else None
+                current_base_sha = current_base.get("sha") if isinstance(current_base, dict) else None
+                initial_tip = default_tip if default_tip is not None else (current_base_sha if isinstance(current_base_sha, str) else "b" * 40)
+                self.assertIsInstance(initial_tip, str)
+                assert isinstance(initial_tip, str)
+                stable_tip = final_tip if final_tip is not None else initial_tip
+                compare_payload = comparison if comparison is not None else json.dumps({
+                    "status": "identical" if initial_tip == "b" * 40 else "ahead",
+                    "base_commit": {"sha": "b" * 40},
+                    "merge_base_commit": {"sha": "b" * 40},
+                    "head_commit": {"sha": initial_tip},
+                })
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${RUN}\" ;;\n"
                     "  *'/pulls/'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${PULL}\" ;;\n"
+                    "  *'/git/ref/heads/master'*) if [ -e \"${REF_STATE}\" ]; then printf '%s' \"${FINAL_TIP}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_TIP}\"; fi ;;\n"
+                    "  *'/compare/'*) printf '%s' \"${COMPARISON}\" ;;\n"
                     "  *'/contents/'*'ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${BASE_BLOB}\" ;;\n"
-                    "  *'/contents/'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${HEAD_BLOB}\" ;;\n"
+                    "  *'/contents/'*'ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${HEAD_BLOB}\" ;;\n"
+                    "  *'/contents/'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${TIP_BLOB}\" ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\n"
                     "esac\n",
@@ -1156,6 +1262,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "PULL": json.dumps(pull),
                     "BASE_BLOB": json.dumps({"sha": "c" * 40}) if base_blob is None else base_blob,
                     "HEAD_BLOB": json.dumps({"sha": "c" * 40}) if head_blob is None else head_blob,
+                    "TIP_BLOB": json.dumps({"sha": "c" * 40}) if tip_blob is None else tip_blob,
+                    "INITIAL_TIP": json.dumps({"object": {"sha": initial_tip}}),
+                    "FINAL_TIP": json.dumps({"object": {"sha": stable_tip}}),
+                    "COMPARISON": compare_payload,
+                    "REF_STATE": str(directory / "ref-state"),
                     "MODE": mode,
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
@@ -1248,6 +1359,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                             workflow_run(name, "pull_request", status), local_pull,
                             "true", "true", expected_priority="false", trigger_action=trigger_action,
                         )
+        advanced_base_pull = {
+            **local_pull,
+            "base": {**local_pull["base"], "sha": "d" * 40},
+        }
+        run_scope(
+            workflow_run("CI", "pull_request"), advanced_base_pull,
+            "true", "true", expected_priority="false", trigger_action="completed",
+        )
         # Unknown lifecycle metadata must retain preemption instead of silently
         # joining the normal lane on an unverified source classification.
         run_scope(
@@ -1270,6 +1389,13 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("run-attempt", {**normal, "run_attempt": 2}, local_pull, {}),
             ("head", {**normal, "head_sha": "d" * 40}, local_pull, {}),
             ("workflow-blob", normal, local_pull, {"head_blob": json.dumps({"sha": "d" * 40})}),
+            ("current-default-blob", normal, advanced_base_pull, {"default_tip": "d" * 40, "tip_blob": json.dumps({"sha": "e" * 40})}),
+            ("current-pr-base-not-tip", normal, local_pull, {"default_tip": "d" * 40}),
+            ("base-no-longer-reaches-tip", normal, local_pull, {"comparison": json.dumps({
+                "status": "diverged", "base_commit": {"sha": "b" * 40},
+                "merge_base_commit": {"sha": "c" * 40}, "head_commit": {"sha": "d" * 40},
+            }), "default_tip": "d" * 40}),
+            ("default-ref-race", normal, local_pull, {"final_tip": "d" * 40}),
         )
         for label, run, pull, options in drift_cases:
             with self.subTest(source=label):
@@ -1324,7 +1450,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         local_head = {"sha": "a" * 40, "repo": {"full_name": "owner/repository", "id": 101}}
         local_source = {"number": 72, "state": "open", "base": base, "head": local_head}
         resolver_source = {"number": 72, "base": source_base, "head": {"sha": "a" * 40, "repo": None}}
-        resolver_current = {"number": 72, "base": base, "head": {"sha": "a" * 40, "repo": None}}
+        resolver_current = {"number": 72, "state": "open", "base": base, "head": {"sha": "a" * 40, "repo": None}}
         resolver_run = {
             "name": "CI", "event": "pull_request", "status": "completed", "id": 9,
             "run_number": 1, "run_attempt": 1, "head_sha": "a" * 40,
@@ -3563,9 +3689,10 @@ raise SystemExit(91)
                 "#!/bin/sh\ncase \"$*\" in\n"
                 "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                 "  *'/pulls/1'*) printf '%s' \"${PULL}\" ;;\n"
+                "  *'/compare/'*) printf '%s' '{\"status\":\"identical\",\"base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"merge_base_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"head_commit\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
                 "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                 "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
-                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
                 "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                 "  *) exit 91 ;;\nesac\n",
                 encoding="utf-8",
@@ -3577,7 +3704,7 @@ raise SystemExit(91)
                 "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed",
                 "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1",
                 "RUN": json.dumps(run, separators=(",", ":")),
-                "PULL": json.dumps({"number": 1, "base": {"sha": "b" * 40, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": heads[1], "repo": {"id": 101, "full_name": "owner/repository"}}}, separators=(",", ":")),
+                "PULL": json.dumps({"number": 1, "state": "open", "base": {"sha": "b" * 40, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": heads[1], "repo": {"id": 101, "full_name": "owner/repository"}}}, separators=(",", ":")),
                 "PULLS_FILE": str(pulls_file),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
