@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(ROOT / "scripts/hooks"))
+import verify_push_issue as canonical_issue_contract
 
 
 class GovernanceDispatcherContractTest(unittest.TestCase):
@@ -543,6 +545,44 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
             self.assertEqual(values["event_targets"], "[72,73]")
+
+    def test_dispatcher_url_closers_match_canonical_terminators(self) -> None:
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        bodies = (
+            "Fixes https://github.com/owner/repository/issues/64",
+            "Fixes https://github.com/owner/repository/issues/64?source=pr",
+            "Fixes https://github.com/owner/repository/issues/64)",
+            "Fixes https://github.com/owner/repository/issues/64/foo",
+            "Fixes https://github.com/owner/repository/issues/64/",
+            "Fixes https://github.com/owner/repository/issues/64-",
+            "Fixes https://github.com/owner/repository/issues/64#fragment",
+            "Fixes https://github.com/owner/repository/issues/64=other",
+            "Fixes https://github.com/other/repository/issues/64",
+        )
+        expected = [
+            index + 72
+            for index, body in enumerate(bodies)
+            if canonical_issue_contract.closing_issue_numbers(body, "owner/repository") == {64}
+        ]
+        pulls = [[
+            {"number": index + 72, "state": "open", "body": body, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}}
+            for index, body in enumerate(bodies)
+        ]]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+            fake.write_text("#!/bin/sh\nprintf '%s' \"${PULLS}\"\n", encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "",
+                "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master",
+                "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls),
+                "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(values["event_targets"], json.dumps(expected, separators=(",", ":")))
 
     def test_malformed_workflow_source_expands_every_derivable_issue_closure(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)

@@ -748,15 +748,29 @@ jobs:
                   numbers.add(number)
                   bodies[number] = body or ""
           owner, repository_name = repository.split("/", 1)
+          issue_url_terminator = r"(?=$|[\s)\]}>.,!?;:'\"])"
           closing = re.compile(
               r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
               r"(?:[ \t]*:[ \t]*|[ \t]+)"
-              r"(?:#|https://github\.com/" + re.escape(owner) + "/" + re.escape(repository_name) + r"/issues/)([1-9][0-9]*)\b",
+              r"(?:#([1-9][0-9]*)\b|https://github\.com/"
+              + re.escape(owner)
+              + "/"
+              + re.escape(repository_name)
+              + r"/issues/([1-9][0-9]*)"
+              + issue_url_terminator
+              + r")",
               re.I,
           )
+          def closing_numbers(body: str) -> set[str]:
+              return {
+                  number
+                  for match in closing.finditer(body)
+                  for number in match.groups()
+                  if number is not None
+              }
           def referenced(issue: int) -> set[int]:
               text = str(issue)
-              return {number for number, body in bodies.items() if text in set(closing.findall(body))}
+              return {number for number, body in bodies.items() if text in closing_numbers(body)}
           source_number_value: int | None = None
           priority_event = False
           if event_name in {"schedule", "workflow_dispatch"}:
@@ -766,7 +780,7 @@ jobs:
               source_number_value = source_number
               affected = set() if workflow_run_out_of_scope else ({source_number} if source_number in numbers else set())
               if not workflow_run_out_of_scope:
-                  source_issues = set(closing.findall(bodies.get(source_number, "")))
+                  source_issues = closing_numbers(bodies.get(source_number, ""))
                   for source_issue in source_issues:
                       affected |= referenced(int(source_issue))
           elif event_name == "pull_request_target":
@@ -930,7 +944,7 @@ jobs:
                           for body in (os.environ.get("PR_BODY", ""), os.environ.get("PR_PREVIOUS_BODY", "")):
                               if not isinstance(body, str):
                                   raise SystemExit("pull_request_target body is invalid.")
-                              for source_issue in set(closing.findall(body)):
+                              for source_issue in closing_numbers(body):
                                   affected |= referenced(int(source_issue))
                   else:
                       affected = set()
@@ -939,7 +953,7 @@ jobs:
                   for body in (os.environ.get("PR_BODY", ""), os.environ.get("PR_PREVIOUS_BODY", "")):
                       if not isinstance(body, str):
                           raise SystemExit("pull_request_target body is invalid.")
-                      for source_issue in set(closing.findall(body)):
+                      for source_issue in closing_numbers(body):
                           affected |= referenced(int(source_issue))
               # Every PR mutation can change the Issue/closer contract, so
               # preempt the repository-wide arbiter for the exact affected
