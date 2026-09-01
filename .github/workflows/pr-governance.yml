@@ -38,6 +38,7 @@ jobs:
       reconcile: ${{ steps.scope.outputs.reconcile }}
       valid: ${{ steps.scope.outputs.valid }}
       priority: ${{ steps.scope.outputs.priority }}
+      pull_request_target_noop: ${{ steps.scope.outputs.pull_request_target_noop }}
     steps:
       - name: Exclude unavailable fork sources before dispatcher lock
         id: scope
@@ -67,6 +68,7 @@ jobs:
           event_action = os.environ.get("EVENT_ACTION", "")
           reconcile = True
           valid = True
+          pull_request_target_noop = False
           # Only a fully re-read, local CI/release source may join the normal
           # serialized lane. Every other event keeps the historical preemptive
           # behavior until the resolver has established its own target set.
@@ -419,11 +421,17 @@ jobs:
                           and run.get("event") == "pull_request"
                       ):
                           priority = False
+          pull_request_target_noop = event_name == "pull_request_target" and valid and not reconcile
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("reconcile=" + ("true" if reconcile else "false") + "\n")
               output.write("valid=" + ("true" if valid else "false") + "\n")
               output.write("priority=" + ("true" if priority else "false") + "\n")
+              output.write("pull_request_target_noop=" + ("true" if pull_request_target_noop else "false") + "\n")
           PY
+
+      - name: Record verified pull_request_target preflight no-op
+        if: ${{ steps.scope.outputs.pull_request_target_noop == 'true' }}
+        run: test "${{ steps.scope.outputs.reconcile }}" = 'false' && test "${{ steps.scope.outputs.valid }}" = 'true'
 
   establish-resolver-failure-barrier:
     # `resolve_event` has to inspect the mutable open-PR snapshot before it
@@ -2447,10 +2455,10 @@ jobs:
           current_generation=generation(source,current=True)
           if source.get("status") not in {"requested","queued","in_progress"}: raise SystemExit("Affected-head barrier dispatcher generation is not active.")
           def reconciles(run):
-              # Only a workflow_run that completed the preflight's explicit
-              # no-op path can be ignored.  Every incomplete, malformed, or
-              # unsuccessful candidate remains a newer release fence.
-              if run.get("event")!="workflow_run" or run.get("status")!="completed" or run.get("conclusion")!="success": return True
+              # Only an explicit workflow_run or pull_request_target no-op
+              # can be ignored. Every incomplete, malformed, or unsuccessful
+              # candidate remains a newer release fence.
+              if run.get("event") not in {"workflow_run","pull_request_target"} or run.get("status")!="completed" or run.get("conclusion")!="success": return True
               identifier=run.get("id")
               if type(identifier) is not int or identifier<1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
               jobs=request([f"repos/{repository}/actions/runs/{identifier}/jobs?per_page=100"],env=read_env)
@@ -2463,7 +2471,14 @@ jobs:
                   if type(job.get("id")) is not int or job["id"]<1 or status not in {"queued","in_progress","completed"} or (status=="completed" and conclusion not in {"action_required","cancelled","failure","neutral","skipped","stale","startup_failure","success","timed_out"}) or (status!="completed" and conclusion is not None): raise SystemExit("Affected-head barrier dispatcher reconciliation job is invalid.")
                   return job
               preflight=named_job("Preflight workflow_run governance source"); barrier=named_job("Establish resolver-failure merge barrier")
-              return not (preflight.get("status")=="completed" and preflight.get("conclusion")=="success" and barrier.get("status")=="completed" and barrier.get("conclusion")=="skipped")
+              if not (preflight.get("status")=="completed" and preflight.get("conclusion")=="success" and barrier.get("status")=="completed" and barrier.get("conclusion")=="skipped"): return True
+              if run.get("event")=="pull_request_target":
+                  steps=preflight.get("steps")
+                  matches=[step for step in steps if step.get("name")=="Record verified pull_request_target preflight no-op"] if isinstance(steps,list) and all(isinstance(step,dict) for step in steps) else []
+                  if len(matches)!=1: return True
+                  step=matches[0]
+                  if type(step.get("number")) is not int or step["number"]<1 or step.get("status")!="completed" or step.get("conclusion")!="success": return True
+              return False
           observed=[]
           for page in listed:
               for run in page["workflow_runs"]:

@@ -85,12 +85,20 @@ class StatusWriterUnitTest(unittest.TestCase):
         *,
         preflight_status: str = "completed", preflight_conclusion: object = "success",
         barrier_status: str = "completed", barrier_conclusion: object = "skipped",
+        pull_request_target_noop_step: object = None,
         total_count: int | None = None,
     ) -> dict[str, object]:
         jobs = [
             {
                 "id": 1, "name": WRITER.PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME,
                 "status": preflight_status, "conclusion": preflight_conclusion,
+                **(
+                    {"steps": [{
+                        "number": 1, "name": WRITER.PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME,
+                        "status": "completed", "conclusion": pull_request_target_noop_step,
+                    }]}
+                    if pull_request_target_noop_step is not None else {}
+                ),
             },
             {
                 "id": 2, "name": WRITER.RESOLVER_FAILURE_BARRIER_NAME,
@@ -321,6 +329,51 @@ class StatusWriterUnitTest(unittest.TestCase):
             page.call_args_list[1].args[0],
             "repos/owner/repository/actions/runs/7/jobs?per_page=100",
         )
+
+    def test_verified_pull_request_target_noop_does_not_preempt_a_local_writer(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        target_noop = self.dispatcher_run(
+            7, event="pull_request_target", status="completed", conclusion="success",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(
+                 WRITER, "object_page",
+                 side_effect=(
+                     self.dispatcher_page(current, target_noop),
+                     self.dispatcher_jobs(pull_request_target_noop_step="success"),
+                 ),
+             ):
+            WRITER.reject_newer_dispatcher_barrier(head)
+
+        for label, jobs in (
+            ("missing", self.dispatcher_jobs()),
+            ("skipped", self.dispatcher_jobs(pull_request_target_noop_step="skipped")),
+            ("failure", self.dispatcher_jobs(pull_request_target_noop_step="failure")),
+            ("duplicate", {"total_count": 2, "jobs": [
+                {"id": 1, "name": WRITER.PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME, "status": "completed", "conclusion": "success", "steps": [
+                    {"number": 1, "name": WRITER.PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME, "status": "completed", "conclusion": "success"},
+                    {"number": 2, "name": WRITER.PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME, "status": "completed", "conclusion": "success"},
+                ]},
+                {"id": 2, "name": WRITER.RESOLVER_FAILURE_BARRIER_NAME, "status": "completed", "conclusion": "skipped"},
+            ]}),
+            ("malformed", {"total_count": 2, "jobs": [
+                {"id": 1, "name": WRITER.PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME, "status": "completed", "conclusion": "success", "steps": [{"number": True, "name": WRITER.PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME, "status": "completed", "conclusion": "success"}]},
+                {"id": 2, "name": WRITER.RESOLVER_FAILURE_BARRIER_NAME, "status": "completed", "conclusion": "skipped"},
+            ]}),
+        ):
+            WRITER._nonreconciling_dispatcher_generations.clear()
+            with self.subTest(evidence=label), self.identity(), patch.dict(os.environ, environment), \
+                 patch.object(WRITER, "api_json", return_value=current), \
+                 patch.object(WRITER, "object_page", side_effect=(self.dispatcher_page(current, target_noop), jobs)):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.reject_newer_dispatcher_barrier(head)
 
     def test_verified_workflow_run_reconciliation_still_preempts_a_local_writer(self) -> None:
         head = "a" * 40

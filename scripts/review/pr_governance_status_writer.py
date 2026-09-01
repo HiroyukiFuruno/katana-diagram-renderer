@@ -43,6 +43,7 @@ DISPATCHER_PATH = ".github/workflows/pr-governance.yml"
 WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
 PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME = "Preflight workflow_run governance source"
 RESOLVER_FAILURE_BARRIER_NAME = "Establish resolver-failure merge barrier"
+PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME = "Record verified pull_request_target preflight no-op"
 # Manual recovery dispatches are a trusted dispatcher generation too.  The
 # workflow and its default-branch binding are still validated below; this is
 # only the event-kind allowlist, not permission to accept an arbitrary replay.
@@ -415,12 +416,13 @@ def dispatcher_generation_is_newer(
 def dispatcher_generation_reconciles(generation: DispatcherGeneration) -> bool:
     """Return whether a trusted generation can preempt writer ordering.
 
-    A ``workflow_run`` for a deleted or foreign fork completes after its
-    preflight job with reconciliation disabled.  It has no authority over a
-    local writer.  Only that exact completed no-op shape is excluded; a
-    missing, changing, or otherwise ambiguous job view is a fence failure.
+    A ``workflow_run`` fork no-op and an explicitly recorded
+    ``pull_request_target`` fork no-op complete with reconciliation disabled.
+    They have no authority over a local writer. Only that exact completed
+    shape is excluded; missing or malformed target evidence remains a
+    reconciling, fail-closed fence.
     """
-    if generation.event != "workflow_run":
+    if generation.event not in {"workflow_run", "pull_request_target"}:
         return True
     cached = _nonreconciling_dispatcher_generations.get(generation.identifier)
     if cached is not None:
@@ -467,6 +469,20 @@ def dispatcher_generation_reconciles(generation: DispatcherGeneration) -> bool:
         and preflight["status"] == "completed" and preflight["conclusion"] == "success"
     ):
         raise GovernanceError("Dispatcher no-op reconciliation evidence is incomplete.")
+    if generation.event == "pull_request_target":
+        steps = preflight.get("steps")
+        matches = (
+            [step for step in steps if step.get("name") == PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME]
+            if isinstance(steps, list) and all(isinstance(step, dict) for step in steps) else []
+        )
+        if len(matches) != 1:
+            return True
+        step = matches[0]
+        if not (
+            type(step.get("number")) is int and step["number"] > 0
+            and step.get("status") == "completed" and step.get("conclusion") == "success"
+        ):
+            return True
     _nonreconciling_dispatcher_generations[generation.identifier] = generation
     return False
 

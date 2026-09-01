@@ -209,7 +209,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertLess(rebind, check_write_token)
         self.assertIn("Trusted default branch advanced while writer was queued.", writer)
 
-    def test_release_generation_fence_excludes_only_a_verified_workflow_run_noop(self) -> None:
+    def test_release_generation_fence_excludes_only_a_verified_preflight_noop(self) -> None:
         match = re.search(
             r"- name: Release complete affected-head merge barrier only after full pending coverage.*?"
             r"python3 - <<'PY'\n(.*?)\n          PY",
@@ -219,7 +219,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIsNotNone(match); assert match is not None
         release = self._workflow_program(match)
         self.assertIn("def reconciles(run):", release)
-        self.assertIn('run.get("event")!="workflow_run"', release)
+        self.assertIn('run.get("event") not in {"workflow_run","pull_request_target"}', release)
         self.assertIn('run.get("status")!="completed"', release)
         self.assertIn('run.get("conclusion")!="success"', release)
         self.assertIn('actions/runs/{identifier}/jobs?per_page=100', release)
@@ -227,10 +227,60 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn('named_job("Preflight workflow_run governance source")', release)
         self.assertIn('named_job("Establish resolver-failure merge barrier")', release)
         self.assertIn('barrier.get("conclusion")=="skipped"', release)
+        self.assertIn('Record verified pull_request_target preflight no-op', release)
         self.assertIn(
             "candidate>current_generation and reconciles(run)", release,
         )
         self.assertIn("str(posted)!=app_id", self.workflow)
+
+        preflight = self.workflow[
+            self.workflow.index("  preflight-workflow-run-source:"):
+            self.workflow.index("  establish-resolver-failure-barrier:")
+        ]
+        self.assertIn("pull_request_target_noop: ${{ steps.scope.outputs.pull_request_target_noop }}", preflight)
+        self.assertIn('output.write("pull_request_target_noop="', preflight)
+        self.assertIn("- name: Record verified pull_request_target preflight no-op", preflight)
+
+    def test_release_generation_fence_requires_explicit_pull_request_target_noop_step(self) -> None:
+        match = re.search(
+            r"- name: Release complete affected-head merge barrier only after full pending coverage.*?"
+            r"python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        release = self._workflow_program(match)
+        function = re.search(r"^def reconciles\(run\):\n(?P<body>.*?)(?=^observed=)", release, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(function); assert function is not None
+        runs = {"jobs": {}}
+
+        def request(arguments: list[str], *, env: dict[str, str]) -> dict[str, object]:
+            self.assertEqual(env, {"GH_TOKEN": "read"})
+            self.assertEqual(arguments, ["repos/owner/repository/actions/runs/100/jobs?per_page=100"])
+            return runs["jobs"]
+
+        namespace = {"repository": "owner/repository", "request": request, "read_env": {"GH_TOKEN": "read"}}
+        exec("def reconciles(run):\n" + function.group("body"), namespace)
+        candidate = {"id": 100, "event": "pull_request_target", "status": "completed", "conclusion": "success"}
+        base_jobs = [
+            {"id": 1, "name": "Preflight workflow_run governance source", "status": "completed", "conclusion": "success"},
+            {"id": 2, "name": "Establish resolver-failure merge barrier", "status": "completed", "conclusion": "skipped"},
+        ]
+        cases = (
+            ("verified", [{**base_jobs[0], "steps": [{"number": 1, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "success"}]}, base_jobs[1]], False),
+            ("missing", base_jobs, True),
+            ("skipped", [{**base_jobs[0], "steps": [{"number": 1, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "skipped"}]}, base_jobs[1]], True),
+            ("failure", [{**base_jobs[0], "steps": [{"number": 1, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "failure"}]}, base_jobs[1]], True),
+            ("duplicate", [{**base_jobs[0], "steps": [
+                {"number": 1, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "success"},
+                {"number": 2, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "success"},
+            ]}, base_jobs[1]], True),
+            ("malformed", [{**base_jobs[0], "steps": [{"number": True, "name": "Record verified pull_request_target preflight no-op", "status": "completed", "conclusion": "success"}]}, base_jobs[1]], True),
+        )
+        for label, jobs, expected in cases:
+            with self.subTest(evidence=label):
+                runs["jobs"] = {"total_count": 2, "jobs": jobs}
+                self.assertEqual(namespace["reconciles"](candidate), expected)
 
     def test_workflow_run_source_is_strict_before_app_tokens_exist(self) -> None:
         validation = self.workflow[:self.workflow.index("- name: Create dispatcher App token")]
@@ -1714,6 +1764,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 self.assertEqual(values["reconcile"], expected_reconcile)
                 self.assertEqual(values["valid"], expected_valid)
                 self.assertEqual(values["priority"], "true")
+                self.assertEqual(values["pull_request_target_noop"], "false")
                 self.assertEqual(run_reads, 2)
                 self.assertEqual(pull_reads, 2)
                 self.assertEqual(repository_reads, 2)
@@ -1811,6 +1862,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 self.assertEqual(values["reconcile"], expected_reconcile)
                 self.assertEqual(values["valid"], expected_valid)
                 self.assertEqual(values["priority"], "true")
+                self.assertEqual(values["pull_request_target_noop"], "false")
                 expected_reads = 1 if label == "foreign-target-id-collision" else 2
                 self.assertEqual(run_reads, expected_reads)
                 self.assertEqual(pull_reads, expected_reads)
@@ -1840,7 +1892,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
         source_base, advanced_base, head = "b" * 40, "d" * 40, "a" * 40
 
-        def run_scope(label: str, head_repository: object, current_base: str, expected_reconcile: str, expected_valid: str) -> None:
+        def run_scope(
+            label: str,
+            head_repository: object,
+            current_base: str,
+            expected_reconcile: str,
+            expected_valid: str,
+            expected_pull_request_target_noop: str,
+        ) -> None:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); output = directory / "scope-output"; fake = directory / "gh"
                 source = {
@@ -1868,12 +1927,13 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 self.assertEqual(values["reconcile"], expected_reconcile)
                 self.assertEqual(values["valid"], expected_valid)
                 self.assertEqual(values["priority"], "true")
+                self.assertEqual(values["pull_request_target_noop"], expected_pull_request_target_noop)
 
-        run_scope("foreign-unchanged", {"full_name": "fork/repository", "id": 202}, source_base, "false", "true")
-        run_scope("deleted-unchanged", None, source_base, "false", "true")
-        run_scope("local-unchanged", {"full_name": "owner/repository", "id": 101}, source_base, "true", "true")
-        run_scope("malformed-foreign", {"full_name": "fork/repository"}, source_base, "true", "false")
-        run_scope("foreign-historical-base", {"full_name": "fork/repository", "id": 202}, advanced_base, "true", "true")
+        run_scope("foreign-unchanged", {"full_name": "fork/repository", "id": 202}, source_base, "false", "true", "true")
+        run_scope("deleted-unchanged", None, source_base, "false", "true", "true")
+        run_scope("local-unchanged", {"full_name": "owner/repository", "id": 101}, source_base, "true", "true", "false")
+        run_scope("malformed-foreign", {"full_name": "fork/repository"}, source_base, "true", "false", "false")
+        run_scope("foreign-historical-base", {"full_name": "fork/repository", "id": 202}, advanced_base, "true", "true", "false")
 
     def test_workflow_run_out_of_scope_race_keeps_reconciliation_without_workflow_blob(self) -> None:
         """A resolver re-read may observe a deleted fork after scope accepted its local source."""
