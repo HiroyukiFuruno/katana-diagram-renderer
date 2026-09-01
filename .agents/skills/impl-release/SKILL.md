@@ -86,9 +86,11 @@ Draft が `true` であることを確認してから初回 review を依頼し�
 
 Codex の no-issues 応答は formal review ではなく trusted bot の Issue comment とする。canonical body 全体一致、`Reviewed commit` の10〜40桁hex prefixとcurrent HEADの一致、未編集（`created_at == updated_at`）、各phase windowの候補一意（重複はfail-closed）を確認する。optional details footerはlive canonical summary/structure一致、nested/sentinel拒否、8192文字以下の場合だけ許可する。同一current HEAD・同一PR body digest・unresolved thread 0・Issue freshness（Issue更新後）が揃う場合に限り、initial marker後かつfinal marker前のno-issues証跡をfinalに再利用する。reactionは証跡にせず、formal review/指摘経路はfinal marker後の別evidenceを必須とする。strict marker、App-only merge、initial→final順序を維持する。
 
+レビュー証跡の有効性は current HEAD と current PR body digest に固定する。push 後は旧 HEAD の marker・bot review・trusted success を無効化し、GitHub API で current HEAD/body を再取得して新しい initial marker と cloud review を取得してから final review へ進む。PR本文を編集した場合も、同じ HEAD であって旧 body digest の証跡を無効化し、同じ手順をやり直す。push と本文編集のどちらも無い場合に限り、上記の同一HEAD・同一body digest・Issue freshness・未resolve 0 の条件を満たす既存証跡を再利用できる。
+
 ## Phase 5: PR gate
 
-初回指摘への対応後、または指摘が無い場合でも、merge 前に最新 HEAD へ最終 review を依頼します。
+current HEAD・本文 digest に紐づく initial marker と cloud review が成立していることを前提に、初回指摘への対応後、または指摘が無い場合でも、merge 前に同じ current HEAD・本文へ最終 review を依頼します。
 
 ```bash
 pr_json="$(gh api "repos/<owner>/<repo>/pulls/${pr_number}")"
@@ -118,7 +120,7 @@ gh pr checks --watch "${pr_url}"
 just VERSION=vX.Y.Z release-target-check
 ```
 
-CI green だけでは Ready 条件を満たしません。指摘が出た場合は修正→通常の commit/push→reply/resolve→最新 HEAD の final review を繰り返します。
+CI green だけでは Ready 条件を満たしません。指摘が出た場合は修正→通常の commit/push→reply/resolve後、pushまたは本文変更で旧証跡を無効化し、GitHub APIでcurrent HEAD・本文を再取得してinitial marker→cloud review→final marker→cloud reviewを再実施します。push・本文変更がない場合は、既存のcurrent initial証跡を維持したままfinal reviewを実施します。
 
 ## Phase 6: Ready 化と merge 承認
 

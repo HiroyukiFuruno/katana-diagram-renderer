@@ -94,7 +94,7 @@ Draft 上の cloud review は最低2回、かつ最新 HEAD・本文 digest に�
 1. 初回 review: PR 作成直後に `@codex review` を投稿する。
 2. 最終 review: 指摘対応、thread reply / resolve、検証を終えた後（指摘がなく修正 push がない場合も merge 前）、同じ PR の最新 HEAD・本文に対してもう一度 `@codex review` を投稿する。
 
-指摘修正は、指摘対象ファイルと責務を分離して subagent へ移譲します。各 review thread について、修正内容を thread へ reply し、確認後に resolve します。push 後は旧 HEAD の review を継続利用せず、GitHub API で再取得した新HEAD・本文の `initial` marker から review をやり直します。同一 HEAD でも本文 digest が変わった marker・review・trusted success は失効し、同じく `initial` からやり直します。
+指摘修正は、指摘対象ファイルと責務を分離して subagent へ移譲します。各 review thread について、修正内容を thread へ reply し、確認後に resolve します。レビュー証跡の有効性は current HEAD と current PR body digest に固定します。push 後は旧 HEAD の marker・review・trusted success を無効化し、GitHub API で current HEAD/body を再取得して新しい `initial` marker と cloud review を取得してから final review へ進みます。同じ HEAD でも PR本文を編集した場合は旧 body digest の marker・review・trusted success を無効化し、同じ手順をやり直します。push と本文編集のどちらも無い場合に限り、同一HEAD・同一body digest・Issue freshness・未resolve 0 の条件を満たす既存証跡を再利用できます。
 完了条件は「最低2回実施」「最新 HEAD・本文 digest が review 済み」「未 resolve thread が 0」です。
 
 最終 review の marker投稿直前に、GitHub API から current PR の HEAD・本文を再取得し、initial marker と同じstrict検証とdigest計算を行う。取得値が initial marker と異なる場合は final marker を投稿せず、新しい initial review からやり直す。
