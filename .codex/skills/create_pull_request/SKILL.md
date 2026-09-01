@@ -100,7 +100,7 @@ except UnicodeEncodeError:
 2. review、review thread、PR コメントをすべて取得し、P0/P1/その他、対応要否、担当を分類する。
 3. 修正が必要な指摘は、対象ファイルと DoD を明示して修正担当 subagent へ移譲する。同じファイル・責務を複数担当に重ねない。
 4. P0/P1 に限らず対応対象と判断した通常指摘も、修正担当 subagent が **修正 → ローカル検証 → push → 該当 thread への reply → resolve** の順で完了させる。CI が green でも、未resolve の指摘があれば完了扱いにしない。
-5. 修正を push したかどうかにかかわらず、最終 review は必須とする。依頼直前にGitHub APIからcurrent PRの`headRefOid`と`body`を再取得してbody digestを再計算し、次の marker と `@codex review` を同じコメント本文にこの順で含めて、最新 head に対する最終 review を依頼する。
+5. 最終 review は、pushまたはPR本文編集が発生した場合に限り、まず current HEAD/body digestで新しい initial marker付きcloud reviewを完了してから実施する。依頼直前にGitHub APIからcurrent PRの`headRefOid`と`body`を再取得し、push/body変更前のinitial/final markerとreview証跡を無効化する。旧initialと新finalだけを組み合わせる経路は禁止する。HEAD/bodyが不変でpushもbody編集もない場合だけ、既存のinitialからfinalへ進める。最終reviewのmarkerと`@codex review`は同じコメント本文にこの順で含める。
 
    ```bash
    pr_json="$(gh api "repos/<owner>/<repo>/pulls/<pr-number>")"
@@ -120,7 +120,7 @@ except UnicodeEncodeError:
    @codex review"
    ```
 
-6. 最終 review で新規指摘が出た場合は、指摘ごとに修正担当 subagent へ移譲し、修正・検証、push、該当 thread への reply、resolve を完了する。その後、依頼直前のcurrent PR head/bodyを再取得してbody digest付きfinal markerでreviewを再依頼し、未resolve 0 かつ新規指摘なしになるまでこの手順を反復する。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを無効とし、initial marker付きbot review → final marker付きbot reviewをやり直す。
+6. 最終 review で新規指摘が出た場合は、指摘ごとに修正担当 subagent へ移譲し、修正・検証、push、該当 thread への reply、resolve を完了する。その後は必ず current HEAD/body digestで新しい initial marker付きcloud reviewを依頼・完了し、次に同じdigestのfinal marker付きreviewを依頼する。PR bodyを編集した場合も同じ扱いとし、未resolve 0かつ新規指摘なしになるまで反復する。旧initialと新finalの組み合わせ、またはpush/body変更後にinitialを省略する経路は禁止する。
 
 初回・最終 review とも、コメント投稿だけでなく結果を取得して確認します。レビュー取得では review thread を省略せず、GraphQL の `pageInfo.hasNextPage` が `false` になるまで `pageInfo.endCursor` を次の `after` cursor に渡して全ページ取得します。必要に応じて次を使います。
 

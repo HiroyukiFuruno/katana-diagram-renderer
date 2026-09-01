@@ -104,7 +104,7 @@ except UnicodeEncodeError:
 gh pr comment "$pr_url" --body "<!-- krr-review phase=final head=$head_sha body-sha256=$body_sha256 -->"$'\n@codex review'
 ```
 
-初回・最終 review とも結果を取得し、review thread は全ページ確認します。指摘は責務単位で subagent に委譲し、修正→検証→通常の commit/push→該当 thread への reply→resolve の順で処理します。markerはcurrent PRのhead/bodyを依頼直前に再取得して生成し、bodyがstringでない、NULまたはsurrogateを含む、UTF-8 strictで符号化できない場合はfail-closedで停止します。bot reviewが最新HEADに提出された場合だけ完了とします。push 後は最新HEADのbody digest付きfinal marker reviewを再依頼し、未対応指摘と未resolve threadが0件になるまで繰り返します。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを無効とし、initial marker付きbot review→final marker付きbot reviewをやり直します。
+初回・最終 review とも結果を取得し、review thread は全ページ確認します。指摘は責務単位で subagent に委譲し、修正→検証→通常の commit/push→該当 thread への reply→resolve の順で処理します。markerはcurrent PRのhead/bodyを依頼直前に再取得して生成し、bodyがstringでない、NULまたはsurrogateを含む、UTF-8 strictで符号化できない場合はfail-closedで停止します。bot reviewが最新HEADに提出された場合だけ完了とします。指摘対応で push または PR body 編集が発生した時点で、旧 initial/final marker と旧 review 証跡をすべて無効化し、current HEAD/body digestで新しい initial marker→cloud reviewを完了してから、同じ current HEAD/body digestで final marker→cloud reviewへ進みます。pushやbody変更後に旧initialと新finalだけを組み合わせる経路は禁止です。HEAD/bodyが不変でpushもbody編集もない場合だけ、既存のinitialからfinalへ進めます。未対応指摘と未resolve threadが0件になるまで繰り返します。
 
 ## 6. Ready 化と承認後 merge
 

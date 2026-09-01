@@ -445,6 +445,25 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "api_json", return_value=run):
             self.assertEqual(WRITER.trusted_dispatcher_source(88), WRITER.DispatcherSource(88, "issues", 1))
 
+    def test_dispatcher_run_accepts_trusted_manual_recovery_dispatch(self) -> None:
+        run = self.dispatcher_run(event="workflow_dispatch")
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "api_json", return_value=run):
+            self.assertEqual(
+                WRITER.trusted_dispatcher_source(88),
+                WRITER.DispatcherSource(88, "workflow_dispatch", 1),
+            )
+
+    def test_dispatcher_run_rejects_manual_replay_from_another_workflow(self) -> None:
+        run = self.dispatcher_run(event="workflow_dispatch") | {
+            "name": "untrusted recovery workflow",
+            "path": ".github/workflows/untrusted.yml@master",
+        }
+        with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
+             patch.object(WRITER, "api_json", return_value=run):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.trusted_dispatcher_source(88)
+
     def test_dispatcher_fence_lists_only_the_exact_default_branch_workflow(self) -> None:
         run = self.dispatcher_run()
         with self.identity(), patch.dict(os.environ, {"GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master"}), \
@@ -541,6 +560,11 @@ class StatusWriterUnitTest(unittest.TestCase):
         with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.observed_invalidations(snapshot, WRITER.DispatcherSource(88, "schedule", 1), "early", (72,))
+        with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
+            with self.assertRaises(WRITER.GovernanceError):
+                WRITER.observed_invalidations(
+                    snapshot, WRITER.DispatcherSource(88, "workflow_dispatch", 1), "early", (72,)
+                )
         with self.identity(), patch.object(WRITER, "check_run", return_value=marker):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.observed_invalidations(snapshot, source, "all", (72, 72))

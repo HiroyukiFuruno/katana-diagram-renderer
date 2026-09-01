@@ -36,7 +36,10 @@ ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS = 21.5
 DISPATCHER_NAME = "PR governance dispatcher"
 DISPATCHER_PATH = ".github/workflows/pr-governance.yml"
 WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
-DISPATCHER_EVENTS = frozenset({"pull_request_target", "issue_comment", "issues", "schedule", "workflow_run"})
+# Manual recovery dispatches are a trusted dispatcher generation too.  The
+# workflow and its default-branch binding are still validated below; this is
+# only the event-kind allowlist, not permission to accept an arbitrary replay.
+DISPATCHER_EVENTS = frozenset({"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"})
 DISPATCHER_ACTIVE_STATUSES = frozenset({"requested", "queued", "pending", "waiting", "in_progress"})
 DISPATCHER_TERMINAL_CONCLUSIONS = frozenset({
     "action_required", "cancelled", "failure", "neutral", "skipped", "stale",
@@ -909,7 +912,7 @@ def observed_invalidations(
         if continuation_index < 1:
             raise GovernanceError("All-open continuation boundary is invalid.")
     else:
-        if source.event == "schedule" or not targets or len(set(targets)) != len(targets):
+        if source.event in {"schedule", "workflow_dispatch"} or not targets or len(set(targets)) != len(targets):
             raise GovernanceError("Early writer target boundary is invalid.")
         if any(type(number) is not int or number < 1 for number in targets):
             raise GovernanceError("Early writer target boundary is invalid.")
