@@ -1268,7 +1268,7 @@ jobs:
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
         run: |
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, time
           from urllib.parse import urlencode
           repository=os.environ["GITHUB_REPOSITORY"]; head=os.environ.get("DEFAULT_HEAD", ""); dispatcher=os.environ.get("DISPATCHER_RUN_ID", ""); configured_app=os.environ.get("CHECK_APP_ID", ""); context="KRR / PR governance affected-head barrier"; app_id=4_766_933
           write_token=os.environ.get("CHECK_WRITE_TOKEN", ""); read_token=os.environ.get("CHECK_READ_TOKEN", "")

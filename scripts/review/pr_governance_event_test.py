@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import importlib.util
 import os
@@ -3453,7 +3454,9 @@ raise SystemExit(91)
                 self.workflow, re.DOTALL,
             )
             self.assertIsNotNone(match, marker_name); assert match is not None
-            self.assertIn("time.sleep(8.1)", textwrap.dedent(match.group(1)))
+            program = textwrap.dedent(match.group(1))
+            self.assertIn("import json, os, re, subprocess, time", program)
+            self.assertIn("time.sleep(8.1)", program)
 
         # The shared generation lock puts the resolver-failure marker, its
         # normal reconciliation marker, invalidations, and the first writer
@@ -3481,6 +3484,32 @@ raise SystemExit(91)
                     self.assertGreaterEqual(writer_first_write - invalidator_writes[-1], writer_first_write_delay - 1e-9)
                 self.assertEqual(maximum, expected_maximum)
                 self.assertLessEqual(maximum, 445)
+
+    def test_embedded_python_imports_modules_used_by_qualified_names(self) -> None:
+        """Embedded workflow programs must import every referenced top-level module."""
+        programs = re.findall(
+            r"^          python3 - <<'PY'\n(.*?)^          PY$",
+            self.workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertGreater(len(programs), 0)
+        for index, source in enumerate(programs, start=1):
+            tree = ast.parse(textwrap.dedent(source), filename=f"workflow heredoc #{index}")
+            imported = {
+                alias.asname or alias.name.split(".", 1)[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            uses_time = any(
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "time"
+                and isinstance(node.value.ctx, ast.Load)
+                for node in ast.walk(tree)
+            )
+            if uses_time:
+                self.assertIn("time", imported, f"workflow heredoc #{index} uses time without importing it")
 
     def test_large_priority_targets_are_resolved_into_complete_ttl_safe_chunks(self) -> None:
         """The resolver and every pre-invalidator cover 41 and 600 current PRs."""
