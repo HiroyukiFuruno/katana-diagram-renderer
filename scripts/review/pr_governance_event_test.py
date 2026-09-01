@@ -2203,7 +2203,8 @@ if "/branches/" in joined and "/protection" in joined:
         save_state(value)
         emit([context])
     checks = [{"context": context, "app_id": app_id}] if value["barrier"] else []
-    emit({"required_status_checks": {"checks": checks, "contexts": [item["context"] for item in checks], "strict": True}})
+    status_checks_url = f"https://api.github.com/repos/{repository}/branches/{branch}/protection/required_status_checks"
+    emit({"required_status_checks": {"url": status_checks_url, "contexts_url": status_checks_url + "/contexts", "checks": checks, "contexts": [item["context"] for item in checks], "strict": True}})
 if "/actions/runs/" in joined:
     identifier = int(joined.rsplit("/", 1)[1])
     if identifier == 9:
@@ -2654,19 +2655,27 @@ raise SystemExit(91)
         self.assertLess(self.workflow.index("Activate complete affected-head merge barrier"), self.workflow.index("Pre-invalidate priority event heads"))
         self.assertLess(self.workflow.index("Release complete affected-head merge barrier only after full pending coverage"), self.workflow.index("Dispatch one repository-wide governance arbiter segment"))
         self.assertNotIn("required_status_checks\",\"--input\",\"-\"", self.workflow)
-        self.assertIn("required_status_checks/contexts", activate)
+        self.assertIn("required_status_checks", activate)
         self.assertIn("required_status_checks/contexts", release)
+        self.assertNotIn("required_status_checks/contexts", activate)
         self.assertNotIn("actions/checkout", self.workflow)
         marker_condition = "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true') && steps.barrier-source.outcome == 'success'"
         self.assertEqual(self.workflow.count(marker_condition), 3)
         marker_steps = self.workflow[self.workflow.index("Create periodic affected-head barrier marker write token"):self.workflow.index("Create affected-head barrier branch-protection token")]
         self.assertIn("has_preinvalidate_targets", marker_steps)
+        status_checks_url = "https://api.github.com/repos/owner/repository/branches/master/protection/required_status_checks"
+        contexts_url = status_checks_url + "/contexts"
         baseline = {
-            "required_status_checks": {"strict": True, "contexts": ["CI / test"], "checks": [{"context": "CI / test", "app_id": None}]},
+            "required_status_checks": {"url": status_checks_url, "contexts_url": contexts_url, "strict": True, "contexts": ["CI / test"], "checks": [{"context": "CI / test", "app_id": None}]},
             "enforce_admins": {"enabled": True}, "required_conversation_resolution": {"enabled": True},
         }
         state: dict[str, object] = {
             "protection": json.loads(json.dumps(baseline)), "mutations": [], "uncertain_delete": False,
+            "restore_failures": 0, "restore_attempts": 0,
+            # The external App-only ruleset remains the merge authority.  The
+            # dynamic required-context barrier is defense-in-depth and must
+            # not be treated as a replacement for that admission boundary.
+            "app_only_admission": {"actor": "external-integration-app", "merge_authority": True},
             "pulls": [
                 {"number": 72, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}},
                 {"number": 73, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": other, "repo": {"full_name": "owner/repository"}}},
@@ -2709,13 +2718,29 @@ raise SystemExit(91)
                 self.assertIn(token, {"source", "read"}); return completed({"sha": "c" * 40})
             if endpoint == "repos/owner/repository/branches/master/protection":
                 self.assertEqual(token, "admin"); return completed(state["protection"])
+            if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks":
+                self.assertEqual(token, "admin"); method = arguments[arguments.index("--method") + 1]
+                self.assertIn(method, {"PUT", "PATCH"})
+                required = state["protection"]["required_status_checks"]  # type: ignore[index]
+                self.assertIsInstance(required, dict)
+                expected = json.loads(str(kwargs["input"]))
+                if method == "PATCH" and barrier not in required["contexts"]:
+                    state["restore_attempts"] = int(state["restore_attempts"]) + 1
+                    if int(state["restore_failures"]) > 0:
+                        state["restore_failures"] = int(state["restore_failures"]) - 1
+                        return completed({}, 1)
+                self.assertEqual(expected, {
+                    "strict": required["strict"],
+                    "checks": [*required["checks"], {"context": barrier, "app_id": 4_766_933}],
+                })
+                mutations = state["mutations"]; self.assertIsInstance(mutations, list); mutations.append("ACTIVATE")
+                required["checks"].append({"context": barrier, "app_id": 4_766_933}); required["contexts"].append(barrier)
+                return completed({"url": required["url"], "contexts_url": required["contexts_url"], "strict": required["strict"], "checks": required["checks"], "contexts": required["contexts"]})
             if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks/contexts":
                 self.assertEqual(token, "admin"); method = arguments[arguments.index("--method") + 1]
-                self.assertIn(method, {"POST", "DELETE"}); self.assertEqual(json.loads(str(kwargs["input"])), {"contexts": [barrier]})
+                self.assertEqual(method, "DELETE"); self.assertEqual(json.loads(str(kwargs["input"])), {"contexts": [barrier]})
                 records = protection_records(); required = state["protection"]["required_status_checks"]  # type: ignore[index]
                 self.assertIsInstance(required, dict); mutations = state["mutations"]; self.assertIsInstance(mutations, list); mutations.append(method)
-                if method == "POST" and not any(item["context"] == barrier for item in records):
-                    records.append({"context": barrier, "app_id": 4_766_933}); required["contexts"].append(barrier)
                 if method == "DELETE":
                     records[:] = [item for item in records if item["context"] != barrier]; required["contexts"][:] = [name for name in required["contexts"] if name != barrier]
                     late_event = state["late_event_without_run_list"]
@@ -2765,7 +2790,7 @@ raise SystemExit(91)
             self.assertEqual(execute(activate, activate_env | {"PRIORITY": "false"}), 0)
             self.assertEqual(outputs(output)["active"], "false"); self.assertEqual(state["mutations"], [])
             self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
-            self.assertEqual(state["mutations"], ["POST"])
+            self.assertEqual(state["mutations"], ["ACTIVATE"])
             old_success = {"CI / test"}
             self.assertNotEqual({item["context"] for item in protection_records()}, old_success, "atomic POST blocks old success before paced writes")
             recovery = directory / "recovery"
@@ -2776,13 +2801,13 @@ raise SystemExit(91)
                 return common | {"READ_TOKEN": "read", "ADMIN_TOKEN": "admin", "TARGETS": targets, "TARGET_SNAPSHOTS": snapshots, "PRE_MANIFEST_1": manifest_1, "PRE_MANIFEST_2": manifest_2, "TAIL_MANIFEST_1": "[]", "TAIL_MANIFEST_2": "[]", "DUPLICATE_GOVERNED_HEADS": "[]"}
 
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]")), 1)
-            self.assertEqual(state["mutations"], ["POST"])
+            self.assertEqual(state["mutations"], ["ACTIVATE"])
             pulls = state["pulls"]; self.assertIsInstance(pulls, list); pulls[0] = {**pulls[0], "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}}}
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
-            self.assertEqual(state["mutations"], ["POST"]); pulls[0] = {**pulls[0], "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}
+            self.assertEqual(state["mutations"], ["ACTIVATE"]); pulls[0] = {**pulls[0], "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}
             runs = state["runs"]; self.assertIsInstance(runs, list); runs.append({**run, "id": 100, "created_at": "2026-08-30T00:00:01Z"})
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
-            self.assertEqual(state["mutations"], ["POST"]); runs.pop()
+            self.assertEqual(state["mutations"], ["ACTIVATE"]); runs.pop()
             jobs = state["dispatcher_jobs"]; self.assertIsInstance(jobs, dict)
             workflow_run = {**run, "id": 100, "event": "workflow_run", "status": "completed", "conclusion": "success", "created_at": "2026-08-30T00:00:01Z"}
             jobs[100] = {"total_count": 2, "jobs": [
@@ -2791,20 +2816,20 @@ raise SystemExit(91)
             ]}
             runs.append(workflow_run)
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
-            self.assertEqual(state["mutations"], ["POST"]); runs.pop()
+            self.assertEqual(state["mutations"], ["ACTIVATE"]); runs.pop()
             jobs[100]["jobs"][1]["conclusion"] = "skipped"  # type: ignore[index]
             runs.append(workflow_run)
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
-            self.assertEqual(state["mutations"], ["POST", "DELETE"]); runs.pop()
+            self.assertEqual(state["mutations"], ["ACTIVATE", "DELETE"]); runs.pop()
             self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
-            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST"])
+            self.assertEqual(state["mutations"], ["ACTIVATE", "DELETE", "ACTIVATE"])
             state["uncertain_delete"] = True
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
-            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE", "POST"]); state["uncertain_delete"] = False
+            self.assertEqual(state["mutations"], ["ACTIVATE", "DELETE", "ACTIVATE", "DELETE", "ACTIVATE"]); state["uncertain_delete"] = False
             runs.insert(0, {**run, "id": 98, "status": "completed", "created_at": "2026-08-29T23:59:59Z"})
             state["late_event_without_run_list"] = {**run, "id": 100, "created_at": "2026-08-30T00:00:02Z"}
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
-            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE", "POST", "DELETE"]); runs.pop(0)
+            self.assertEqual(state["mutations"], ["ACTIVATE", "DELETE", "ACTIVATE", "DELETE", "ACTIVATE", "DELETE"]); runs.pop(0)
             self.assertTrue(state["late_event_observed_at_release"])
             manifest_checks = state["manifest_checks"]; self.assertIsInstance(manifest_checks, dict)
             self.assertTrue(all(item["status"] == "in_progress" and item["conclusion"] is None for item in manifest_checks.values()))
@@ -2835,6 +2860,35 @@ raise SystemExit(91)
             pulls[:] = []
             self.assertEqual(execute(release, release_env("[]", "[]", "[]")), 0, "a later schedule recovers a static barrier even after all PRs close")
 
+            # P2 regression: DELETE is applied server-side but returns an
+            # uncertain response, and both bounded PATCH recovery attempts
+            # fail persistently. The embedded release program must fail
+            # closed without producing a success output that could hand off
+            # to the dispatcher. The independent external App-only
+            # admission boundary remains unchanged and authoritative.
+            pulls[:] = [
+                {"number": 72, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}},
+                {"number": 73, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": other, "repo": {"full_name": "owner/repository"}}},
+                {"number": 74, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "c" * 40, "repo": None}},
+            ]
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+            state["uncertain_delete"] = True
+            state["restore_failures"] = 2
+            state["restore_attempts"] = 0
+            failed_release_output = directory / "uncertain-release-output"
+            failed_release = execute(
+                release,
+                release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")
+                | {"GITHUB_OUTPUT": str(failed_release_output)},
+            )
+            self.assertNotEqual(failed_release, 0)
+            self.assertEqual(state["restore_attempts"], 2)
+            self.assertEqual(state["restore_failures"], 0)
+            self.assertFalse(failed_release_output.exists())
+            self.assertEqual(state["app_only_admission"], {"actor": "external-integration-app", "merge_authority": True})
+            release_step = self.workflow[self.workflow.index("- name: Release complete affected-head merge barrier only after full pending coverage"):self.workflow.index("- name: Create fresh all-writer dispatcher token")]
+            self.assertNotIn("continue-on-error: true", release_step)
+
     def test_fresh_priority_event_publishes_app_barrier_before_context_only_binding(self) -> None:
         """The first priority generation must seed the App marker before adding its context."""
         marker_match = re.search(
@@ -2863,8 +2917,9 @@ raise SystemExit(91)
         )
         self.assertIsNotNone(activate_match); assert activate_match is not None
         activate_step = activate_match.group("body")
-        self.assertIn("required_status_checks/contexts", activate_step)
-        self.assertIn('mutate("POST")', activate_step)
+        self.assertIn("required_status_checks", activate_step)
+        self.assertNotIn("required_status_checks/contexts", activate_step)
+        self.assertRegex(activate_step, r'mutate\("(?:PUT|PATCH)"\)')
         self.assertIn('if matches==[(context,app_id)]', activate_step)
         self.assertIn(
             "steps.current-targets.outputs.has_preinvalidate_targets == 'true' || steps.current-targets.outputs.invalidation_head_cap_exceeded == 'true'",
@@ -2875,6 +2930,150 @@ raise SystemExit(91)
         # mutate branch protection; priority is the only additional trigger.
         self.assertNotIn("steps.current-targets.outputs.has_preinvalidate_targets == 'false'", condition.group("value"))
         self.assertLess(self.workflow.index("Publish periodic static affected-head barrier App marker"), self.workflow.index("Activate complete affected-head merge barrier"))
+
+    def test_app_bound_barrier_activation_updates_required_status_checks_fail_closed(self) -> None:
+        """Both activation paths must preserve the complete check binding atomically."""
+        barrier = "KRR / PR governance affected-head barrier"
+        protection_endpoint = "repos/owner/repository/branches/master/protection"
+        update_endpoint = protection_endpoint + "/required_status_checks"
+        activation_names = ("Activate resolver-failure merge barrier", "Activate complete affected-head merge barrier")
+
+        def program(name: str) -> str:
+            match = re.search(rf"- name: {re.escape(name)}.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+            self.assertIsNotNone(match, name); assert match is not None
+            return self._workflow_program(match)
+
+        for name in activation_names:
+            with self.subTest(activation=name):
+                code = program(name)
+                self.assertNotIn("required_status_checks/contexts", code)
+                self.assertRegex(code, r"required_status_checks")
+                self.assertIn('"strict"', code)
+                self.assertIn('"checks"', code)
+
+                for mode in ("success", "null_app", "wrong_app", "missing_url", "missing_contexts_url", "mismatched_url", "extra_url", "existing_loss", "api_failure", "invalid_response", "response_mismatch", "after_mismatch"):
+                    with self.subTest(mode=mode):
+                        baseline_checks = [
+                            {"context": "CI / test", "app_id": None},
+                            {"context": "KRR / PR governance review latch", "app_id": 15368},
+                        ]
+                        baseline_contexts = [item["context"] for item in baseline_checks]
+                        if mode in {"null_app", "wrong_app"}:
+                            barrier_app = None if mode == "null_app" else 15368
+                            baseline_checks.append({"context": barrier, "app_id": barrier_app})
+                            baseline_contexts.append(barrier)
+                        status_checks_url = "https://api.github.com/repos/owner/repository/branches/master/protection/required_status_checks"
+                        required_state: dict[str, object] = {
+                            "url": status_checks_url,
+                            "contexts_url": status_checks_url + "/contexts",
+                            "strict": True,
+                            "contexts": baseline_contexts,
+                            "checks": baseline_checks,
+                        }
+                        if mode == "missing_url":
+                            required_state.pop("url")
+                        elif mode == "missing_contexts_url":
+                            required_state.pop("contexts_url")
+                        elif mode == "mismatched_url":
+                            required_state["contexts_url"] = status_checks_url + "/wrong"
+                        elif mode == "extra_url":
+                            required_state["unexpected_url"] = status_checks_url + "/unexpected"
+                        state: dict[str, object] = {
+                            "protection": {
+                                "required_status_checks": required_state,
+                            },
+                            "updates": 0,
+                            "reads": 0,
+                        }
+
+                        def clone(value: object) -> object:
+                            return json.loads(json.dumps(value))
+
+                        def response(value: object, code_value: int = 0) -> subprocess.CompletedProcess[str]:
+                            return subprocess.CompletedProcess([], code_value, json.dumps(value), "")
+
+                        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                            self.assertEqual(arguments[:4], ["gh", "api", "--hostname", "github.com"])
+                            endpoints = [value for value in arguments if isinstance(value, str) and value.startswith("repos/")]
+                            self.assertEqual(len(endpoints), 1, arguments)
+                            endpoint = endpoints[0]
+                            environment = kwargs.get("env"); self.assertIsInstance(environment, dict)
+                            self.assertEqual(environment.get("GH_TOKEN"), "admin")  # type: ignore[union-attr]
+                            if endpoint == protection_endpoint:
+                                state["reads"] = int(state["reads"]) + 1
+                                return response(clone(state["protection"]))
+                            if endpoint == protection_endpoint + "/required_status_checks/contexts":
+                                raise AssertionError("activation must not use the context-only endpoint")
+                            self.assertEqual(endpoint, update_endpoint)
+                            method = arguments[arguments.index("--method") + 1]
+                            self.assertIn(method, {"PUT", "PATCH"})
+                            if mode in {"null_app", "wrong_app", "missing_url", "missing_contexts_url", "mismatched_url", "extra_url"}:
+                                state["updates"] = int(state["updates"]) + 1
+                                return response({}, 1)
+                            payload = json.loads(str(kwargs["input"]))
+                            required = state["protection"]["required_status_checks"]  # type: ignore[index]
+                            self.assertIsInstance(required, dict)
+                            expected = {
+                                "strict": required["strict"],
+                                "checks": [*required["checks"], {"context": barrier, "app_id": 4_766_933}],
+                            }
+                            self.assertEqual(payload, expected)
+                            state["updates"] = int(state["updates"]) + 1
+                            if mode == "api_failure":
+                                return response({}, 1)
+                            if mode == "invalid_response":
+                                return response({"strict": True, "checks": "invalid"})
+                            if mode == "existing_loss":
+                                applied = {"strict": required["strict"], "checks": [{"context": barrier, "app_id": 4_766_933}]}
+                            else:
+                                applied = expected
+                            returned = {
+                                "url": required["url"],
+                                "contexts_url": required["contexts_url"],
+                                "strict": applied["strict"],
+                                "checks": applied["checks"],
+                                "contexts": [item["context"] for item in applied["checks"]],
+                            }
+                            required["strict"] = applied["strict"]
+                            required["checks"] = applied["checks"]
+                            required["contexts"] = [item["context"] for item in applied["checks"]]
+                            if mode == "after_mismatch":
+                                required["strict"] = False
+                            if mode == "response_mismatch":
+                                returned["strict"] = False
+                            return response(returned)
+
+                        output_fd, output_name = tempfile.mkstemp()
+                        os.close(output_fd)
+                        environment = {
+                            "GITHUB_REPOSITORY": "owner/repository", "PATH": os.environ["PATH"],
+                            "ADMIN_TOKEN": "admin", "DEFAULT_BRANCH": "master", "CHECK_APP_ID": "4766933",
+                            "PRIORITY": "true", "DEFAULT_HEAD": "a" * 40, "DISPATCHER_RUN_ID": "99",
+                            "GITHUB_OUTPUT": output_name,
+                        }
+                        try:
+                            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                                try:
+                                    exec(code, {"__name__": "__main__"})
+                                except SystemExit:
+                                    result = 1
+                                else:
+                                    result = 0
+                        finally:
+                            os.unlink(output_name)
+                        if mode == "success":
+                            self.assertEqual(result, 0)
+                            self.assertEqual(state["updates"], 1)
+                            self.assertEqual(state["reads"], 2)
+                            required = state["protection"]["required_status_checks"]  # type: ignore[index]
+                            self.assertEqual(required["strict"], True)
+                            self.assertEqual(required["contexts"], [item["context"] for item in baseline_checks] + [barrier])
+                            self.assertEqual(required["checks"][-1], {"context": barrier, "app_id": 4_766_933})
+                            self.assertEqual(required["checks"][:-1], baseline_checks)
+                        else:
+                            self.assertEqual(result, 1)
+                            if mode in {"null_app", "wrong_app", "missing_url", "missing_contexts_url", "mismatched_url", "extra_url"}:
+                                self.assertEqual(state["updates"], 0)
 
     def test_resolver_snapshot_failure_keeps_an_app_bound_global_barrier_and_stops_handoff(self) -> None:
         """The fallible resolver cannot run before an App-bound merge fence."""
@@ -2943,9 +3142,12 @@ raise SystemExit(91)
             return subprocess.CompletedProcess([], code, json.dumps(value), "")
 
         barrier = "KRR / PR governance affected-head barrier"
+        status_checks_url = "https://api.github.com/repos/owner/repository/branches/master/protection/required_status_checks"
         state: dict[str, object] = {
             "protection": {
                 "required_status_checks": {
+                    "url": status_checks_url,
+                    "contexts_url": status_checks_url + "/contexts",
                     "strict": True,
                     "contexts": ["CI / test"],
                     "checks": [{"context": "CI / test", "app_id": None}],
@@ -2966,17 +3168,21 @@ raise SystemExit(91)
             endpoint = route(arguments)
             if endpoint == "repos/owner/repository/branches/master/protection":
                 return response(state["protection"])
-            if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks/contexts":
-                self.assertEqual(arguments[arguments.index("--method") + 1], "POST")
-                self.assertEqual(json.loads(str(kwargs["input"])), {"contexts": [barrier]})
+            if endpoint == "repos/owner/repository/branches/master/protection/required_status_checks":
+                method = arguments[arguments.index("--method") + 1]
+                self.assertIn(method, {"PUT", "PATCH"})
                 required = state["protection"]["required_status_checks"]  # type: ignore[index]
                 self.assertIsInstance(required, dict)
+                expected = json.loads(str(kwargs["input"]))
+                self.assertEqual(expected, {
+                    "strict": required["strict"],
+                    "checks": [*required["checks"], {"context": barrier, "app_id": 4_766_933}],
+                })
                 contexts = required["contexts"]; checks = required["checks"]
                 self.assertIsInstance(contexts, list); self.assertIsInstance(checks, list)
-                if barrier not in contexts:
-                    contexts.append(barrier); checks.append({"context": barrier, "app_id": 4_766_933})
-                state["mutations"].append("POST")  # type: ignore[index]
-                return response(contexts)
+                contexts.append(barrier); checks.append({"context": barrier, "app_id": 4_766_933})
+                state["mutations"].append("ACTIVATE")  # type: ignore[index]
+                return response({"url": required["url"], "contexts_url": required["contexts_url"], "strict": required["strict"], "checks": checks, "contexts": contexts})
             raise AssertionError(arguments)
 
         def run(code: str, environment: dict[str, str]) -> int:
@@ -3050,7 +3256,7 @@ raise SystemExit(91)
             )
             self.assertNotEqual(failed.returncode, 0)
             self.assertFalse((directory / "resolver-output").exists())
-            self.assertEqual(state["mutations"], ["POST"])
+            self.assertEqual(state["mutations"], ["ACTIVATE"])
 
     def test_resolver_failure_barrier_rejects_reruns_before_any_mutation(self) -> None:
         """A rerun must not arm a barrier that its rerun-skipped reconciler cannot release."""

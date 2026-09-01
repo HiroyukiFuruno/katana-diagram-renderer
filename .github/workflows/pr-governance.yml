@@ -606,7 +606,7 @@ jobs:
           token=os.environ.get("ADMIN_TOKEN", "")
           if not token:
               raise SystemExit("Resolver-failure barrier token is invalid.")
-          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments):
               result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
               if result.returncode!=0:
@@ -619,35 +619,40 @@ jobs:
               return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)
           def records(protection):
               required=protection.get("required_status_checks") if isinstance(protection,dict) else None; checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
-              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool:
+              if not isinstance(required,dict) or set(required)!={"url","contexts_url","strict","contexts","checks"} or required["url"]!=status_checks_url or required["contexts_url"]!=contexts_url or not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool:
                   raise SystemExit("Resolver-failure barrier branch protection is invalid.")
               result=[]
               for item in checks:
                   if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int):
                       raise SystemExit("Resolver-failure barrier branch protection is invalid.")
                   result.append((item["context"],item["app_id"]))
-              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts:
+              if len(set(result))!=len(result) or len({name for name,_ in result})!=len(result) or [name for name,_ in result]!=contexts:
                   raise SystemExit("Resolver-failure barrier branch protection is invalid.")
-              return result
-          def mutate():
-              result=subprocess.run(["gh","api","--hostname","github.com","--method","POST",contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              return required,result
+          def mutate(method):
+              if method!="PATCH": raise SystemExit("Resolver-failure barrier activation method is invalid.")
+              body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
               if result.returncode!=0:
                   return None
               try:
                   value=json.loads(result.stdout)
               except json.JSONDecodeError:
                   return None
-              return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) and context in value else None
-          before=request([protection_endpoint]); before_records=records(before); matches=[record for record in before_records if record[0]==context]
+              return value if isinstance(value,dict) else None
+          before=request([protection_endpoint]); _before_required,before_records=records(before); matches=[record for record in before_records if record[0]==context]
           if matches==[(context,app_id)]:
               raise SystemExit(0)
           if matches:
               raise SystemExit("Resolver-failure barrier has an unexpected App source.")
-          response=mutate(); after=request([protection_endpoint]); after_records=records(after)
-          if not any(record[0]==context for record in after_records):
-              response=mutate(); after=request([protection_endpoint]); after_records=records(after)
-          expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[*expected_required["checks"],{"context":context,"app_id":app_id}]; expected_required["contexts"]=[*expected_required["contexts"],context]
-          if response is None or after_records.count((context,app_id))!=1 or canonical(after)!=canonical(expected):
+          expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]
+          expected_required["checks"]=[{"context":context,"app_id":app_id} if name==context else {"context":name,"app_id":owner} for name,owner in before_records]
+          if not matches:
+              expected_required["checks"].append({"context":context,"app_id":app_id})
+              expected_required["contexts"]=[*expected_required["contexts"],context]
+          _expected_required,expected_records=records(expected)
+          response=mutate("PATCH"); after=request([protection_endpoint]); _after_required,after_records=records(after)
+          if response is None or canonical(response)!=canonical(expected_required) or after_records!=expected_records or canonical(after)!=canonical(expected):
               raise SystemExit("Resolver-failure barrier atomic activation failed; manual recovery is required.")
           PY
 
@@ -1532,7 +1537,7 @@ jobs:
           if configured_app!=str(app_id) or re.fullmatch(r"[A-Za-z0-9._/-]+",branch) is None or priority not in {"true","false"}: raise SystemExit("Affected-head barrier identity is invalid.")
           token=os.environ.get("ADMIN_TOKEN", "")
           if not token: raise SystemExit("Affected-head barrier token is invalid.")
-          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments):
               result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
               if result.returncode!=0: raise SystemExit("Affected-head barrier API request failed.")
@@ -1541,29 +1546,34 @@ jobs:
           def canonical(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True)
           def records(protection):
               required=protection.get("required_status_checks") if isinstance(protection,dict) else None; checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
-              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              if not isinstance(required,dict) or set(required)!={"url","contexts_url","strict","contexts","checks"} or required["url"]!=status_checks_url or required["contexts_url"]!=contexts_url or not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
               result=[]
               for item in checks:
                   if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int): raise SystemExit("Affected-head barrier branch protection is invalid.")
                   result.append((item["context"],item["app_id"]))
-              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
-              return result
+              if len(set(result))!=len(result) or len({name for name,_ in result})!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              return required,result
           def mutate(method):
-              result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              if method!="PATCH": raise SystemExit("Affected-head barrier activation method is invalid.")
+              body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
               if result.returncode!=0: return None
               try: value=json.loads(result.stdout)
               except json.JSONDecodeError: return None
-              return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) and context in value else None
-          before=request([protection_endpoint]); before_records=records(before); matches=[record for record in before_records if record[0]==context]
+              return value if isinstance(value,dict) else None
+          before=request([protection_endpoint]); _before_required,before_records=records(before); matches=[record for record in before_records if record[0]==context]
           if matches==[(context,app_id)]: active=True
           elif matches: raise SystemExit("Affected-head barrier has an unexpected App source.")
           elif priority=="false": active=False
           else:
-              response=mutate("POST"); after=request([protection_endpoint]); after_records=records(after)
-              if not any(record[0]==context for record in after_records):
-                  response=mutate("POST"); after=request([protection_endpoint]); after_records=records(after)
-              expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]; expected_required["checks"]=[*expected_required["checks"],{"context":context,"app_id":app_id}]; expected_required["contexts"]=[*expected_required["contexts"],context]
-              if response is None or after_records.count((context,app_id))!=1 or canonical(after)!=canonical(expected): raise SystemExit("Affected-head barrier atomic activation failed; manual recovery is required.")
+              expected=copy.deepcopy(before); expected_required=expected["required_status_checks"]
+              expected_required["checks"]=[{"context":context,"app_id":app_id} if name==context else {"context":name,"app_id":owner} for name,owner in before_records]
+              if not matches:
+                  expected_required["checks"].append({"context":context,"app_id":app_id})
+                  expected_required["contexts"]=[*expected_required["contexts"],context]
+              _expected_required,expected_records=records(expected)
+              response=mutate("PATCH"); after=request([protection_endpoint]); _after_required,after_records=records(after)
+              if response is None or canonical(response)!=canonical(expected_required) or after_records!=expected_records or canonical(after)!=canonical(expected): raise SystemExit("Affected-head barrier atomic activation failed; manual recovery is required.")
               active=True
           with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("active="+("true" if active else "false")+"\n")
           PY
@@ -2381,7 +2391,7 @@ jobs:
           if configured_app!=str(app_id) or re.fullmatch(r"[A-Za-z0-9._/-]+",branch) is None or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or re.fullmatch(r"[1-9][0-9]*",dispatcher) is None or workflow_ref!=f"{repository}/{writer_path}@refs/heads/{branch}" or workflow_sha.lower()!=head.lower(): raise SystemExit("Affected-head barrier release identity is invalid.")
           read_token=os.environ.get("READ_TOKEN", ""); admin_token=os.environ.get("ADMIN_TOKEN", "")
           if not read_token or not admin_token or read_token==admin_token: raise SystemExit("Affected-head barrier release token boundary is invalid.")
-          read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; admin_env={"GH_TOKEN":admin_token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"
+          read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; admin_env={"GH_TOKEN":admin_token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments, *, env, body=None):
               result=subprocess.run(["gh","api","--hostname","github.com",*arguments],input=body,capture_output=True,text=True,check=False,env=env)
               if result.returncode!=0: raise SystemExit("Affected-head barrier release API request failed.")
@@ -2391,12 +2401,12 @@ jobs:
           def records(protection):
               required=protection.get("required_status_checks") if isinstance(protection,dict) else None
               checks=required.get("checks") if isinstance(required,dict) else None; contexts=required.get("contexts") if isinstance(required,dict) else None; strict=required.get("strict") if isinstance(required,dict) else None
-              if not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              if not isinstance(required,dict) or set(required)!={"url","contexts_url","strict","contexts","checks"} or required["url"]!=status_checks_url or required["contexts_url"]!=contexts_url or not isinstance(checks,list) or not isinstance(contexts,list) or type(strict) is not bool: raise SystemExit("Affected-head barrier branch protection is invalid.")
               result=[]
               for item in checks:
                   if not isinstance(item,dict) or set(item)!={"context","app_id"} or not isinstance(item["context"],str) or not item["context"] or "\x00" in item["context"] or (item["app_id"] is not None and type(item["app_id"]) is not int): raise SystemExit("Affected-head barrier branch protection is invalid.")
                   result.append((item["context"],item["app_id"]))
-              if len(set(result))!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
+              if len(set(result))!=len(result) or len({name for name,_ in result})!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
               return required,result
           def mutate(method):
               result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
@@ -2404,6 +2414,13 @@ jobs:
               try: value=json.loads(result.stdout)
               except json.JSONDecodeError: return None
               return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) else None
+          def restore(expected_required):
+              body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              if result.returncode!=0: return None
+              try: value=json.loads(result.stdout)
+              except json.JSONDecodeError: return None
+              return value if isinstance(value,dict) else None
           def path_matches(value):
               if value==writer_path: return True
               if not isinstance(value,str) or not value.startswith(writer_path+"@"): return False
@@ -2507,8 +2524,8 @@ jobs:
               # 通信失敗によるmerge gapを作らない。
               if not any(name==context for name,_owner in after_records):
                   for _ in range(2):
-                      restored=mutate("POST"); repaired=request([protection_endpoint],env=admin_env); _repaired_required,repaired_records=records(repaired)
-                      if restored is not None and repaired_records.count((context,app_id))==1: raise SystemExit("Affected-head barrier DELETE was uncertain and was restored.")
+                      restored=restore(before["required_status_checks"]); repaired=request([protection_endpoint],env=admin_env); _repaired_required,repaired_records=records(repaired)
+                      if restored is not None and canonical(restored)==canonical(before["required_status_checks"]) and repaired_records==before_records and canonical(repaired)==canonical(before): raise SystemExit("Affected-head barrier DELETE was uncertain and was restored.")
               raise SystemExit("Affected-head barrier atomic release failed; manual recovery is required.")
           if context in response or any(name==context for name,_owner in after_records) or canonical(after)!=canonical(expected): raise SystemExit("Affected-head barrier branch protection drifted during release.")
           PY
