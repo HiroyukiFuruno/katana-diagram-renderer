@@ -1165,13 +1165,18 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "historical-ref": ({"PR_BASE_REF": "release/v1"}, 1),
             "final-tip": ({"FINAL_TIP": "e" * 40}, 1),
             "workflow": ({"TIP_BLOB": {"sha": "e" * 40}}, 1),
+            "initial-number-boolean": ({"INITIAL": {**initial, "number": True}}, 1),
+            "final-number-boolean": ({"FINAL": {**initial, "number": True}}, 1),
         }
         for name, (override, expected) in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+                source_number = 1 if name.endswith("number-boolean") else 72
+                case_initial = {**initial, "number": source_number}
+                case_pulls = [[{**pulls[0][0], "number": source_number}, pulls[0][1]]]
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
-                    "  *'/pulls/72'*) if [ -e \"${PULL_STATE}\" ]; then printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
+                    "  *'/pulls/'\"${PR_NUMBER}\"*) if [ -e \"${PULL_STATE}\" ]; then printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     "  *'/git/ref/heads/master'*) if [ -e \"${REF_STATE}\" ]; then printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
                     "  *'/compare/'*) printf '%s' \"${COMPARE}\" ;;\n"
@@ -1183,12 +1188,13 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 compare = override.get("COMPARE", {"status": "ahead", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": source_base}, "head_commit": {"sha": tip}})
-                final = override.get("FINAL", initial)
+                initial_payload = override.get("INITIAL", case_initial)
+                final = override.get("FINAL", case_initial)
                 final_tip = override.get("FINAL_TIP", tip)
                 environment = os.environ | {
-                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": str(source_number), "PR_HEAD_SHA": head,
                     "PR_BASE_SHA": source_base, "PR_BASE_REF": override.get("PR_BASE_REF", "master"), "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "", "GITHUB_REPOSITORY": "owner/repository",
-                    "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls), "INITIAL": json.dumps(initial), "FINAL": json.dumps(final),
+                    "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(case_pulls), "INITIAL": json.dumps(initial_payload), "FINAL": json.dumps(final),
                     "INITIAL_REF": json.dumps({"object": {"sha": tip}}), "FINAL_REF": json.dumps({"object": {"sha": final_tip}}), "COMPARE": json.dumps(compare),
                     "SOURCE_BLOB": json.dumps({"sha": "c" * 40}), "HEAD_BLOB": json.dumps({"sha": "c" * 40}), "TIP_BLOB": json.dumps(override.get("TIP_BLOB", {"sha": "c" * 40})),
                     "PULL_STATE": str(directory / "pull-state"), "REF_STATE": str(directory / "ref-state"), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
@@ -1210,17 +1216,19 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             label: str, initial_head_repository: object, final_head_repository: object,
             final_base: dict[str, object] | None = None, mode: str = "",
             expected: int = 0, final_tip: str | None = None,
-            expected_state_files: tuple[str, ...] = (),
+            expected_state_files: tuple[str, ...] = (), number: int = 72,
+            final_number: object | None = None,
         ) -> None:
             with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"; log = directory / "gh.log"
                 initial = {
-                    "number": 72, "state": "open",
+                    "number": number, "state": "open",
                     "base": {"sha": tip, "ref": "master", "repo": local},
                     "head": {"sha": head, "repo": initial_head_repository},
                 }
                 final = {
                     **initial,
+                    "number": number if final_number is None else final_number,
                     "base": final_base if final_base is not None else initial["base"],
                     "head": {"sha": head, "repo": final_head_repository},
                 }
@@ -1228,7 +1236,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "#!/bin/sh\ncase \"$*\" in\n"
                     # Keep the exact source binding ahead of the paginated
                     # open-PR pattern, then mark its final re-read separately.
-                    "  *'/pulls/72'*) if [ -e \"${PULL_STATE}\" ]; then : > \"${FINAL_PULL_STATE}\"; [ \"${MODE}\" = final-pull-failure ] && exit 7; printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
+                    "  *'/pulls/'\"${PR_NUMBER}\"*) if [ -e \"${PULL_STATE}\" ]; then : > \"${FINAL_PULL_STATE}\"; [ \"${MODE}\" = final-pull-failure ] && exit 7; printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     # REF_STATE drives the first T and final U ref reads.
                     "  *'/git/ref/heads/master'*) [ \"${MODE}\" = ref-failure ] && exit 7; if [ -e \"${REF_STATE}\" ]; then : > \"${FINAL_REF_STATE}\"; printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
@@ -1241,7 +1249,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 final_tip_value = final_tip if final_tip is not None else (final["base"]["sha"] if isinstance(final["base"], dict) else tip)
                 environment = os.environ | {
-                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": str(number), "PR_HEAD_SHA": head,
                     "PR_BASE_SHA": source_base, "PR_BASE_REF": "master", "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "",
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
                     "INITIAL": json.dumps(initial), "FINAL": json.dumps(final), "PULLS": "[[]]",
@@ -1280,6 +1288,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         run_case("final-repository-default-branch-drift", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="final-default-branch-drift", expected=1, expected_state_files=final_reads)
         run_case("final-pull-api-failure", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="final-pull-failure", expected=1, expected_state_files=("final-repository-state", "final-pull-state"))
         run_case("default-tip-api-failure", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="ref-failure", expected=1)
+        run_case("final-number-boolean", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, expected=1, number=1, final_number=True)
 
     def test_dispatcher_rejects_duplicate_foreign_pr_across_pages(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
@@ -1628,6 +1637,86 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         for mode in ("api-failure", "invalid-json"):
             with self.subTest(source=mode):
                 run_scope(workflow_run("CI", "pull_request"), local_pull, "true", "false", mode)
+
+    def test_closed_local_workflow_run_is_reread_before_prebarrier_noop(self) -> None:
+        """Only a stable, local, closed source may skip the resolver barrier."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        repository = "owner/repository"; base = "b" * 40; head = "a" * 40
+        api_repository = {
+            "id": 101, "name": "repository",
+            "url": "https://api.github.com/repos/owner/repository",
+        }
+        run_repository = {"id": 101, "full_name": repository}
+        source_base = {"ref": "master", "sha": base, "repo": api_repository}
+        source_head = {"sha": head, "repo": api_repository}
+        initial_run = {
+            "id": 9, "name": "CI", "path": ".github/workflows/test-and-build.yml@master",
+            "event": "pull_request", "status": "completed", "run_number": 1, "run_attempt": 1,
+            "head_sha": head, "repository": run_repository,
+            "pull_requests": [{"number": 72, "base": source_base, "head": source_head}],
+        }
+        initial_pull = {
+            "number": 72, "state": "closed",
+            "base": {"ref": "master", "sha": base, "repo": {"id": 101, "full_name": repository}},
+            "head": {"sha": head, "repo": {"id": 101, "full_name": repository}},
+        }
+
+        cases = (
+            ("stable", {}, {}, {}, "false", "true"),
+            ("final-run-attempt-race", {"run_attempt": 2}, {}, {}, "true", "false"),
+            ("final-run-head-race", {"head_sha": "c" * 40}, {}, {}, "true", "false"),
+            ("final-source-repository-race", {"pull_requests": [{"number": 72, "base": source_base, "head": {"sha": head, "repo": {**api_repository, "id": 102}}}]}, {}, {}, "true", "false"),
+            ("final-pull-head-race", {}, {"head": {"sha": "c" * 40, "repo": {"id": 101, "full_name": repository}}}, {}, "true", "false"),
+            ("retargeted-pull", {}, {"base": {"ref": "release/v0.4", "sha": base, "repo": {"id": 101, "full_name": repository}}}, {}, "true", "false"),
+            ("reopened-pull", {}, {"state": "open"}, {}, "true", "false"),
+            ("default-branch-race", {}, {}, {"default_branch": "release/v0.4"}, "true", "false"),
+            ("boolean-final-source-number", {"pull_requests": [{"number": True, "base": source_base, "head": source_head}]}, {}, {}, "true", "false"),
+            ("boolean-final-pull-number", {}, {"number": True}, {}, "true", "false"),
+        )
+        for label, run_change, pull_change, final_repository, expected_reconcile, expected_valid in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "scope-output"; run_reads = 0; pull_reads = 0; repository_reads = 0
+                number = 1 if label.startswith("boolean-") else 72
+                case_run = {**initial_run, "pull_requests": [{"number": number, "base": source_base, "head": source_head}]}
+                case_pull = {**initial_pull, "number": number}
+                final_run = {**case_run, **run_change}
+                final_pull = {**case_pull, **pull_change}
+
+                def response(value: object) -> subprocess.CompletedProcess[str]:
+                    return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+                def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    nonlocal run_reads, pull_reads, repository_reads
+                    endpoint = arguments[-1]
+                    if endpoint == f"repos/{repository}":
+                        repository_reads += 1
+                        return response({"default_branch": "master"} if repository_reads == 1 else {"default_branch": "master"} | final_repository)
+                    if endpoint == f"repos/{repository}/actions/runs/9":
+                        run_reads += 1
+                        return response(case_run if run_reads == 1 else final_run)
+                    if endpoint == f"repos/{repository}/pulls/{number}":
+                        pull_reads += 1
+                        return response(case_pull if pull_reads == 1 else final_pull)
+                    raise AssertionError(arguments)
+
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": repository, "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed",
+                    "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_OUTPUT": str(output),
+                }
+                with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                    exec(self._workflow_program(scope_match), {"__name__": "__main__"})
+                values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(values["reconcile"], expected_reconcile)
+                self.assertEqual(values["valid"], expected_valid)
+                self.assertEqual(values["priority"], "true")
+                self.assertEqual(run_reads, 2)
+                self.assertEqual(pull_reads, 2)
+                self.assertEqual(repository_reads, 2)
 
     def test_unchanged_fork_pull_request_target_is_excluded_before_barrier_mutation(self) -> None:
         """Only a fully bound, unchanged foreign/deleted fork may skip the shared lock."""
