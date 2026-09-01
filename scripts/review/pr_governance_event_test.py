@@ -1136,6 +1136,88 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                     self.assertEqual(values["event_targets"], "[72,73]")
 
+    def test_pull_request_target_historical_fork_base_is_a_stable_no_op(self) -> None:
+        """A historical default-base event must not pin the barrier for an explicit fork."""
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        source_base, tip, head = "b" * 40, "d" * 40, "a" * 40
+        local = {"full_name": "owner/repository"}
+
+        def run_case(
+            label: str, initial_head_repository: object, final_head_repository: object,
+            final_base: dict[str, object] | None = None, mode: str = "",
+            expected: int = 0, final_tip: str | None = None,
+            expected_state_files: tuple[str, ...] = (),
+        ) -> None:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); fake = directory / "gh"; output = directory / "output"; log = directory / "gh.log"
+                initial = {
+                    "number": 72, "state": "open",
+                    "base": {"sha": tip, "ref": "master", "repo": local},
+                    "head": {"sha": head, "repo": initial_head_repository},
+                }
+                final = {
+                    **initial,
+                    "base": final_base if final_base is not None else initial["base"],
+                    "head": {"sha": head, "repo": final_head_repository},
+                }
+                fake.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    # Keep the exact source binding ahead of the paginated
+                    # open-PR pattern, then mark its final re-read separately.
+                    "  *'/pulls/72'*) if [ -e \"${PULL_STATE}\" ]; then : > \"${FINAL_PULL_STATE}\"; [ \"${MODE}\" = final-pull-failure ] && exit 7; printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
+                    "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                    # REF_STATE drives the first T and final U ref reads.
+                    "  *'/git/ref/heads/master'*) [ \"${MODE}\" = ref-failure ] && exit 7; if [ -e \"${REF_STATE}\" ]; then : > \"${FINAL_REF_STATE}\"; printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
+                    "  *'/contents/'*|*'/compare/'*) echo unexpected-workflow-proof >> \"${GH_LOG}\"; exit 91 ;;\n"
+                    # This endpoint is reached only by the final repository re-read.
+                    "  *'repos/owner/repository'*) : > \"${FINAL_REPOSITORY_STATE}\"; [ \"${MODE}\" = final-repository-failure ] && exit 7; if [ \"${MODE}\" = final-default-branch-drift ]; then printf '%s' '{\"default_branch\":\"release/v1\"}'; else printf '%s' '{\"default_branch\":\"master\"}'; fi ;;\n"
+                    "  *) exit 92 ;;\nesac\n",
+                    encoding="utf-8",
+                )
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                final_tip_value = final_tip if final_tip is not None else (final["base"]["sha"] if isinstance(final["base"], dict) else tip)
+                environment = os.environ | {
+                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                    "PR_BASE_SHA": source_base, "PR_BASE_REF": "master", "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "",
+                    "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                    "INITIAL": json.dumps(initial), "FINAL": json.dumps(final), "PULLS": "[[]]",
+                    "INITIAL_REF": json.dumps({"object": {"sha": tip}}), "FINAL_REF": json.dumps({"object": {"sha": final_tip_value}}),
+                    "PULL_STATE": str(directory / "pull-state"), "FINAL_PULL_STATE": str(directory / "final-pull-state"),
+                    "REF_STATE": str(directory / "ref-state"), "FINAL_REF_STATE": str(directory / "final-ref-state"),
+                    "FINAL_REPOSITORY_STATE": str(directory / "final-repository-state"), "GH_LOG": str(log), "MODE": mode,
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                for state_file in expected_state_files:
+                    self.assertTrue((directory / state_file).exists(), state_file)
+                if expected == 0:
+                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(values["reconcile"], "true")
+                    self.assertEqual(values["event_targets"], "[]")
+                    self.assertEqual(values["priority_targets"], "[]")
+                    self.assertFalse(log.exists(), log.read_text(encoding="utf-8") if log.exists() else "")
+                    self.assertTrue((directory / "final-pull-state").exists())
+                    self.assertTrue((directory / "final-ref-state").exists())
+                    self.assertTrue((directory / "final-repository-state").exists())
+
+        for label, head_repository in (
+            ("fork", {"full_name": "fork/repository", "id": 202}),
+            ("deleted-fork", None),
+        ):
+            run_case(label, head_repository, head_repository)
+
+        run_case("malformed-fork", {"full_name": "fork/repository"}, {"full_name": "fork/repository"}, expected=1)
+        run_case("fork-head-race", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 203}, expected=1)
+        run_case("default-ref-race", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, {"sha": tip, "ref": "release/v1", "repo": local}, expected=1)
+        final_reads = ("final-pull-state", "final-ref-state", "final-repository-state")
+        run_case("default-tip-race", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, final_tip="e" * 40, expected=1, expected_state_files=final_reads)
+        run_case("final-repository-api-failure", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="final-repository-failure", expected=1, expected_state_files=("final-repository-state",))
+        run_case("final-repository-default-branch-drift", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="final-default-branch-drift", expected=1, expected_state_files=final_reads)
+        run_case("final-pull-api-failure", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="final-pull-failure", expected=1, expected_state_files=("final-repository-state", "final-pull-state"))
+        run_case("default-tip-api-failure", {"full_name": "fork/repository", "id": 202}, {"full_name": "fork/repository", "id": 202}, mode="ref-failure", expected=1)
+
     def test_dispatcher_rejects_duplicate_foreign_pr_across_pages(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None

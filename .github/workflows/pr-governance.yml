@@ -803,46 +803,99 @@ jobs:
                   and isinstance(current_head_repository, dict)
                   and current_head_repository.get("full_name") == repository
               )
-              # GitHub can queue a pull_request_target event at an older base
-              # B and expose the same open local PR at a later default tip T.
-              # Accept only that monotonic default-branch advance.  This is
-              # deliberately as strict as workflow_run binding: no retarget,
-              # head, repository, workflow, or final default-ref race can
-              # convert a historical event into a current reconciliation.
-              if current_base["sha"] != source_base:
-                  if os.environ.get("PR_BASE_REF") != default_branch or expected_state != "open" or current_base_ref != default_branch or not source_is_local:
-                      raise SystemExit("pull_request_target source base changed before revalidation.")
-                  tip = default_tip(default_branch)
-                  source_blob = workflow_blob(".github/workflows/pr-governance.yml", source_base)
-                  head_blob = workflow_blob(".github/workflows/pr-governance.yml", source_head)
-                  tip_blob = workflow_blob(".github/workflows/pr-governance.yml", tip) if tip is not None else None
-                  ancestry_valid = base_reaches_tip(source_base, tip) if tip is not None else False
-                  final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
-                  final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
-                  final_tip = default_tip(default_branch)
-                  try:
-                      final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
-                      final_pull = json.loads(final_source.stdout) if final_source.returncode == 0 else None
-                  except json.JSONDecodeError:
-                      final_repo = None
-                      final_pull = None
-                  final_base = final_pull.get("base") if isinstance(final_pull, dict) else None
-                  final_head = final_pull.get("head") if isinstance(final_pull, dict) else None
-                  final_base_repo = final_base.get("repo") if isinstance(final_base, dict) else None
-                  final_head_repo = final_head.get("repo") if isinstance(final_head, dict) else None
+              def foreign_head_binding(value):
+                  if value is None:
+                      return ("deleted",)
+                  if not isinstance(value, dict):
+                      return None
+                  full_name = value.get("full_name")
+                  identifier = value.get("id")
                   if (
-                      tip is None or current_base["sha"] != tip or not ancestry_valid
-                      or source_blob is None or head_blob is None or tip_blob is None
-                      or source_blob != head_blob or source_blob != tip_blob
-                      or not isinstance(final_repo, dict) or final_repo.get("default_branch") != default_branch
-                      or final_tip != tip
-                      or not isinstance(final_pull, dict) or final_pull.get("number") != source_number_value or final_pull.get("state") != "open"
-                      or not isinstance(final_base, dict) or not isinstance(final_head, dict)
-                      or final_base.get("ref") != default_branch or final_base.get("sha") != tip or final_head.get("sha") != source_head
-                      or not isinstance(final_base_repo, dict) or final_base_repo.get("full_name") != repository
-                      or not isinstance(final_head_repo, dict) or final_head_repo.get("full_name") != repository
+                      not isinstance(full_name, str)
+                      or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", full_name) is None
+                      or full_name == repository
+                      or type(identifier) is not int
+                      or identifier < 1
                   ):
-                      raise SystemExit("pull_request_target current default source drifted.")
+                      return None
+                  return ("fork", full_name, identifier)
+              # GitHub can queue a pull_request_target event at an older base
+              # B and expose the same open PR at a later default tip T. A
+              # local PR accepts only that monotonic advance. An explicitly
+              # identified fork (including a deleted fork) is outside this
+              # repository's governance domain, but still requires stable
+              # default-tip and final-source reads before it may be a no-op.
+              # Ambiguous head metadata, retargets, and every local race stay
+              # fail-closed.
+              if current_base["sha"] != source_base:
+                  if (
+                      os.environ.get("PR_BASE_REF") != default_branch
+                      or expected_state != "open"
+                      or current_base_ref != default_branch
+                      or current_base_repository.get("full_name") != repository
+                  ):
+                      raise SystemExit("pull_request_target source base changed before revalidation.")
+                  if source_is_local:
+                      tip = default_tip(default_branch)
+                      source_blob = workflow_blob(".github/workflows/pr-governance.yml", source_base)
+                      head_blob = workflow_blob(".github/workflows/pr-governance.yml", source_head)
+                      tip_blob = workflow_blob(".github/workflows/pr-governance.yml", tip) if tip is not None else None
+                      ancestry_valid = base_reaches_tip(source_base, tip) if tip is not None else False
+                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
+                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
+                      final_tip = default_tip(default_branch)
+                      try:
+                          final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
+                          final_pull = json.loads(final_source.stdout) if final_source.returncode == 0 else None
+                      except json.JSONDecodeError:
+                          final_repo = None
+                          final_pull = None
+                      final_base = final_pull.get("base") if isinstance(final_pull, dict) else None
+                      final_head = final_pull.get("head") if isinstance(final_pull, dict) else None
+                      final_base_repo = final_base.get("repo") if isinstance(final_base, dict) else None
+                      final_head_repo = final_head.get("repo") if isinstance(final_head, dict) else None
+                      if (
+                          tip is None or current_base["sha"] != tip or not ancestry_valid
+                          or source_blob is None or head_blob is None or tip_blob is None
+                          or source_blob != head_blob or source_blob != tip_blob
+                          or not isinstance(final_repo, dict) or final_repo.get("default_branch") != default_branch
+                          or final_tip != tip
+                          or not isinstance(final_pull, dict) or final_pull.get("number") != source_number_value or final_pull.get("state") != "open"
+                          or not isinstance(final_base, dict) or not isinstance(final_head, dict)
+                          or final_base.get("ref") != default_branch or final_base.get("sha") != tip or final_head.get("sha") != source_head
+                          or not isinstance(final_base_repo, dict) or final_base_repo.get("full_name") != repository
+                          or not isinstance(final_head_repo, dict) or final_head_repo.get("full_name") != repository
+                      ):
+                          raise SystemExit("pull_request_target current default source drifted.")
+                  else:
+                      current_foreign_head = foreign_head_binding(current_head_repository)
+                      if current_foreign_head is None:
+                          raise SystemExit("pull_request_target source head is not an explicit fork.")
+                      tip = default_tip(default_branch)
+                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
+                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
+                      final_tip = default_tip(default_branch)
+                      try:
+                          final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
+                          final_pull = json.loads(final_source.stdout) if final_source.returncode == 0 else None
+                      except json.JSONDecodeError:
+                          final_repo = None
+                          final_pull = None
+                      final_base = final_pull.get("base") if isinstance(final_pull, dict) else None
+                      final_head = final_pull.get("head") if isinstance(final_pull, dict) else None
+                      final_base_repo = final_base.get("repo") if isinstance(final_base, dict) else None
+                      final_head_repo = final_head.get("repo") if isinstance(final_head, dict) and "repo" in final_head else object()
+                      if (
+                          tip is None or current_base["sha"] != tip
+                          or not isinstance(final_repo, dict) or final_repo.get("default_branch") != default_branch
+                          or final_tip != tip
+                          or not isinstance(final_pull, dict) or final_pull.get("number") != source_number_value or final_pull.get("state") != "open"
+                          or not isinstance(final_base, dict) or not isinstance(final_head, dict)
+                          or final_base.get("ref") != default_branch or final_base.get("sha") != tip or final_head.get("sha") != source_head
+                          or not isinstance(final_base_repo, dict) or final_base_repo.get("full_name") != repository
+                          or foreign_head_binding(final_head_repo) != current_foreign_head
+                      ):
+                          raise SystemExit("pull_request_target current fork source drifted.")
               if current_base_ref != default_branch or not source_is_local:
                   # A public fork is outside the App's governance domain. A
                   # local retarget can, however, remove a former duplicate
