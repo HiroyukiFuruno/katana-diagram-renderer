@@ -1081,6 +1081,61 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
 
+    def test_pull_request_target_accepts_only_a_monotonic_historical_default_base(self) -> None:
+        """A queued default-base event may advance, but every other race fails closed."""
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        source_base, tip, head = "b" * 40, "d" * 40, "a" * 40
+        local = {"full_name": "owner/repository"}
+        initial = {"number": 72, "state": "open", "base": {"sha": tip, "ref": "master", "repo": local}, "head": {"sha": head, "repo": local}}
+        pulls = [[
+            {"number": 72, "state": "open", "body": "Fixes #64", "base": {"ref": "master", "repo": local}, "head": {"repo": local}},
+            {"number": 73, "state": "open", "body": "Fixes #64", "base": {"ref": "master", "repo": local}, "head": {"repo": local}},
+        ]]
+        cases = {
+            "accepted": ({}, 0),
+            "rewind": ({"COMPARE": {"status": "behind", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": source_base}, "head_commit": {"sha": tip}}}, 1),
+            "diverge": ({"COMPARE": {"status": "diverged", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": "c" * 40}, "head_commit": {"sha": tip}}}, 1),
+            "final-head": ({"FINAL": {**initial, "head": {"sha": "c" * 40, "repo": local}}}, 1),
+            "final-repository": ({"FINAL": {**initial, "head": {"sha": head, "repo": {"full_name": "fork/repository"}}}}, 1),
+            "final-ref": ({"FINAL": {**initial, "base": {"sha": tip, "ref": "release/v1", "repo": local}}}, 1),
+            "historical-ref": ({"PR_BASE_REF": "release/v1"}, 1),
+            "final-tip": ({"FINAL_TIP": "e" * 40}, 1),
+            "workflow": ({"TIP_BLOB": {"sha": "e" * 40}}, 1),
+        }
+        for name, (override, expected) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+                fake.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'/pulls/72'*) if [ -e \"${PULL_STATE}\" ]; then printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
+                    "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
+                    "  *'/git/ref/heads/master'*) if [ -e \"${REF_STATE}\" ]; then printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
+                    "  *'/compare/'*) printf '%s' \"${COMPARE}\" ;;\n"
+                    "  *'/contents/'*'ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) printf '%s' \"${SOURCE_BLOB}\" ;;\n"
+                    "  *'/contents/'*'ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'*) printf '%s' \"${HEAD_BLOB}\" ;;\n"
+                    "  *'/contents/'*) printf '%s' \"${TIP_BLOB}\" ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                    "  *) exit 91 ;;\nesac\n",
+                    encoding="utf-8",
+                ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                compare = override.get("COMPARE", {"status": "ahead", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": source_base}, "head_commit": {"sha": tip}})
+                final = override.get("FINAL", initial)
+                final_tip = override.get("FINAL_TIP", tip)
+                environment = os.environ | {
+                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "opened", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                    "PR_BASE_SHA": source_base, "PR_BASE_REF": override.get("PR_BASE_REF", "master"), "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "", "GITHUB_REPOSITORY": "owner/repository",
+                    "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps(pulls), "INITIAL": json.dumps(initial), "FINAL": json.dumps(final),
+                    "INITIAL_REF": json.dumps({"object": {"sha": tip}}), "FINAL_REF": json.dumps({"object": {"sha": final_tip}}), "COMPARE": json.dumps(compare),
+                    "SOURCE_BLOB": json.dumps({"sha": "c" * 40}), "HEAD_BLOB": json.dumps({"sha": "c" * 40}), "TIP_BLOB": json.dumps(override.get("TIP_BLOB", {"sha": "c" * 40})),
+                    "PULL_STATE": str(directory / "pull-state"), "REF_STATE": str(directory / "ref-state"), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected == 0:
+                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(values["event_targets"], "[72,73]")
+
     def test_dispatcher_rejects_duplicate_foreign_pr_across_pages(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None
@@ -2231,6 +2286,26 @@ raise SystemExit(91)
             self.assertTrue(all(item["status"] == "in_progress" and item["conclusion"] is None for item in manifest_checks.values()))
             state["late_event_without_run_list"] = None
             self.assertEqual({item["context"] for item in protection_records()}, old_success)
+
+            # A dispatcher rerun is not a new first-attempt generation.  It
+            # must not turn a safe recovery into a permanent barrier, while
+            # malformed historical records and a rerun of the current source
+            # remain fail-closed.
+            rerun = {**run, "id": 100, "run_attempt": 2, "created_at": "2026-08-30T00:00:02Z"}
+            runs.append(rerun)
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
+            runs.pop()
+            for malformed_attempt in (True, "2", None):
+                with self.subTest(malformed_attempt=malformed_attempt):
+                    self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+                    runs.append({**run, "id": 100, "run_attempt": malformed_attempt, "created_at": "2026-08-30T00:00:02Z"})
+                    self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+                    runs.pop()
+            original_attempt = run["run_attempt"]
+            run["run_attempt"] = 2
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+            run["run_attempt"] = original_attempt
 
             self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
             pulls[:] = []
