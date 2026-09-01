@@ -495,6 +495,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         def execute(
             label: str, pull: dict[str, object], *, comparison: dict[str, object] | None = None,
             tip_blob: str = "c" * 40, final_tip: str | None = None,
+            source_run: dict[str, object] | None = None, source_attempt: str = "1",
         ) -> subprocess.CompletedProcess[str]:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); output = directory / "output"; fake = directory / "gh"
@@ -518,9 +519,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "merge_base_commit": {"sha": base}, "head_commit": {"sha": tip},
                 }
                 environment = os.environ | {
-                    "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1",
+                    "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": source_attempt,
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
-                    "RUN": json.dumps(run), "PULL": json.dumps(pull), "INITIAL_REF": json.dumps({"object": {"sha": tip}}),
+                    "RUN": json.dumps(run if source_run is None else source_run), "PULL": json.dumps(pull), "INITIAL_REF": json.dumps({"object": {"sha": tip}}),
                     "FINAL_REF": json.dumps({"object": {"sha": final_tip if final_tip is not None else tip}}),
                     "COMPARE": json.dumps(compare), "TIP_BLOB": json.dumps({"sha": tip_blob}), "REF_STATE": str(directory / "ref-state"),
                     "CALL_LOG": str(directory / "calls"),
@@ -539,6 +540,36 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 return result
 
         self.assertEqual(execute("base-forward", local_pull).returncode, 0)
+        for name, path in (
+            ("CI", ".github/workflows/test-and-build.yml@master"),
+            ("release-preflight", ".github/workflows/release-preflight.yml@master"),
+        ):
+            with self.subTest(name=name, source="rerun"):
+                retry = {**run, "name": name, "path": path, "run_attempt": 2}
+                self.assertEqual(
+                    execute(
+                        "non-sensor-rerun",
+                        local_pull,
+                        source_run=retry,
+                        source_attempt="2",
+                    ).returncode,
+                    0,
+                )
+        rerun_sensor = {
+            **run,
+            "name": "PR governance review sensor",
+            "path": ".github/workflows/pr-governance-review-events.yml@master",
+            "event": "pull_request_review",
+            "run_attempt": 2,
+        }
+        rerun_result = execute(
+            "review-sensor-rerun",
+            local_pull,
+            source_run=rerun_sensor,
+            source_attempt="2",
+        )
+        self.assertNotEqual(rerun_result.returncode, 0)
+        self.assertIn("workflow_run is not a trusted governance source", rerun_result.stderr)
         rejected = (
             ("rewound-or-diverged", local_pull, {"comparison": {"status": "diverged", "base_commit": {"sha": base}, "merge_base_commit": {"sha": "e" * 40}, "head_commit": {"sha": tip}}}),
             ("current-base-not-tip", {**local_pull, "base": {**local_pull["base"], "sha": "e" * 40}}, {}),
@@ -1606,6 +1637,28 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 expected_priority = "false" if name in {"CI", "release-preflight"} else "true"
                 run_scope(workflow_run(name, event), local_pull, "true", "true", expected_priority=expected_priority)
 
+        rerun_sensor = workflow_run("PR governance review sensor", "pull_request_review")
+        rerun_sensor["run_attempt"] = 2
+        run_scope(
+            rerun_sensor,
+            local_pull,
+            "true",
+            "false",
+            source_attempt="2",
+        )
+        for name in ("CI", "release-preflight"):
+            with self.subTest(name=name, source="rerun"):
+                retry = workflow_run(name, "pull_request")
+                retry["run_attempt"] = 2
+                run_scope(
+                    retry,
+                    local_pull,
+                    "true",
+                    "true",
+                    expected_priority="false",
+                    source_attempt="2",
+                )
+
         # A valid local CI/release run is classified before either shared
         # dispatcher lock. The trigger action remains the identity, while the
         # API re-read may already have moved to a later lifecycle status.
@@ -1816,6 +1869,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("foreign-pull-identity-drift", foreign_source, foreign_pull, foreign_source, {"id": 202, "full_name": "fork/other"}, {}, {}, {}, "true", "false"),
             ("deleted-identity-drift", None, None, None, foreign_pull, {}, {}, {}, "true", "false"),
             ("run-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {"run_attempt": 2}, {}, {}, "true", "false"),
+            ("review-sensor-rerun", foreign_source, foreign_pull, foreign_source, foreign_pull, {"run_attempt": 2}, {}, {}, "true", "false"),
             ("repo-drift", foreign_source, foreign_pull, foreign_source, foreign_pull, {"repository": {"id": 101, "full_name": "owner/other"}}, {}, {}, "true", "false"),
             ("path-ref-drift-foreign", foreign_source, foreign_pull, foreign_source, foreign_pull, {"path": ".github/workflows/test-and-build.yml@release/v0.4"}, {}, {}, "true", "false"),
             ("path-ref-drift-deleted", None, None, None, None, {"path": ".github/workflows/test-and-build.yml@release/v0.4"}, {}, {}, "true", "false"),

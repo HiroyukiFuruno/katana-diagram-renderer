@@ -245,6 +245,7 @@ jobs:
                       or type(run.get("id")) is not int or run.get("id") != int(run_id)
                       or type(run.get("run_number")) is not int
                       or type(run.get("run_attempt")) is not int or run.get("run_attempt") != int(source_attempt)
+                      or (name == "PR governance review sensor" and run.get("run_attempt") != 1)
                       or not isinstance(run_repository, dict) or type(repository_id) is not int or repository_id < 1
                       or run_repository.get("full_name") != repository
                       or type(number) is not int or number < 1
@@ -356,6 +357,7 @@ jobs:
                                   or type(final_run.get("id")) is not int or final_run.get("id") != int(run_id)
                                   or type(final_run.get("run_number")) is not int or final_run.get("run_number") != run.get("run_number")
                                   or type(final_run.get("run_attempt")) is not int or final_run.get("run_attempt") != int(source_attempt)
+                                  or (name == "PR governance review sensor" and final_run.get("run_attempt") != 1)
                                   or not isinstance(final_run_repository, dict)
                                   or final_run_repository.get("full_name") != repository
                                   or type(final_run_repository.get("id")) is not int or final_run_repository.get("id") != repository_id
@@ -814,6 +816,7 @@ jobs:
                   or not isinstance(run_repository, dict) or type(repository_id) is not int or repository_id < 1 or run_repository.get("full_name") != repository
                   or type(run.get("id")) is not int or run.get("id") != int(run_id) or type(run.get("run_number")) is not int
                   or type(run.get("run_attempt")) is not int or run.get("run_attempt") != int(source_attempt)
+                  or (name == "PR governance review sensor" and run.get("run_attempt") != 1)
                   or not isinstance(source, dict) or type(number) is not int or number < 1 or not isinstance(base, dict) or not isinstance(head, dict)
                   or not isinstance(base.get("sha"), str) or not isinstance(head.get("sha"), str) or base.get("ref") != default_branch
                   or re.fullmatch(r"[0-9a-fA-F]{40}", base["sha"]) is None or re.fullmatch(r"[0-9a-fA-F]{40}", head["sha"]) is None

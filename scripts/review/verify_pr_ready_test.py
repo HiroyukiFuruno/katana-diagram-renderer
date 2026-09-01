@@ -3365,12 +3365,13 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
         latest_b = self._source(event="pull_request_review_comment")
         latest_a.update({"id": 902, "run_number": 2})
         latest_b.update({"id": 902, "run_number": 2})
-        self.assertIsNotNone(
+        with self.assertRaisesRegex(
+            TypeError, "sensor workflow run generation is duplicated"
+        ):
             self._gate(
                 source_history=[latest_a, latest_b],
                 exclude_trusted_governance_check=True,
             )
-        )
 
     def test_sensor_history_fails_closed_on_a_truncated_page(self) -> None:
         with patch.object(
@@ -3386,6 +3387,44 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                     base_sha=self.base,
                     head=self.head,
                 )
+
+    def test_sensor_history_fails_closed_on_a_malformed_page_marker(self) -> None:
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[{"workflow_runs": [], "truncated": "false"}],
+        ):
+            with self.assertRaisesRegex(TypeError, "sensor workflow run page is invalid"):
+                subject._latest_sensor_generation(
+                    repository=self.repository,
+                    pull_request=self.pull_request,
+                    base_branch=self.branch,
+                    base_sha=self.base,
+                    head=self.head,
+                )
+
+    def test_sensor_history_rejects_a_rerun_before_reusing_an_old_success(self) -> None:
+        rerun = self._source()
+        rerun["run_attempt"] = 2
+        with self.assertRaisesRegex(TypeError, "sensor workflow run generation is invalid"):
+            self._gate(source=self._source(), source_history=[rerun])
+
+    def test_sensor_history_rejects_invalid_attempt_encodings(self) -> None:
+        for attempt in (True, None, "2", 0):
+            with self.subTest(attempt=attempt):
+                candidate = self._source()
+                candidate["run_attempt"] = attempt
+                with self.assertRaisesRegex(
+                    TypeError, "sensor workflow run generation is invalid"
+                ):
+                    self._gate(source_history=[candidate])
+
+    def test_sensor_history_rejects_duplicate_fixed_boundary_generation(self) -> None:
+        source = self._source()
+        with self.assertRaisesRegex(
+            TypeError, "sensor workflow run generation is duplicated"
+        ):
+            self._gate(source_history=[source, deepcopy(source)])
 
     def test_sensor_history_queries_are_bounded_to_fixed_head(self) -> None:
         endpoints: list[str] = []

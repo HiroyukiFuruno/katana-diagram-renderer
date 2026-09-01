@@ -1617,6 +1617,7 @@ def _latest_sensor_generation(
     """Return one unambiguous latest sensor run for the fixed PR boundary."""
 
     candidates: list[Mapping[str, object]] = []
+    candidate_ids: set[int] = set()
     for event_name in (
         "pull_request",
         "pull_request_review",
@@ -1635,6 +1636,8 @@ def _latest_sensor_generation(
         ):
             raise TypeError("sensor workflow run pagination response is invalid")
         for page in payload:
+            if "truncated" in page and type(page["truncated"]) is not bool:
+                raise TypeError("sensor workflow run page is invalid")
             if page.get("truncated") is True:
                 raise TypeError("sensor workflow run page is truncated")
             values = page.get("workflow_runs")
@@ -1643,52 +1646,81 @@ def _latest_sensor_generation(
             ):
                 raise TypeError("sensor workflow run page is invalid")
             for value in values:
+                if (
+                    value.get("name") != "PR governance review sensor"
+                    or value.get("event") != event_name
+                ):
+                    continue
+                run_head = value.get("head_sha")
+                if not isinstance(run_head, str) or run_head.lower() != head.lower():
+                    continue
                 runs_pr = value.get("pull_requests")
                 repo = value.get("repository")
                 path = value.get("path", "")
+                if not isinstance(repo, Mapping) or repo.get("full_name") != repository:
+                    raise TypeError("sensor workflow run repository is invalid")
                 if (
-                    value.get("name") == "PR governance review sensor"
-                    and value.get("event") == event_name
-                    and type(value.get("id")) is int
-                    and value["id"] > 0
-                    and type(value.get("run_number")) is int
-                    and value["run_number"] > 0
-                    and type(value.get("run_attempt")) is int
-                    and value["run_attempt"] == 1
-                    and value.get("head_sha", "").lower() == head.lower()
-                    and isinstance(repo, Mapping)
-                    and repo.get("full_name") == repository
-                    and isinstance(runs_pr, list)
-                    and len(runs_pr) == 1
-                    and isinstance(runs_pr[0], Mapping)
-                    and runs_pr[0].get("number") == pull_request
-                    and isinstance(runs_pr[0].get("base"), Mapping)
-                    and runs_pr[0]["base"].get("sha", "").lower() == base_sha.lower()
-                    and runs_pr[0]["base"].get("ref") == base_branch
-                    and isinstance(runs_pr[0]["base"].get("repo"), Mapping)
-                    and runs_pr[0]["base"]["repo"].get("full_name") == repository
-                    and isinstance(runs_pr[0].get("head"), Mapping)
-                    and runs_pr[0]["head"].get("sha", "").lower() == head.lower()
-                    and isinstance(runs_pr[0]["head"].get("repo"), Mapping)
-                    and runs_pr[0]["head"]["repo"].get("full_name") == repository
-                    and isinstance(path, str)
-                    and path.split("@", 1)[0]
-                    == ".github/workflows/pr-governance-review-events.yml"
-                    and (
-                        "@" not in path
-                        or (
+                    not isinstance(runs_pr, list)
+                    or len(runs_pr) != 1
+                    or not isinstance(runs_pr[0], Mapping)
+                ):
+                    raise TypeError("sensor workflow run PR identity is invalid")
+                source_pr = runs_pr[0]
+                source_number = source_pr.get("number")
+                if type(source_number) is not int or source_number < 1:
+                    raise TypeError("sensor workflow run PR identity is invalid")
+                if source_number != pull_request:
+                    continue
+                source_base = source_pr.get("base")
+                source_head = source_pr.get("head")
+                if not isinstance(source_base, Mapping) or not isinstance(source_head, Mapping):
+                    raise TypeError("sensor workflow run PR boundary is invalid")
+                source_base_sha = source_base.get("sha")
+                source_head_sha = source_head.get("sha")
+                source_base_repo = source_base.get("repo")
+                source_head_repo = source_head.get("repo")
+                if (
+                    not isinstance(source_base_sha, str)
+                    or not isinstance(source_head_sha, str)
+                    or not isinstance(source_base_repo, Mapping)
+                    or not isinstance(source_head_repo, Mapping)
+                ):
+                    raise TypeError("sensor workflow run PR boundary is invalid")
+                if (
+                    source_base_sha.lower() != base_sha.lower()
+                    or source_base.get("ref") != base_branch
+                    or source_base_repo.get("full_name") != repository
+                    or source_head_sha.lower() != head.lower()
+                    or source_head_repo.get("full_name") != repository
+                ):
+                    continue
+                if (
+                    type(value.get("id")) is not int
+                    or value["id"] < 1
+                    or type(value.get("run_number")) is not int
+                    or value["run_number"] < 1
+                    or type(value.get("run_attempt")) is not int
+                    or value["run_attempt"] != 1
+                ):
+                    raise TypeError("sensor workflow run generation is invalid")
+                if (
+                    not isinstance(path, str)
+                    or path.split("@", 1)[0]
+                    != ".github/workflows/pr-governance-review-events.yml"
+                    or (
+                        "@" in path
+                        and (
                             re.fullmatch(r"[A-Za-z0-9._/-]+", path.split("@", 1)[1])
-                            is not None
-                            and not path.split("@", 1)[1].startswith("/")
-                            and "//" not in path.split("@", 1)[1]
-                            and not any(
-                                part in {".", ".."}
-                                for part in path.split("@", 1)[1].split("/")
-                            )
+                            is None
+                            or not _safe_branch_name(path.split("@", 1)[1])
                         )
                     )
                 ):
-                    candidates.append(value)
+                    raise TypeError("sensor workflow run path is invalid")
+                if value["id"] in candidate_ids:
+                    raise TypeError("sensor workflow run generation is duplicated")
+                candidate_ids.add(value["id"])
+                candidates.append(value)
     if not candidates:
         return None
     key = max((value["run_number"], value["id"]) for value in candidates)
