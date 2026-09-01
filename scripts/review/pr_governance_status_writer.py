@@ -19,8 +19,13 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "hooks"))
+import verify_push_issue as issue_contract
 
 
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
@@ -36,6 +41,8 @@ ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS = 21.5
 DISPATCHER_NAME = "PR governance dispatcher"
 DISPATCHER_PATH = ".github/workflows/pr-governance.yml"
 WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
+PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME = "Preflight workflow_run governance source"
+RESOLVER_FAILURE_BARRIER_NAME = "Establish resolver-failure merge barrier"
 # Manual recovery dispatches are a trusted dispatcher generation too.  The
 # workflow and its default-branch binding are still validated below; this is
 # only the event-kind allowlist, not permission to accept an arbitrary replay.
@@ -49,17 +56,13 @@ MAX_DISPATCHER_FENCE_RUNS = 100
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 BODY_SHA256 = re.compile(r"[0-9a-f]{64}")
 NUMBER = re.compile(r"[1-9][0-9]*")
-CLOSING = re.compile(
-    r"\b(?:close(?:s|d)?|fix(?:es|ed)?|resolve(?:s|d)?)\b"
-    r"(?:[ \t]*:[ \t]*|[ \t]+)(?:"
-    r"#(?P<short>[1-9][0-9]*)|"
-    r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)/issues/(?P<full>[1-9][0-9]*)"
-    r")\b",
-    re.I,
-)
 _last_check_write_at: float | None = None
 _bound_check_runs: dict[tuple[str, str], int] = {}
 _bound_check_ids_by_number: dict[int, int] = {}
+# A completed workflow_run no-op can be observed by every terminal head in one
+# all-open writer.  Retain only the fully validated immutable identity; active
+# or otherwise untrusted observations never enter this cache.
+_nonreconciling_dispatcher_generations: dict[int, DispatcherGeneration] = {}
 
 
 class GovernanceError(RuntimeError):
@@ -85,6 +88,8 @@ class DispatcherGeneration:
     created_at: datetime
     event: str
     workflow_id: int
+    status: str
+    conclusion: str | None
 
 
 def read_environment(*, default_token: bool = False) -> dict[str, str]:
@@ -264,21 +269,11 @@ def pr_body_sha256(body: object) -> str:
 
 
 def closing_issues(body: str) -> set[str]:
-    """Return only closing references that target this repository.
-
-    Short ``#123`` forms are necessarily local.  A fully-qualified URL must
-    name ``GITHUB_REPOSITORY``; otherwise an unrelated repository's Issue
-    could poison this repository's canonical-closer fence.
-    """
-    repository = REPOSITORY.casefold()
-    issues: set[str] = set()
-    for match in CLOSING.finditer(body):
-        short, owner, name, full = match.group("short", "owner", "repository", "full")
-        if short is not None:
-            issues.add(short)
-        elif full is not None and f"{owner}/{name}".casefold() == repository:
-            issues.add(full)
-    return issues
+    """Use the push/PR contract's canonical same-repository closer parser."""
+    try:
+        return {str(number) for number in issue_contract.closing_issue_numbers(body, REPOSITORY)}
+    except issue_contract.ContractViolation as error:
+        raise GovernanceError("Pull request body is invalid.") from error
 
 
 def workflow_path_matches(value: object, expected: str) -> bool:
@@ -357,7 +352,14 @@ def dispatcher_generation(value: object, *, expected_identifier: int | None = No
         and (not require_success or status != "completed" or conclusion == "success")
     ):
         raise GovernanceError("Dispatcher source is not a trusted default-branch run.")
-    return DispatcherGeneration(identifier, dispatcher_created_at(value.get("created_at")), value["event"], workflow_id)
+    return DispatcherGeneration(
+        identifier,
+        dispatcher_created_at(value.get("created_at")),
+        value["event"],
+        workflow_id,
+        status,
+        conclusion,
+    )
 
 
 def dispatcher_generations(
@@ -408,6 +410,65 @@ def dispatcher_generation_is_newer(
         current.created_at,
         current.identifier,
     )
+
+
+def dispatcher_generation_reconciles(generation: DispatcherGeneration) -> bool:
+    """Return whether a trusted generation can preempt writer ordering.
+
+    A ``workflow_run`` for a deleted or foreign fork completes after its
+    preflight job with reconciliation disabled.  It has no authority over a
+    local writer.  Only that exact completed no-op shape is excluded; a
+    missing, changing, or otherwise ambiguous job view is a fence failure.
+    """
+    if generation.event != "workflow_run":
+        return True
+    cached = _nonreconciling_dispatcher_generations.get(generation.identifier)
+    if cached is not None:
+        if cached != generation:
+            raise GovernanceError("Cached dispatcher no-op generation changed.")
+        return False
+    page = object_page(
+        f"repos/{REPOSITORY}/actions/runs/{generation.identifier}/jobs?per_page=100",
+    )
+    jobs = page.get("jobs")
+    total_count = page.get("total_count")
+    if (
+        not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs)
+        or type(total_count) is not int or total_count != len(jobs)
+        or total_count >= MAX_DISPATCHER_FENCE_RUNS
+    ):
+        raise GovernanceError("Dispatcher reconciliation evidence is invalid.")
+
+    def named_job(name: str) -> dict[str, Any]:
+        matches = [job for job in jobs if job.get("name") == name]
+        if len(matches) != 1:
+            raise GovernanceError("Dispatcher reconciliation evidence is ambiguous.")
+        job = matches[0]
+        status = job.get("status")
+        conclusion = job.get("conclusion")
+        if not (
+            type(job.get("id")) is int and job["id"] > 0
+            and isinstance(status, str) and status in {"queued", "in_progress", "completed"}
+            and (status != "completed" or conclusion in DISPATCHER_TERMINAL_CONCLUSIONS)
+            and (status == "completed" or conclusion is None)
+        ):
+            raise GovernanceError("Dispatcher reconciliation job is invalid.")
+        return job
+
+    preflight = named_job(PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME)
+    barrier = named_job(RESOLVER_FAILURE_BARRIER_NAME)
+    if barrier["status"] != "completed" or barrier["conclusion"] != "skipped":
+        # The resolver barrier is enabled only for reconcile=true.  A queued,
+        # running, failed, or cancelled barrier is still a newer generation
+        # that must retain the fail-closed preemption fence.
+        return True
+    if not (
+        generation.status == "completed" and generation.conclusion == "success"
+        and preflight["status"] == "completed" and preflight["conclusion"] == "success"
+    ):
+        raise GovernanceError("Dispatcher no-op reconciliation evidence is incomplete.")
+    _nonreconciling_dispatcher_generations[generation.identifier] = generation
+    return False
 
 
 def trusted_dispatcher_source(identifier: int) -> DispatcherSource:
@@ -542,7 +603,10 @@ def reject_newer_dispatcher_barrier(head: str) -> None:
         if snapshot_current != current_generation:
             raise GovernanceError("Current dispatcher generation is absent or changed in the paginated snapshot.")
         for candidate_generation in generations.values():
-            if dispatcher_generation_is_newer(candidate_generation, current_generation):
+            if (
+                dispatcher_generation_is_newer(candidate_generation, current_generation)
+                and dispatcher_generation_reconciles(candidate_generation)
+            ):
                 raise NoPostGovernanceError("A newer dispatcher generation owns this Check Run head.")
     except GovernanceError as error:
         raise NoPostGovernanceError("Dispatcher barrier evidence is invalid.") from error
@@ -1553,6 +1617,7 @@ def main() -> int:
     raw_completed_writer_run_ids = os.environ.get("GOVERNANCE_COMPLETED_WRITER_RUN_IDS", "")
     _bound_check_runs.clear()
     _bound_check_ids_by_number.clear()
+    _nonreconciling_dispatcher_generations.clear()
     if not NUMBER.fullmatch(dispatcher_run_id) or scope not in {"early", "all"} or re.fullmatch(r"0|[1-9][0-9]*", preserved_writer_run_id) is None:
         print("Writer dispatch boundary is invalid.", file=sys.stderr)
         return 1

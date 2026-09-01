@@ -205,6 +205,28 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         check_write_token = writer.index("Create Check Run writer App token")
         self.assertLess(rebind, check_write_token)
         self.assertIn("Trusted default branch advanced while writer was queued.", writer)
+
+    def test_release_generation_fence_excludes_only_a_verified_workflow_run_noop(self) -> None:
+        match = re.search(
+            r"- name: Release complete affected-head merge barrier only after full pending coverage.*?"
+            r"python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        release = self._workflow_program(match)
+        self.assertIn("def reconciles(run):", release)
+        self.assertIn('run.get("event")!="workflow_run"', release)
+        self.assertIn('run.get("status")!="completed"', release)
+        self.assertIn('run.get("conclusion")!="success"', release)
+        self.assertIn('actions/runs/{identifier}/jobs?per_page=100', release)
+        self.assertIn('total!=len(entries) or total>=100', release)
+        self.assertIn('named_job("Preflight workflow_run governance source")', release)
+        self.assertIn('named_job("Establish resolver-failure merge barrier")', release)
+        self.assertIn('barrier.get("conclusion")=="skipped"', release)
+        self.assertIn(
+            "candidate>current_generation and reconciles(run)", release,
+        )
         self.assertIn("str(posted)!=app_id", self.workflow)
 
     def test_workflow_run_source_is_strict_before_app_tokens_exist(self) -> None:
@@ -2258,6 +2280,7 @@ raise SystemExit(91)
         }
         state["late_event_without_run_list"] = None
         state["late_event_observed_at_release"] = False
+        state["dispatcher_jobs"] = {}
 
         def completed(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess([], code, json.dumps(value), "")
@@ -2308,6 +2331,9 @@ raise SystemExit(91)
                 self.assertEqual(token, "read"); return completed([state["pulls"]])
             if endpoint == "repos/owner/repository/actions/runs/99":
                 self.assertEqual(token, "read"); return completed(run)
+            if endpoint == "repos/owner/repository/actions/runs/100/jobs?per_page=100":
+                self.assertEqual(token, "read"); jobs = state["dispatcher_jobs"]
+                self.assertIsInstance(jobs, dict); return completed(jobs[100])
             if endpoint == "repos/owner/repository/actions/workflows/pr-governance.yml/runs?per_page=100":
                 self.assertEqual(token, "read"); return completed([{"workflow_runs": state["runs"]}])
             if endpoint == "repos/owner/repository/check-runs":
@@ -2356,13 +2382,28 @@ raise SystemExit(91)
             runs = state["runs"]; self.assertIsInstance(runs, list); runs.append({**run, "id": 100, "created_at": "2026-08-30T00:00:01Z"})
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
             self.assertEqual(state["mutations"], ["POST"]); runs.pop()
+            jobs = state["dispatcher_jobs"]; self.assertIsInstance(jobs, dict)
+            workflow_run = {**run, "id": 100, "event": "workflow_run", "status": "completed", "conclusion": "success", "created_at": "2026-08-30T00:00:01Z"}
+            jobs[100] = {"total_count": 2, "jobs": [
+                {"id": 1, "name": "Preflight workflow_run governance source", "status": "completed", "conclusion": "success"},
+                {"id": 2, "name": "Establish resolver-failure merge barrier", "status": "completed", "conclusion": "success"},
+            ]}
+            runs.append(workflow_run)
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
+            self.assertEqual(state["mutations"], ["POST"]); runs.pop()
+            jobs[100]["jobs"][1]["conclusion"] = "skipped"  # type: ignore[index]
+            runs.append(workflow_run)
+            self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
+            self.assertEqual(state["mutations"], ["POST", "DELETE"]); runs.pop()
+            self.assertEqual(execute(activate, activate_env | {"PRIORITY": "true"}), 0)
+            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST"])
             state["uncertain_delete"] = True
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 1)
-            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST"]); state["uncertain_delete"] = False
+            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE", "POST"]); state["uncertain_delete"] = False
             runs.insert(0, {**run, "id": 98, "status": "completed", "created_at": "2026-08-29T23:59:59Z"})
             state["late_event_without_run_list"] = {**run, "id": 100, "created_at": "2026-08-30T00:00:02Z"}
             self.assertEqual(execute(release, release_env("[72,73]", f'[[72,"{head}",false],[73,"{other}",false]]', "[[72,801]]", "[[73,802]]")), 0)
-            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE"]); runs.pop(0)
+            self.assertEqual(state["mutations"], ["POST", "DELETE", "POST", "DELETE", "POST", "DELETE"]); runs.pop(0)
             self.assertTrue(state["late_event_observed_at_release"])
             manifest_checks = state["manifest_checks"]; self.assertIsInstance(manifest_checks, dict)
             self.assertTrue(all(item["status"] == "in_progress" and item["conclusion"] is None for item in manifest_checks.values()))

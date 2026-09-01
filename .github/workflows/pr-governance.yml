@@ -2250,14 +2250,32 @@ jobs:
               return parse_time(run.get("created_at")),run["id"]
           current_generation=generation(source,current=True)
           if source.get("status") not in {"requested","queued","in_progress"}: raise SystemExit("Affected-head barrier dispatcher generation is not active.")
+          def reconciles(run):
+              # Only a workflow_run that completed the preflight's explicit
+              # no-op path can be ignored.  Every incomplete, malformed, or
+              # unsuccessful candidate remains a newer release fence.
+              if run.get("event")!="workflow_run" or run.get("status")!="completed" or run.get("conclusion")!="success": return True
+              identifier=run.get("id")
+              if type(identifier) is not int or identifier<1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              jobs=request([f"repos/{repository}/actions/runs/{identifier}/jobs?per_page=100"],env=read_env)
+              entries=jobs.get("jobs") if isinstance(jobs,dict) else None; total=jobs.get("total_count") if isinstance(jobs,dict) else None
+              if not isinstance(entries,list) or not all(isinstance(job,dict) for job in entries) or type(total) is not int or total!=len(entries) or total>=100: raise SystemExit("Affected-head barrier dispatcher reconciliation evidence is invalid.")
+              def named_job(name):
+                  matches=[job for job in entries if job.get("name")==name]
+                  if len(matches)!=1: raise SystemExit("Affected-head barrier dispatcher reconciliation evidence is ambiguous.")
+                  job=matches[0]; status=job.get("status"); conclusion=job.get("conclusion")
+                  if type(job.get("id")) is not int or job["id"]<1 or status not in {"queued","in_progress","completed"} or (status=="completed" and conclusion not in {"action_required","cancelled","failure","neutral","skipped","stale","startup_failure","success","timed_out"}) or (status!="completed" and conclusion is not None): raise SystemExit("Affected-head barrier dispatcher reconciliation job is invalid.")
+                  return job
+              preflight=named_job("Preflight workflow_run governance source"); barrier=named_job("Establish resolver-failure merge barrier")
+              return not (preflight.get("status")=="completed" and preflight.get("conclusion")=="success" and barrier.get("status")=="completed" and barrier.get("conclusion")=="skipped")
           observed=[]
           for page in listed:
               for run in page["workflow_runs"]:
                   if not isinstance(run,dict): raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
                   if run.get("head_branch")==branch and isinstance(run.get("head_sha"),str) and run["head_sha"].lower()==head.lower():
                       candidate=generation(run)
-                      if candidate is not None: observed.append((candidate,run.get("id")))
-          if sum(identifier==int(dispatcher) for _generation,identifier in observed)!=1 or any(candidate>current_generation for candidate,_identifier in observed): raise SystemExit("Affected-head barrier newer dispatcher generation prevents release.")
+                      if candidate is not None: observed.append((candidate,run))
+          if sum(run.get("id")==int(dispatcher) for _generation,run in observed)!=1 or any(candidate>current_generation and reconciles(run) for candidate,run in observed): raise SystemExit("Affected-head barrier newer dispatcher generation prevents release.")
           details_base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}"
           details_parts=urlparse(details_base)
           for number,identifier in manifest:

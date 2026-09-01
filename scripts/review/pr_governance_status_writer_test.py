@@ -22,6 +22,8 @@ SPEC.loader.exec_module(WRITER)
 
 class StatusWriterUnitTest(unittest.TestCase):
     def setUp(self) -> None:
+        WRITER._nonreconciling_dispatcher_generations.clear()
+        self.addCleanup(WRITER._nonreconciling_dispatcher_generations.clear)
         self.dispatch_boundary = patch.dict(
             os.environ,
             {
@@ -79,6 +81,25 @@ class StatusWriterUnitTest(unittest.TestCase):
         }
 
     @staticmethod
+    def dispatcher_jobs(
+        *,
+        preflight_status: str = "completed", preflight_conclusion: object = "success",
+        barrier_status: str = "completed", barrier_conclusion: object = "skipped",
+        total_count: int | None = None,
+    ) -> dict[str, object]:
+        jobs = [
+            {
+                "id": 1, "name": WRITER.PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME,
+                "status": preflight_status, "conclusion": preflight_conclusion,
+            },
+            {
+                "id": 2, "name": WRITER.RESOLVER_FAILURE_BARRIER_NAME,
+                "status": barrier_status, "conclusion": barrier_conclusion,
+            },
+        ]
+        return {"total_count": len(jobs) if total_count is None else total_count, "jobs": jobs}
+
+    @staticmethod
     def snapshot(numbers: tuple[int, ...], claimants: dict[str, frozenset[int]] | None = None, *, drafts: frozenset[int] = frozenset()) -> object:
         return WRITER.OpenSnapshot(
             numbers,
@@ -127,6 +148,29 @@ class StatusWriterUnitTest(unittest.TestCase):
                 ),
                 "64",
             )
+
+    def test_closing_urls_share_the_push_contract_terminator(self) -> None:
+        with self.identity():
+            accepted = (
+                "Closes: #64",
+                "Fixes https://github.com/owner/repository/issues/64)",
+                "Resolves : https://github.com/owner/repository/issues/64?source=pr",
+            )
+            for body in accepted:
+                with self.subTest(body=body):
+                    expected = {
+                        str(number)
+                        for number in WRITER.issue_contract.closing_issue_numbers(body, "owner/repository")
+                    }
+                    self.assertEqual(WRITER.closing_issues(body), expected)
+                    self.assertEqual(WRITER.canonical_issue(body), "64")
+            for body in (
+                "Fixes https://github.com/owner/repository/issues/64/foo",
+                "Fixes https://github.com/owner/repository/issues/64x",
+            ):
+                with self.subTest(body=body):
+                    self.assertEqual(WRITER.closing_issues(body), set())
+                    self.assertIsNone(WRITER.canonical_issue(body))
 
     def test_workflow_path_accepts_github_at_default_branch_not_arbitrary_suffix(self) -> None:
         expected = ".github/workflows/test-and-build.yml"
@@ -251,6 +295,76 @@ class StatusWriterUnitTest(unittest.TestCase):
             with self.assertRaises(WRITER.NoPostGovernanceError):
                 WRITER.reject_newer_dispatcher_barrier(head)
         checks.assert_not_called()
+
+    def test_foreign_workflow_run_noop_does_not_preempt_a_local_writer(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        foreign_noop = self.dispatcher_run(
+            7, event="workflow_run", status="completed", conclusion="success",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(
+                 WRITER, "object_page",
+                 side_effect=(
+                     self.dispatcher_page(current, foreign_noop),
+                     self.dispatcher_jobs(),
+                 ),
+             ) as page:
+            WRITER.reject_newer_dispatcher_barrier(head)
+        self.assertEqual(
+            page.call_args_list[1].args[0],
+            "repos/owner/repository/actions/runs/7/jobs?per_page=100",
+        )
+
+    def test_verified_workflow_run_reconciliation_still_preempts_a_local_writer(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        newer = self.dispatcher_run(
+            7, event="workflow_run", status="completed", conclusion="success",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(
+                 WRITER, "object_page",
+                 side_effect=(
+                     self.dispatcher_page(current, newer),
+                     self.dispatcher_jobs(barrier_conclusion="success"),
+                 ),
+             ):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_workflow_run_without_exact_noop_evidence_remains_a_fail_closed_fence(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        newer = self.dispatcher_run(
+            7, event="workflow_run", status="in_progress",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        malformed_jobs = {"total_count": 1, "jobs": [{"id": 1, "name": WRITER.PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME, "status": "completed", "conclusion": "success"}]}
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", return_value=current), \
+             patch.object(
+                 WRITER, "object_page",
+                 side_effect=(self.dispatcher_page(current, newer), malformed_jobs),
+             ):
+            with self.assertRaises(WRITER.NoPostGovernanceError):
+                WRITER.reject_newer_dispatcher_barrier(head)
 
     def test_dispatcher_fence_rejects_malformed_paginated_or_api_evidence(self) -> None:
         head = "a" * 40
@@ -381,6 +495,54 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(transport, {"direct": 400, "page": 400})
         self.assertLess(sum(transport.values()), 5_000)
         checks.assert_not_called()
+
+    def test_noop_workflow_run_generation_is_read_once_for_400_terminal_heads(self) -> None:
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        foreign_noop = self.dispatcher_run(
+            7, event="workflow_run", status="completed", conclusion="success",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        reads = {"source": 0, "generations": 0, "jobs": 0}
+
+        def direct(endpoint: str, *, default_token: bool = False) -> object:
+            self.assertFalse(default_token)
+            self.assertEqual(endpoint, "repos/owner/repository/actions/runs/88")
+            reads["source"] += 1
+            return current
+
+        def page(endpoint: str, *, default_token: bool = False) -> dict[str, object]:
+            self.assertFalse(default_token)
+            if endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
+                reads["generations"] += 1
+                return self.dispatcher_page(current, foreign_noop)
+            self.assertEqual(endpoint, "repos/owner/repository/actions/runs/7/jobs?per_page=100")
+            reads["jobs"] += 1
+            return self.dispatcher_jobs()
+
+        with self.identity(), patch.dict(os.environ, environment), \
+             patch.object(WRITER, "api_json", side_effect=direct), \
+             patch.object(WRITER, "object_page", side_effect=page):
+            for sequence in range(400):
+                WRITER.reject_newer_dispatcher_barrier(f"{sequence:040x}")
+        self.assertEqual(reads["jobs"], 1)
+        self.assertLessEqual(sum(reads.values()), 4_500)
+
+    def test_noop_generation_cache_rejects_a_changed_identity(self) -> None:
+        original = WRITER.DispatcherGeneration(
+            7, WRITER.dispatcher_created_at("2026-08-30T00:01:00Z"), "workflow_run", 66,
+            "completed", "success",
+        )
+        changed = WRITER.DispatcherGeneration(
+            7, WRITER.dispatcher_created_at("2026-08-30T00:01:01Z"), "workflow_run", 66,
+            "completed", "success",
+        )
+        WRITER._nonreconciling_dispatcher_generations[7] = original
+        with self.assertRaises(WRITER.GovernanceError):
+            WRITER.dispatcher_generation_reconciles(changed)
 
     def test_early_writer_refuses_new_pending_before_and_after_newer_barrier(self) -> None:
         head = "a" * 40
