@@ -92,6 +92,22 @@ _EVIDENCE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lockfile", ("lockfile", "Lockfiles")),
     ("検証証跡", ("検証証跡", "Verification")),
 )
+_NON_PATH_EVIDENCE_FIELDS = frozenset({"上流公開版", "API移行", "検証証跡"})
+_REQUIRED_EVIDENCE_PLACEHOLDER_VALUES = frozenset({"", "-", "todo", "tbd"})
+_NON_PATH_PLACEHOLDER_EVIDENCE_VALUES = frozenset(
+    {
+        "n/a",
+        "na",
+        "n.a.",
+        "none",
+        "null",
+        "nil",
+        "not applicable",
+        "not available",
+        "未定",
+        "該当なし",
+    }
+)
 
 
 def _path_tokens(value: str) -> tuple[str, ...]:
@@ -318,15 +334,15 @@ def dependency_evidence_errors(
             rf"(?im)^\s*[-*]\s*(?:{label_pattern})\s*[:：]\s*(?P<value>.+?)\s*$",
             body,
         )
-        if match is None or match.group("value").strip().casefold() in {
-            "",
-            "-",
-            "todo",
-            "tbd",
-        }:
+        value = match.group("value").strip() if match is not None else ""
+        placeholder = value.casefold()
+        if match is None or placeholder in _REQUIRED_EVIDENCE_PLACEHOLDER_VALUES or (
+            display_name in _NON_PATH_EVIDENCE_FIELDS
+            and placeholder in _NON_PATH_PLACEHOLDER_EVIDENCE_VALUES
+        ):
             errors.append(display_name)
         elif display_name not in evidence_values:
-            evidence_values[display_name] = match.group("value").strip()
+            evidence_values[display_name] = value
 
     manifest_tokens = _path_tokens(evidence_values.get("依存manifest", ""))
     if manifests:
@@ -748,7 +764,7 @@ def _repository_name(remote_url: str) -> str:
         match = re.match(pattern, remote_url)
         if match is not None:
             return match.group("repository")
-    raise ContractViolation(f"GitHub repositoryをremote URLから判定できません: {remote_url}")
+    raise ContractViolation("GitHub repositoryをremote URLから判定できません")
 
 
 def branch_remote(repository: Path, branch: str) -> str:
@@ -878,25 +894,107 @@ def _is_remote_url(value: str) -> bool:
     return value.startswith(("git@", "ssh://", "https://", "http://"))
 
 
-def _default_branch(repository: Path, remote: str) -> str:
-    symbolic = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD"],
-        cwd=repository,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if symbolic.returncode == 0:
-        return symbolic.stdout.strip().removeprefix(f"{remote}/")
-    for candidate in ("master", "main"):
-        exists = subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{candidate}"],
+def _run_remote_git(
+    repository: Path,
+    failure_message: str,
+    *arguments: str,
+) -> str:
+    """Run a network Git operation without exposing remote diagnostics."""
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
             cwd=repository,
+            capture_output=True,
+            text=True,
             check=False,
         )
-        if exists.returncode == 0:
-            return candidate
-    raise ContractViolation(f"{remote}のdefault branchを判定できません")
+    except OSError:
+        raise ContractViolation(failure_message) from None
+    if result.returncode != 0:
+        raise ContractViolation(failure_message)
+    return result.stdout.strip()
+
+
+def _parse_remote_default_head(raw: str) -> tuple[str, str]:
+    """Parse a live `git ls-remote --symref <url> HEAD` response strictly."""
+    lines = raw.splitlines()
+    if len(lines) != 2:
+        raise ContractViolation("push remoteのdefault branch応答が不正です")
+    symbolic, head = lines
+    symbolic_parts = symbolic.split("\t")
+    head_parts = head.split("\t")
+    if (
+        len(symbolic_parts) != 2
+        or symbolic_parts[1] != "HEAD"
+        or not symbolic_parts[0].startswith("ref: refs/heads/")
+        or len(head_parts) != 2
+        or head_parts[1] != "HEAD"
+    ):
+        raise ContractViolation("push remoteのdefault branch応答が不正です")
+    branch = symbolic_parts[0].removeprefix("ref: refs/heads/")
+    if not _is_remote_ref(f"refs/heads/{branch}"):
+        raise ContractViolation("push remoteのdefault branch名が不正です")
+    return branch, _require_sha(head_parts[0], "push remoteのdefault branch SHA")
+
+
+def _live_remote_default_head(repository: Path, pushed_remote_url: str) -> tuple[str, str]:
+    return _parse_remote_default_head(
+        _run_remote_git(
+            repository,
+            "push remoteのdefault branch取得に失敗しました",
+            "ls-remote",
+            "--symref",
+            pushed_remote_url,
+            "HEAD",
+        )
+    )
+
+
+def _bind_remote_default_ref(
+    repository: Path,
+    *,
+    remote: str,
+    pushed_remote_url: str,
+    repository_name: str,
+) -> tuple[str, str]:
+    """Fetch and bind the validation range to the remote's current default tip.
+
+    The local tracking ref may be stale when pre-push starts.  Read the remote
+    default branch, fetch that exact branch into its tracking ref, then read it
+    again so a concurrent default-branch advance fails closed rather than
+    validating against an obsolete range.
+    """
+    try:
+        pushed_repository = _repository_name(pushed_remote_url)
+    except ContractViolation:
+        raise ContractViolation("push remoteのGitHub repositoryを判定できません") from None
+    if pushed_repository.casefold() != repository_name.casefold():
+        raise ContractViolation("push remoteと対象GitHub repositoryが一致しません")
+    branch, expected_sha = _live_remote_default_head(repository, pushed_remote_url)
+    default_ref = f"refs/remotes/{remote}/{branch}"
+    _run_remote_git(
+        repository,
+        "push remoteのdefault branch fetchに失敗しました",
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        pushed_remote_url,
+        f"+refs/heads/{branch}:{default_ref}",
+    )
+    fetched_sha = _require_sha(
+        _run_git(repository, "rev-parse", default_ref),
+        "push remoteのfetch済default branch SHA",
+    )
+    current_branch, current_sha = _live_remote_default_head(repository, pushed_remote_url)
+    if (
+        current_branch != branch
+        or current_sha != expected_sha
+        or fetched_sha != current_sha
+    ):
+        raise ContractViolation(
+            "push remoteのdefault branchが検証中に更新されたためpushを中止します"
+        )
+    return branch, f"{remote}/{branch}"
 
 
 def _load_issue(repository_name: str, number: int) -> Issue | None:
@@ -1023,7 +1121,12 @@ def main() -> int:
             fallback_branch=branch if not updates else None,
         )
         repository_name = _repository_name(pushed_remote_url)
-        default_branch = _default_branch(repository, remote)
+        default_branch, default_ref = _bind_remote_default_ref(
+            repository,
+            remote=remote,
+            pushed_remote_url=pushed_remote_url,
+            repository_name=repository_name,
+        )
         push_updates = pushed_branch_updates(updates, default_branch=default_branch)
         validation_targets = list(push_updates) if push_updates else []
         if not validation_targets and not push_input.strip() and branch != default_branch:
@@ -1038,7 +1141,6 @@ def main() -> int:
                 print("Issue contract skipped: no branch push updates")
             return 0
 
-        default_ref = f"{remote}/{default_branch}"
         cache: dict[int, Issue | None] = {}
 
         def load_issue(number: int) -> Issue | None:

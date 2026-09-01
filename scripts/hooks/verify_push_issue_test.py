@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import io
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -17,6 +18,73 @@ import verify_push_issue as subject
 
 
 class VerifyPushIssueTest(unittest.TestCase):
+    @staticmethod
+    def configure_live_fetch_remote(
+        repository: Path,
+        *,
+        remote: str,
+        push_url: str,
+    ) -> None:
+        """Give CLI tests a local fetch endpoint and a GitHub-shaped push endpoint."""
+        remote_repository = repository.parent / f"{repository.name}-{remote}.git"
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=master", remote_repository],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", remote, str(remote_repository)],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "push", remote, "HEAD:refs/heads/master"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "remote", "set-url", "--push", remote, push_url],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def install_fake_push_remote_git(binary_directory: Path) -> None:
+        """Emulate direct GitHub transport while preserving the configured URL."""
+        fake_git = binary_directory / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'real_git="${KRR_TEST_REAL_GIT:?}"\n'
+            'remote_ref="${KRR_TEST_PUSH_REMOTE_REF:?}"\n'
+            'source_url=""\n'
+            'last_argument=""\n'
+            'for argument in "$@"; do\n'
+            '  case "$argument" in https://github.com/*) source_url="$argument" ;; esac\n'
+            '  last_argument="$argument"\n'
+            "done\n"
+            'if [ "$1" = "ls-remote" ] && [ "$2" = "--symref" ] && [ -n "$source_url" ]; then\n'
+            '  sha="$("$real_git" rev-parse "$remote_ref")"\n'
+            '  printf "ref: refs/heads/master\\tHEAD\\n%s\\tHEAD\\n" "$sha"\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "fetch" ] && [ -n "$source_url" ]; then\n'
+            '  destination="${last_argument#*:}"\n'
+            '  sha="$("$real_git" rev-parse "$remote_ref")"\n'
+            '  exec "$real_git" update-ref "$destination" "$sha"\n'
+            "fi\n"
+            'exec "$real_git" "$@"\n',
+            encoding="utf-8",
+        )
+        fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR)
+
     def test_read_push_input_does_not_wait_on_an_interactive_terminal(self) -> None:
         class InteractiveInput(io.StringIO):
             def isatty(self) -> bool:
@@ -95,6 +163,185 @@ class VerifyPushIssueTest(unittest.TestCase):
                 ("feature~2", local_sha, "refs/heads/other", remote_sha),
             ),
         )
+
+    def test_remote_default_head_parser_accepts_live_main_response(self) -> None:
+        sha = "a" * 40
+        self.assertEqual(
+            subject._parse_remote_default_head(
+                f"ref: refs/heads/main\tHEAD\n{sha}\tHEAD\n"
+            ),
+            ("main", sha),
+        )
+
+    def test_remote_default_head_parser_rejects_malformed_response(self) -> None:
+        malformed_responses = (
+            "",
+            f"{('a' * 40)}\tHEAD\n",
+            f"ref: refs/tags/v1\tHEAD\n{('a' * 40)}\tHEAD\n",
+            f"ref: refs/heads/main\tHEAD\nnot-a-sha\tHEAD\n",
+            f"ref: refs/heads/main\tHEAD\n{('a' * 40)}\tHEAD\nextra\n",
+        )
+        for raw in malformed_responses:
+            with self.subTest(raw=raw):
+                with self.assertRaises(subject.ContractViolation):
+                    subject._parse_remote_default_head(raw)
+
+    def test_default_ref_binding_fetches_stale_tracking_ref_from_live_remote(self) -> None:
+        remote_sha = "a" * 40
+        live_response = f"ref: refs/heads/main\tHEAD\n{remote_sha}\tHEAD"
+        pushed_remote_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+        remote_calls: list[tuple[str, ...]] = []
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("rev-parse", "refs/remotes/origin/main"):
+                return remote_sha
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        def run_remote_git(_repository: Path, _failure: str, *arguments: str) -> str:
+            remote_calls.append(arguments)
+            if arguments == ("ls-remote", "--symref", pushed_remote_url, "HEAD"):
+                return live_response
+            if arguments == (
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                pushed_remote_url,
+                "+refs/heads/main:refs/remotes/origin/main",
+            ):
+                return ""
+            raise AssertionError(f"unexpected remote git invocation: {arguments}")
+
+        with (
+            patch.object(subject, "_run_git", side_effect=run_git),
+            patch.object(subject, "_run_remote_git", side_effect=run_remote_git),
+        ):
+            self.assertEqual(
+                subject._bind_remote_default_ref(
+                    Path("/tmp/repository"),
+                    remote="origin",
+                    pushed_remote_url=pushed_remote_url,
+                    repository_name="HiroyukiFuruno/katana-render-runtime",
+                ),
+                ("main", "origin/main"),
+            )
+        self.assertEqual(
+            remote_calls.count(("ls-remote", "--symref", pushed_remote_url, "HEAD")),
+            2,
+        )
+        self.assertIn(
+            (
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                pushed_remote_url,
+                "+refs/heads/main:refs/remotes/origin/main",
+            ),
+            remote_calls,
+        )
+
+    def test_default_ref_binding_rejects_remote_advance_during_fetch(self) -> None:
+        old_sha = "a" * 40
+        current_sha = "b" * 40
+        pushed_remote_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+        responses = iter(
+            (
+                f"ref: refs/heads/master\tHEAD\n{old_sha}\tHEAD",
+                f"ref: refs/heads/master\tHEAD\n{current_sha}\tHEAD",
+            )
+        )
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("rev-parse", "refs/remotes/origin/master"):
+                return current_sha
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        def run_remote_git(_repository: Path, _failure: str, *arguments: str) -> str:
+            if arguments == ("ls-remote", "--symref", pushed_remote_url, "HEAD"):
+                return next(responses)
+            if arguments == (
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                pushed_remote_url,
+                "+refs/heads/master:refs/remotes/origin/master",
+            ):
+                return ""
+            raise AssertionError(f"unexpected remote git invocation: {arguments}")
+
+        with (
+            patch.object(subject, "_run_git", side_effect=run_git),
+            patch.object(subject, "_run_remote_git", side_effect=run_remote_git),
+        ):
+            with self.assertRaisesRegex(subject.ContractViolation, "検証中に更新"):
+                subject._bind_remote_default_ref(
+                    Path("/tmp/repository"),
+                    remote="origin",
+                    pushed_remote_url=pushed_remote_url,
+                    repository_name="HiroyukiFuruno/katana-render-runtime",
+                )
+
+    def test_default_ref_binding_rejects_fetch_error(self) -> None:
+        sha = "a" * 40
+        pushed_remote_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
+
+        def run_remote_git(_repository: Path, _failure: str, *arguments: str) -> str:
+            if arguments == ("ls-remote", "--symref", pushed_remote_url, "HEAD"):
+                return f"ref: refs/heads/master\tHEAD\n{sha}\tHEAD"
+            if arguments[0] == "fetch":
+                raise subject.ContractViolation("push remoteのdefault branch fetchに失敗しました")
+            raise AssertionError(f"unexpected remote git invocation: {arguments}")
+
+        with patch.object(subject, "_run_remote_git", side_effect=run_remote_git):
+            with self.assertRaisesRegex(subject.ContractViolation, "fetchに失敗"):
+                subject._bind_remote_default_ref(
+                    Path("/tmp/repository"),
+                    remote="origin",
+                    pushed_remote_url=pushed_remote_url,
+                    repository_name="HiroyukiFuruno/katana-render-runtime",
+                )
+
+    def test_default_ref_binding_rejects_push_repository_mismatch_before_network(self) -> None:
+        with patch.object(subject, "_run_remote_git") as run_remote_git:
+            with self.assertRaisesRegex(subject.ContractViolation, "一致しません"):
+                subject._bind_remote_default_ref(
+                    Path("/tmp/repository"),
+                    remote="origin",
+                    pushed_remote_url=(
+                        "https://github.com/HiroyukiFuruno/other-repository.git"
+                    ),
+                    repository_name="HiroyukiFuruno/katana-render-runtime",
+                )
+        run_remote_git.assert_not_called()
+
+    def test_live_remote_failures_do_not_expose_stdout_stderr_or_credential_url(self) -> None:
+        credential_url = "https://token:top-secret@example.invalid/repository.git"
+        completed = subprocess.CompletedProcess(
+            args=["git"],
+            returncode=128,
+            stdout=f"stdout includes {credential_url}",
+            stderr=f"stderr includes {credential_url}",
+        )
+        with patch.object(subject.subprocess, "run", return_value=completed):
+            with self.assertRaises(subject.ContractViolation) as captured:
+                subject._live_remote_default_head(Path("/tmp/repository"), credential_url)
+        message = str(captured.exception)
+        self.assertEqual(message, "push remoteのdefault branch取得に失敗しました")
+        self.assertNotIn("top-secret", message)
+        self.assertNotIn("example.invalid", message)
+
+        with patch.object(subject.subprocess, "run", return_value=completed):
+            with self.assertRaises(subject.ContractViolation) as captured:
+                subject._run_remote_git(
+                    Path("/tmp/repository"),
+                    "push remoteのdefault branch fetchに失敗しました",
+                    "fetch",
+                    credential_url,
+                    "+refs/heads/master:refs/remotes/origin/master",
+                )
+        message = str(captured.exception)
+        self.assertEqual(message, "push remoteのdefault branch fetchに失敗しました")
+        self.assertNotIn("top-secret", message)
+        self.assertNotIn("example.invalid", message)
 
     def test_name_status_paths_keeps_normal_rename_and_copy_paths(self) -> None:
         paths = subject.parse_name_status_paths(
@@ -263,6 +510,56 @@ class VerifyPushIssueTest(unittest.TestCase):
                     fallback_branch=None,
                 )
 
+    def test_matching_push_url_does_not_expose_credential_from_unrecognized_url(self) -> None:
+        credential_url = "https://token:top-secret@github.invalid/owner/repository.git"
+
+        def run_git(_repository: Path, *arguments: str) -> str:
+            if arguments == ("remote", "get-url", "--push", "--all", "origin"):
+                return credential_url
+            raise AssertionError(f"unexpected git invocation: {arguments}")
+
+        with patch.object(subject, "_run_git", side_effect=run_git):
+            with self.assertRaises(subject.ContractViolation) as captured:
+                subject._matching_push_url(Path("/tmp/repository"), "origin", None)
+        self.assertEqual(
+            str(captured.exception), "GitHub repositoryをremote URLから判定できません"
+        )
+        self.assertNotIn("top-secret", str(captured.exception))
+        self.assertNotIn("github.invalid", str(captured.exception))
+
+    def test_main_does_not_expose_credential_from_unrecognized_push_url(self) -> None:
+        credential_url = "https://token:top-secret@github.invalid/owner/repository.git"
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            subprocess.run(
+                ["git", "init", "--initial-branch=master"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", credential_url],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result = subprocess.run(
+                [sys.executable, str(Path(subject.__file__)), "--remote", "origin"],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr.strip(),
+            "Issue contract failed: GitHub repositoryをremote URLから判定できません",
+        )
+        self.assertNotIn("top-secret", result.stderr)
+        self.assertNotIn("github.invalid", result.stderr)
+
     def test_python_39_compatibility_contract_is_present_and_help_starts(self) -> None:
         source = Path(subject.__file__).read_text(encoding="utf-8")
         self.assertIn("from __future__ import annotations", source)
@@ -396,6 +693,30 @@ class VerifyPushIssueTest(unittest.TestCase):
                 changed_paths=["Cargo.toml", "Cargo.lock"],
                 issue=self.issue(body=body),
             )
+
+    def test_dependency_non_path_evidence_rejects_placeholder_only_values(self) -> None:
+        fields = (
+            (
+                "Upstream release",
+                "上流公開版",
+                "serde 2.0.0 https://crates.io/crates/serde/2.0.0",
+            ),
+            ("API migration", "API移行", "no migration required"),
+            ("Verification", "検証証跡", "just check passed"),
+        )
+        for index, (label, expected_error, value) in enumerate(fields):
+            for placeholder in ("N/A", "n/a", "NA", "n.a.", "none", "TBD"):
+                with self.subTest(label=label, placeholder=placeholder):
+                    rendered = list(fields)
+                    rendered[index] = (label, expected_error, placeholder)
+                    body = "## Dependency Update Evidence\n" + "\n".join(
+                        f"- {field_label}: {field_value}" for field_label, _, field_value in rendered
+                    ) + "\n- Dependency manifests: Cargo.toml\n- Lockfiles: Cargo.lock\n"
+                    with self.assertRaisesRegex(subject.ContractViolation, expected_error):
+                        self.validate(
+                            changed_paths=["Cargo.toml", "Cargo.lock"],
+                            issue=self.issue(body=body),
+                        )
 
     def test_dependency_issue_must_name_changed_contract_files(self) -> None:
         body = """## Dependency Update Evidence
@@ -1372,17 +1693,15 @@ class VerifyPushIssueTest(unittest.TestCase):
             git("add", "base.txt")
             git("commit", "-m", "initial")
             base_sha = git("rev-parse", "HEAD")
-            git(
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/wrong-repository.git",
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url="https://github.com/example/wrong-repository.git",
             )
-            git(
-                "remote",
-                "add",
-                "upstream",
-                "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+            self.configure_live_fetch_remote(
+                repository,
+                remote="upstream",
+                push_url="https://github.com/HiroyukiFuruno/katana-render-runtime.git",
             )
             git("update-ref", "refs/remotes/upstream/master", base_sha)
             git("symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/master")
@@ -1403,8 +1722,11 @@ class VerifyPushIssueTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            self.install_fake_push_remote_git(binary_directory)
             environment = os.environ.copy()
             environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/upstream/master"
             result = subprocess.run(
                 [sys.executable, str(Path(subject.__file__)), "--remote", "upstream"],
                 cwd=repository,
@@ -1452,16 +1774,10 @@ class VerifyPushIssueTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
-                [
-                    "git",
-                    "remote",
-                    "add",
-                    "origin",
-                    "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
-                ],
-                cwd=repository,
-                check=True,
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url="https://github.com/HiroyukiFuruno/katana-render-runtime.git",
             )
             subprocess.run(
                 ["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
@@ -1509,8 +1825,11 @@ class VerifyPushIssueTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            self.install_fake_push_remote_git(binary_directory)
             environment = os.environ.copy()
             environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/origin/master"
             result = subprocess.run(
                 [sys.executable, str(Path(subject.__file__))],
                 cwd=repository,
@@ -1525,6 +1844,8 @@ class VerifyPushIssueTest(unittest.TestCase):
     def test_cli_validates_the_pushed_topic_while_master_is_checked_out(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
+            binary_directory = repository / "bin"
+            binary_directory.mkdir()
             commands = [
                 ["git", "init", "--initial-branch=master"],
                 ["git", "config", "user.name", "Issue Contract Test"],
@@ -1553,16 +1874,10 @@ class VerifyPushIssueTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
-                [
-                    "git",
-                    "remote",
-                    "add",
-                    "origin",
-                    "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
-                ],
-                cwd=repository,
-                check=True,
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url="https://github.com/HiroyukiFuruno/katana-render-runtime.git",
             )
             subprocess.run(
                 ["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
@@ -1622,9 +1937,15 @@ class VerifyPushIssueTest(unittest.TestCase):
             push_update = (
                 f"refs/heads/topic {topic_sha} refs/heads/topic {'0' * 40}\n"
             )
+            self.install_fake_push_remote_git(binary_directory)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/origin/master"
             result = subprocess.run(
                 [sys.executable, str(Path(subject.__file__))],
                 cwd=repository,
+                env=environment,
                 input=push_update,
                 capture_output=True,
                 text=True,
@@ -1658,11 +1979,10 @@ class VerifyPushIssueTest(unittest.TestCase):
             git("add", "base.txt")
             git("commit", "-m", "initial")
             base_sha = git("rev-parse", "HEAD")
-            git(
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url="https://github.com/HiroyukiFuruno/katana-render-runtime.git",
             )
             git("update-ref", "refs/remotes/origin/master", base_sha)
             git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
@@ -1681,8 +2001,11 @@ class VerifyPushIssueTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            self.install_fake_push_remote_git(binary_directory)
             environment = os.environ.copy()
             environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/origin/master"
             result = subprocess.run(
                 [sys.executable, str(Path(subject.__file__))],
                 cwd=repository,
@@ -1721,7 +2044,11 @@ class VerifyPushIssueTest(unittest.TestCase):
             git("commit", "-m", "initial")
             base_sha = git("rev-parse", "HEAD")
             remote_url = "https://github.com/HiroyukiFuruno/katana-render-runtime.git"
-            git("remote", "add", "origin", remote_url)
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url=remote_url,
+            )
             git("update-ref", "refs/remotes/origin/master", base_sha)
             git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
             git("switch", "-c", "topic")
@@ -1738,8 +2065,11 @@ class VerifyPushIssueTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+            self.install_fake_push_remote_git(binary_directory)
             environment = os.environ.copy()
             environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/origin/master"
             result = subprocess.run(
                 [
                     sys.executable,
@@ -1762,6 +2092,8 @@ class VerifyPushIssueTest(unittest.TestCase):
     def test_cli_skips_tag_only_push_while_topic_is_checked_out(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
+            binary_directory = repository / "bin"
+            binary_directory.mkdir()
             commands = [
                 ["git", "init", "--initial-branch=master"],
                 ["git", "config", "user.name", "Issue Contract Test"],
@@ -1790,18 +2122,10 @@ class VerifyPushIssueTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            subprocess.run(
-                [
-                    "git",
-                    "remote",
-                    "add",
-                    "origin",
-                    "https://github.com/HiroyukiFuruno/katana-render-runtime.git",
-                ],
-                cwd=repository,
-                check=True,
-                capture_output=True,
-                text=True,
+            self.configure_live_fetch_remote(
+                repository,
+                remote="origin",
+                push_url="https://github.com/HiroyukiFuruno/katana-render-runtime.git",
             )
             subprocess.run(
                 ["git", "update-ref", "refs/remotes/origin/master", "HEAD"],
@@ -1851,9 +2175,15 @@ class VerifyPushIssueTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
+            self.install_fake_push_remote_git(binary_directory)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+            environment["KRR_TEST_REAL_GIT"] = str(shutil.which("git"))
+            environment["KRR_TEST_PUSH_REMOTE_REF"] = "refs/remotes/origin/master"
             result = subprocess.run(
                 [sys.executable, str(Path(subject.__file__))],
                 cwd=repository,
+                env=environment,
                 input=(
                     f"refs/tags/v0.0.0 {topic_sha} "
                     f"refs/tags/v0.0.0 {'0' * 40}\n"
