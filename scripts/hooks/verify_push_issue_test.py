@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import os
 import stat
 import subprocess
@@ -16,6 +17,20 @@ import verify_push_issue as subject
 
 
 class VerifyPushIssueTest(unittest.TestCase):
+    def test_read_push_input_does_not_wait_on_an_interactive_terminal(self) -> None:
+        class InteractiveInput(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+            def read(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("interactive stdin must not be read")
+
+        self.assertEqual(subject._read_push_input(InteractiveInput()), "")
+        self.assertEqual(
+            subject._read_push_input(io.StringIO("push input\n")),
+            "push input\n",
+        )
+
     def test_parse_push_updates_rejects_nonempty_malformed_lines(self) -> None:
         with self.assertRaises(subject.ContractViolation):
             subject.parse_push_updates("refs/heads/topic deadbeef\n")
@@ -388,6 +403,185 @@ class VerifyPushIssueTest(unittest.TestCase):
 - API migration: no migration required
 - Dependency manifests: package.json
 - Lockfiles: bun.lock
+- Verification: just check passed
+"""
+        with self.assertRaisesRegex(subject.ContractViolation, "Cargo.toml"):
+            self.validate(
+                changed_paths=["Cargo.toml", "Cargo.lock"],
+                issue=self.issue(body=body),
+            )
+
+    def test_dependency_manifest_evidence_rejects_na_and_lookalike_paths(self) -> None:
+        for manifest in (
+            "N/A",
+            "Cargo.toml.bak",
+            "before-Cargo.toml",
+            "./Cargo.toml.old",
+            "Cargo.tomlα",
+            "αCargo.toml",
+            r"x\Cargo.toml",
+            "x／Cargo.toml",
+            "x@Cargo.toml",
+            "Cargo.toml@x",
+        ):
+            with self.subTest(manifest=manifest):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: {manifest}
+- Lockfiles: Cargo.lock
+- Verification: just check passed
+"""
+                with self.assertRaisesRegex(subject.ContractViolation, "Cargo.toml"):
+                    self.validate(
+                        changed_paths=["Cargo.toml", "Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+
+    def test_dependency_manifest_evidence_accepts_unicode_directory_path(self) -> None:
+        body = """## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: `設定/日本語/Cargo.toml`
+- Lockfiles: `設定/日本語/Cargo.lock`
+- Verification: just check passed
+"""
+        self.validate(
+            changed_paths=["設定/日本語/Cargo.toml", "設定/日本語/Cargo.lock"],
+            issue=self.issue(body=body),
+        )
+
+    def test_dependency_manifest_evidence_preserves_quoted_space_and_comma_paths(self) -> None:
+        body = """## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: `dir with space,comma/Cargo.toml`
+- Lockfiles: `dir with space,comma/Cargo.lock`
+- Verification: just check passed
+"""
+        self.validate(
+            changed_paths=[
+                "dir with space,comma/Cargo.toml",
+                "dir with space,comma/Cargo.lock",
+            ],
+            issue=self.issue(body=body),
+        )
+
+    def test_dependency_manifest_evidence_rejects_malformed_quoted_tokens(self) -> None:
+        for manifest in (
+            "`Cargo.toml",
+            "``",
+            "`Cargo.toml`package.json",
+            "Cargo.toml`",
+        ):
+            with self.subTest(manifest=manifest):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: {manifest}
+- Lockfiles: Cargo.lock
+- Verification: just check passed
+"""
+                with self.assertRaises(subject.ContractViolation):
+                    self.validate(
+                        changed_paths=["Cargo.toml", "Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+
+    def test_dependency_manifest_evidence_rejects_extra_or_duplicate_tokens(self) -> None:
+        for manifest in (
+            "Cargo.toml, N/A",
+            "Cargo.toml; package.json",
+            "Cargo.toml, Cargo.toml",
+        ):
+            with self.subTest(manifest=manifest):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: {manifest}
+- Lockfiles: Cargo.lock
+- Verification: just check passed
+"""
+                with self.assertRaisesRegex(subject.ContractViolation, "依存manifest"):
+                    self.validate(
+                        changed_paths=["Cargo.toml", "Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+
+    def test_dependency_lockfile_evidence_requires_exact_lockfile_field(self) -> None:
+        bodies = (
+            "other.lock (Cargo.lock verified)",
+            "Cargo.lock, other.lock",
+            "Cargo.lock, Cargo.lock",
+            "N/A",
+        )
+        for lockfiles in bodies:
+            with self.subTest(lockfiles=lockfiles):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: Cargo.toml
+- Lockfiles: {lockfiles}
+- Verification: Cargo.lock just check passed
+"""
+                with self.assertRaisesRegex(subject.ContractViolation, "lockfile"):
+                    self.validate(
+                        changed_paths=["Cargo.toml", "Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+        for lockfiles in ("`Cargo.lock", "`Cargo.lock`other.lock"):
+            with self.subTest(lockfiles=lockfiles):
+                body = f"""## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: Cargo.toml
+- Lockfiles: {lockfiles}
+- Verification: just check passed
+"""
+                with self.assertRaises(subject.ContractViolation):
+                    self.validate(
+                        changed_paths=["Cargo.toml", "Cargo.lock"],
+                        issue=self.issue(body=body),
+                    )
+
+    def test_dependency_lockfile_path_elsewhere_does_not_satisfy_lockfile_field(self) -> None:
+        body = """## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: Cargo.toml
+- Lockfiles: other.lock
+- Verification: Cargo.lock just check passed
+"""
+        with self.assertRaisesRegex(subject.ContractViolation, "lockfile"):
+            self.validate(
+                changed_paths=["Cargo.toml", "Cargo.lock"],
+                issue=self.issue(body=body),
+            )
+
+    def test_dependency_manifest_evidence_accepts_multiple_exact_paths(self) -> None:
+        body = """## Dependency Update Evidence
+- Upstream release: serde 2.0.0 https://crates.io/crates/serde/2.0.0
+- API migration: no migration required
+- Dependency manifests: `Cargo.toml`, `package.json`
+- Lockfiles: `Cargo.lock`, `package-lock.json`
+- Verification: just check passed
+"""
+        self.validate(
+            changed_paths=[
+                "Cargo.toml",
+                "package.json",
+                "Cargo.lock",
+                "package-lock.json",
+            ],
+            issue=self.issue(body=body),
+        )
+
+    def test_manifest_path_elsewhere_does_not_satisfy_manifest_evidence(self) -> None:
+        body = """## Dependency Update Evidence
+- Upstream release: Cargo.toml was updated with serde 2.0.0
+- API migration: no migration required
+- Dependency manifests: N/A
+- Lockfiles: Cargo.lock
 - Verification: just check passed
 """
         with self.assertRaisesRegex(subject.ContractViolation, "Cargo.toml"):

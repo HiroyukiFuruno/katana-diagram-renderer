@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import IO, Optional
 
 
 class ContractViolation(RuntimeError):
@@ -26,6 +26,13 @@ class Issue:
 
 
 IssueLoader = Callable[[int], Optional[Issue]]
+
+
+def _read_push_input(stream: IO[str]) -> str:
+    if stream.isatty():
+        return ""
+    return stream.read()
+
 
 _ISSUE_URL_TERMINATOR = r"(?=$|[\s)\]}>.,!?;:'\"])"
 _FULL_ISSUE_PATTERN = re.compile(
@@ -74,6 +81,7 @@ _LOCKFILE_ORIGIN_MANIFESTS = {
     "go.sum": "go.mod",
     "Gemfile.lock": "Gemfile",
 }
+_MANIFEST_TOKEN_DELIMITERS = frozenset({","})
 _EVIDENCE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("上流公開版", ("上流公開版", "Upstream release")),
     ("API移行", ("API移行", "API migration")),
@@ -84,6 +92,45 @@ _EVIDENCE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lockfile", ("lockfile", "Lockfiles")),
     ("検証証跡", ("検証証跡", "Verification")),
 )
+
+
+def _path_tokens(value: str) -> tuple[str, ...]:
+    """Parse exact path tokens with optional backtick quoting."""
+    tokens: list[str] = []
+    index = 0
+    value_length = len(value)
+    while index < value_length:
+        while index < value_length and (
+            value[index].isspace() or value[index] in _MANIFEST_TOKEN_DELIMITERS
+        ):
+            index += 1
+        if index == value_length:
+            break
+        if value[index] == "`":
+            closing = value.find("`", index + 1)
+            if closing < 0:
+                raise ContractViolation("依存manifest欄のquoted tokenが閉じていません")
+            token = value[index + 1 : closing]
+            if not token:
+                raise ContractViolation("依存manifest欄のquoted tokenが空です")
+            index = closing + 1
+            if index < value_length and not (
+                value[index].isspace() or value[index] in _MANIFEST_TOKEN_DELIMITERS
+            ):
+                raise ContractViolation("依存manifest欄のquoted token隣接が不正です")
+        else:
+            start = index
+            while index < value_length and not (
+                value[index].isspace()
+                or value[index] in _MANIFEST_TOKEN_DELIMITERS
+                or value[index] == "`"
+            ):
+                index += 1
+            token = value[start:index]
+            if index < value_length and value[index] == "`":
+                raise ContractViolation("依存manifest欄のtoken隣接が不正です")
+        tokens.append(token)
+    return tuple(tokens)
 
 
 def parse_push_updates(raw: str) -> tuple[tuple[str, str, str, str], ...]:
@@ -281,6 +328,29 @@ def dependency_evidence_errors(
         elif display_name not in evidence_values:
             evidence_values[display_name] = match.group("value").strip()
 
+    manifest_tokens = _path_tokens(evidence_values.get("依存manifest", ""))
+    if manifests:
+        expected_manifest_paths = set(manifests)
+        actual_manifest_paths = set(manifest_tokens)
+        for path in manifests:
+            if path not in actual_manifest_paths:
+                errors.append(path)
+        if (
+            len(manifest_tokens) != len(actual_manifest_paths)
+            or actual_manifest_paths - expected_manifest_paths
+        ):
+            errors.append("依存manifest")
+
+    lockfile_tokens = _path_tokens(evidence_values.get("lockfile", ""))
+    if lockfiles:
+        expected_lockfile_paths = set(lockfiles)
+        actual_lockfile_paths = set(lockfile_tokens)
+        if (
+            actual_lockfile_paths != expected_lockfile_paths
+            or len(lockfile_tokens) != len(actual_lockfile_paths)
+        ):
+            errors.append("lockfile")
+
     if lockfiles and not manifests:
         origin_paths = sorted(
             {
@@ -288,18 +358,12 @@ def dependency_evidence_errors(
                 for lockfile in lockfiles
             }
         )
-        manifest_value = evidence_values.get("依存manifest", "")
-        for origin_path in origin_paths:
-            if re.search(
-                rf"(?<![A-Za-z0-9_./-]){re.escape(origin_path)}(?![A-Za-z0-9_./-])",
-                manifest_value,
-            ) is None:
-                errors.append("依存manifest")
-                break
+        if (
+            set(manifest_tokens) != set(origin_paths)
+            or len(manifest_tokens) != len(origin_paths)
+        ):
+            errors.append("依存manifest")
 
-    for path in [*manifests, *lockfiles]:
-        if path not in body:
-            errors.append(path)
     return errors
 
 
@@ -946,7 +1010,7 @@ def main() -> int:
             return 0
 
         repository = Path(_run_git(Path.cwd(), "rev-parse", "--show-toplevel"))
-        push_input = sys.stdin.read()
+        push_input = _read_push_input(sys.stdin)
         updates = parse_push_updates(push_input)
         branch = _run_git(repository, "branch", "--show-current")
         if not updates and not branch:

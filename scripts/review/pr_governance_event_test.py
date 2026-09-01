@@ -224,20 +224,23 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         for path, expected in ((".github/workflows/test-and-build.yml@main", 0), (".github/workflows/test-and-build.yml@refs/pull/72/merge", 0), (".github/workflows/test-and-build.yml.evil@main", 1), (".github/workflows/test-and-build.yml@../main", 1)):
             with self.subTest(path=path), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
-                run = {"name": "CI", "path": path, "event": "pull_request", "status": "completed", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}]}
+                source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+                pull = {"number": 72, "base": {"sha": base, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}}}
+                run = {"name": "CI", "path": path, "event": "pull_request", "status": "completed", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repo}, "head": {"sha": head, "repo": source_repo}}]}
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'check-runs/101'*) printf '%s' '{\"id\":101,\"app\":{\"id\":42},\"name\":\"KRR / PR governance (trusted check)\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"external_id\":\"krr-governance/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/dispatcher-9\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0\"}' ;;\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' '[]' ;;\n"
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-                environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+                environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(pull), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
                 result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
 
-    def test_requested_and_waiting_workflow_run_statuses_reach_invalidation_path(self) -> None:
+    def test_requested_waiting_and_pending_workflow_run_statuses_reach_invalidation_path(self) -> None:
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None
         current = re.search(
@@ -253,24 +256,26 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         base, head = "b" * 40, "a" * 40
         pull = {
             "number": 72, "state": "open", "body": "Fixes #64", "draft": False,
-            "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repository"}},
-            "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+            "base": {"sha": base, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}},
+            "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}},
         }
         pulls = [[pull]]
-        for status in ("requested", "waiting"):
+        for status in ("requested", "waiting", "pending"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
-                run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": status, "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}]}
+                source_repository = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+                run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": status, "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repository}, "head": {"sha": head, "repo": source_repository}}]}
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\nesac\n", encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-                environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+                environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(pull), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
                 result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 resolved = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
@@ -337,7 +342,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None
         base, head = "b" * 40, "a" * 40
-        local = {"base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}}
+        local = {"base": {"ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"repo": {"id": 101, "full_name": "owner/repository"}}}
         pulls = [[
             {"number": 72, "state": "open", "body": "Fixes #64", **local},
             {"number": 73, "state": "open", "body": "Closes #64", **local},
@@ -346,20 +351,24 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         cases = (
             ("CI", ".github/workflows/test-and-build.yml@master", "pull_request", "[]"),
             ("release-preflight", ".github/workflows/release-preflight.yml@master", "pull_request", "[]"),
+            ("PR governance review sensor", ".github/workflows/pr-governance-review-events.yml@master", "pull_request", "[72,73]"),
             ("PR governance review sensor", ".github/workflows/pr-governance-review-events.yml@master", "pull_request_review", "[72,73]"),
         )
         for name, path, event, expected_priority in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+                source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+                current_pull = {"number": 72, "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
                 run = {
                     "name": name, "path": path, "event": event, "status": "completed",
                     "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head,
-                    "repository": {"full_name": "owner/repository"},
-                    "pull_requests": [{"number": 72, "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}],
+                    "repository": {"id": 101, "full_name": "owner/repository"},
+                    "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repo}, "head": {"sha": head, "repo": source_repo}}],
                 }
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                    "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                     "  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n"
                     "  *) exit 91 ;;\nesac\n",
@@ -367,9 +376,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 )
                 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
                 environment = os.environ | {
-                    "EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9",
+                    "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1",
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master",
-                    "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULLS": json.dumps(pulls),
+                    "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(current_pull), "PULLS": json.dumps(pulls),
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
@@ -427,13 +436,15 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
         self.assertIsNotNone(match); assert match is not None
         base, head = "b" * 40, "a" * 40
-        run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": "requested", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}]}
-        local = {"base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"repo": {"full_name": "owner/repository"}}}
+        source_repo = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+        run = {"name": "CI", "path": ".github/workflows/test-and-build.yml@main", "event": "pull_request", "status": "requested", "id": 9, "run_number": 1, "run_attempt": 1, "head_sha": head, "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [{"number": 72, "base": {"sha": base, "ref": "master", "repo": source_repo}, "head": {"sha": head, "repo": source_repo}}]}
+        local = {"base": {"ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"repo": {"id": 101, "full_name": "owner/repository"}}}
+        current_pull = {"number": 72, "base": {"sha": base, **local["base"]}, "head": {"sha": head, **local["head"]}}
         pulls = [[{"number": 72, "state": "open", "body": "Fixes #64; closes #65", **local}, {"number": 73, "state": "open", "body": "Fixes #64", **local}, {"number": 74, "state": "open", "body": "Fixes #65", **local}]]
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
-            fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-            environment = os.environ | {"EVENT_NAME": "workflow_run", "WORKFLOW_RUN_ID": "9", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+            fake.write_text("#!/bin/sh\ncase \"$*\" in\n  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n  *'pulls?state=open'*) printf '%s' \"${PULLS}\" ;;\n  *) exit 91 ;;\nesac\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {"EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed", "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "RUN": json.dumps(run), "PULL": json.dumps(current_pull), "PULLS": json.dumps(pulls), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("reconcile=true", output.read_text(encoding="utf-8"))
@@ -1002,7 +1013,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.workflow.index("  reconcile-all-open:")
         ]
         self.assertIn(
-            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: ${{ needs.establish-resolver-failure-barrier.outputs.priority == 'true' }}",
             resolver,
         )
         self.assertIn("reconcile: ${{ steps.targets.outputs.reconcile }}", resolver)
@@ -1098,13 +1109,25 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertLess(establish.index("concurrency:"), establish.index("Create resolver-failure barrier marker write token"))
         self.assertLess(establish.index("Activate resolver-failure merge barrier"), establish.index("Fail closed after classification barrier activation"))
         self.assertIn("EVENT_SOURCE_VALID: ${{ needs.preflight-workflow-run-source.outputs.valid }}", establish)
+        self.assertEqual(preflight.count("WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}"), 1)
         self.assertIn("needs: establish-resolver-failure-barrier", self.workflow[self.workflow.index("  resolve_event:"):])
         self.assertIn("needs: resolve_event", self.workflow[self.workflow.index("  reconcile-all-open:"):])
         marker = self.workflow.index("- name: Create resolver-failure barrier marker write token")
         scope = self.workflow.index("- name: Exclude unavailable fork sources before dispatcher lock")
         self.assertLess(scope, marker)
+        resolver = self.workflow[
+            self.workflow.index("  resolve_event:"):
+            self.workflow.index("  reconcile-all-open:")
+        ]
+        self.assertIn("DEFAULT_BRANCH: ${{ needs.establish-resolver-failure-barrier.outputs.default_branch }}", resolver)
+        self.assertNotIn("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", resolver)
 
-        def run_scope(run: dict[str, object], pull: dict[str, object] | None, expected_reconcile: str, expected_valid: str, mode: str = "") -> None:
+        def run_scope(
+            run: dict[str, object], pull: dict[str, object] | None,
+            expected_reconcile: str, expected_valid: str, mode: str = "",
+            expected_priority: str = "true", trigger_action: str = "completed",
+            source_attempt: str = "1", base_blob: str | None = None, head_blob: str | None = None,
+        ) -> None:
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary)
                 output = directory / "scope-output"
@@ -1113,6 +1136,8 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/9'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${RUN}\" ;;\n"
                     "  *'/pulls/'*) [ \"${MODE}\" = api-failure ] && exit 7; [ \"${MODE}\" = invalid-json ] && printf '%s' '{'; printf '%s' \"${PULL}\" ;;\n"
+                    "  *'/contents/'*'ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${BASE_BLOB}\" ;;\n"
+                    "  *'/contents/'*) [ \"${MODE}\" = api-failure ] && exit 7; printf '%s' \"${HEAD_BLOB}\" ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
                     "  *) exit 91 ;;\n"
                     "esac\n",
@@ -1122,11 +1147,15 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository",
                     "EVENT_NAME": "workflow_run",
+                    "EVENT_ACTION": trigger_action,
                     "WORKFLOW_RUN_ID": "9",
+                    "WORKFLOW_RUN_ATTEMPT": source_attempt,
                     "DEFAULT_BRANCH": "master",
                     "GITHUB_OUTPUT": str(output),
                     "RUN": json.dumps(run),
                     "PULL": json.dumps(pull),
+                    "BASE_BLOB": json.dumps({"sha": "c" * 40}) if base_blob is None else base_blob,
+                    "HEAD_BLOB": json.dumps({"sha": "c" * 40}) if head_blob is None else head_blob,
                     "MODE": mode,
                     "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
@@ -1141,28 +1170,54 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(values["reconcile"], expected_reconcile)
                 self.assertEqual(values["valid"], expected_valid)
+                self.assertEqual(values["priority"], expected_priority)
                 self.assertNotIn("\\n", output.read_text(encoding="utf-8"))
 
-        def workflow_run(name: str, event: str) -> dict[str, object]:
+        def workflow_run(
+            name: str, event: str, status: str = "completed",
+            head_repository: dict[str, str] | None = None, deleted_head: bool = False,
+        ) -> dict[str, object]:
+            paths = {
+                "PR governance review sensor": ".github/workflows/pr-governance-review-events.yml",
+                "CI": ".github/workflows/test-and-build.yml",
+                "release-preflight": ".github/workflows/release-preflight.yml",
+            }
+            base = {
+                "ref": "master", "sha": "b" * 40,
+                "repo": {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"},
+            }
+            current_head_repository = {"full_name": "owner/repository", "id": 101} if head_repository is None else head_repository
+            source_head_repository = None if deleted_head else {
+                "id": current_head_repository["id"],
+                "name": current_head_repository["full_name"].rsplit("/", 1)[1],
+                "url": f"https://api.github.com/repos/{current_head_repository['full_name']}",
+            }
+            head = {
+                "sha": "a" * 40,
+                "repo": source_head_repository,
+            }
             return {
                 "name": name,
+                "path": paths[name] + "@master",
                 "event": event,
-                "status": "completed",
+                "status": status,
                 "id": 9,
                 "run_number": 1,
                 "run_attempt": 1,
-                "pull_requests": [{"number": 72}],
+                "head_sha": "a" * 40,
+                "repository": {"id": 101, "full_name": "owner/repository"},
+                "pull_requests": [{"number": 72, "base": base, "head": head}],
             }
 
         local_pull = {
             "number": 72,
             "state": "open",
-            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
-            "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}},
+            "base": {"ref": "master", "sha": "b" * 40, "repo": {"full_name": "owner/repository", "id": 101}},
+            "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository", "id": 101}},
         }
         fork_pull = {
             **local_pull,
-            "head": {"sha": "a" * 40, "repo": {"full_name": "fork/repository"}},
+            "head": {"sha": "a" * 40, "repo": {"full_name": "fork/repository", "id": 202}},
         }
         unavailable_fork_pull = {**local_pull, "head": {"sha": "a" * 40, "repo": None}}
 
@@ -1174,11 +1229,51 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             ("PR governance review sensor", "pull_request_review_comment"),
         ):
             with self.subTest(name=name, event=event, source="fork"):
-                run_scope(workflow_run(name, event), fork_pull, "false", "true")
+                run_scope(workflow_run(name, event, head_repository={"full_name": "fork/repository", "id": 202}), fork_pull, "false", "true")
             with self.subTest(name=name, event=event, source="deleted-fork"):
-                run_scope(workflow_run(name, event), unavailable_fork_pull, "false", "true")
+                run_scope(workflow_run(name, event, deleted_head=True), unavailable_fork_pull, "false", "true")
             with self.subTest(name=name, event=event, source="local"):
-                run_scope(workflow_run(name, event), local_pull, "true", "true")
+                expected_priority = "false" if name in {"CI", "release-preflight"} else "true"
+                run_scope(workflow_run(name, event), local_pull, "true", "true", expected_priority=expected_priority)
+
+        # A valid local CI/release run is classified before either shared
+        # dispatcher lock. The trigger action remains the identity, while the
+        # API re-read may already have moved to a later lifecycle status.
+        # Every allowed pair must join the serial lane without cancellation.
+        for name in ("CI", "release-preflight"):
+            for trigger_action in ("requested", "in_progress", "completed"):
+                for status in ("requested", "queued", "waiting", "pending", "in_progress", "completed"):
+                    with self.subTest(name=name, trigger_action=trigger_action, status=status, source="local"):
+                        run_scope(
+                            workflow_run(name, "pull_request", status), local_pull,
+                            "true", "true", expected_priority="false", trigger_action=trigger_action,
+                        )
+        # Unknown lifecycle metadata must retain preemption instead of silently
+        # joining the normal lane on an unverified source classification.
+        run_scope(
+            workflow_run("CI", "pull_request", "unknown"), local_pull,
+            "true", "false", expected_priority="true", trigger_action="completed",
+        )
+        run_scope(
+            workflow_run("CI", "pull_request", "completed"), local_pull,
+            "true", "false", expected_priority="true", trigger_action="unknown",
+        )
+
+        # A normal-lane classification is safe only after the same source
+        # binding as the resolver. Each drift must arm the failure barrier and
+        # retain preemption rather than bypassing a paced reconciliation.
+        normal = workflow_run("CI", "pull_request")
+        drift_cases = (
+            ("path", {**normal, "path": ".github/workflows/other.yml@master"}, local_pull, {}),
+            ("repository", {**normal, "repository": {"full_name": "fork/repository"}}, local_pull, {}),
+            ("run-id", {**normal, "id": 10}, local_pull, {}),
+            ("run-attempt", {**normal, "run_attempt": 2}, local_pull, {}),
+            ("head", {**normal, "head_sha": "d" * 40}, local_pull, {}),
+            ("workflow-blob", normal, local_pull, {"head_blob": json.dumps({"sha": "d" * 40})}),
+        )
+        for label, run, pull, options in drift_cases:
+            with self.subTest(source=label):
+                run_scope(run, pull, "true", "false", expected_priority="true", **options)
 
         # Ambiguous or malformed metadata arms the barrier but marks the
         # source invalid; the later fence must fail closed before resolution.
@@ -1224,28 +1319,30 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         assert scope_match is not None and resolver_match is not None
         scope_program = self._workflow_program(scope_match)
         resolver_program = self._workflow_program(resolver_match)
-        base = {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}}
-        local_head = {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}
+        base = {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository", "id": 101}}
+        source_base = {"sha": "b" * 40, "ref": "master", "repo": {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}}
+        local_head = {"sha": "a" * 40, "repo": {"full_name": "owner/repository", "id": 101}}
         local_source = {"number": 72, "state": "open", "base": base, "head": local_head}
-        resolver_source = {"number": 72, "base": base, "head": {"sha": "a" * 40, "repo": None}}
+        resolver_source = {"number": 72, "base": source_base, "head": {"sha": "a" * 40, "repo": None}}
+        resolver_current = {"number": 72, "base": base, "head": {"sha": "a" * 40, "repo": None}}
         resolver_run = {
             "name": "CI", "event": "pull_request", "status": "completed", "id": 9,
             "run_number": 1, "run_attempt": 1, "head_sha": "a" * 40,
             "path": ".github/workflows/test-and-build.yml@master",
-            "repository": {"full_name": "owner/repository"}, "pull_requests": [resolver_source],
+            "repository": {"id": 101, "full_name": "owner/repository"}, "pull_requests": [resolver_source],
         }
         all_open = [[
             {**local_source, "body": "Fixes #64", "draft": False, "head": {"sha": "a" * 40, "repo": None}},
-            {"number": 73, "state": "open", "body": "Fixes #65", "draft": False, "base": base, "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository"}}},
+            {"number": 73, "state": "open", "body": "Fixes #65", "draft": False, "base": base, "head": {"sha": "c" * 40, "repo": {"full_name": "owner/repository", "id": 101}}},
         ]]
 
         def execute(program: str, run: dict[str, object], output: Path, directory: Path) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
                 [sys.executable, "-c", program],
                 env=os.environ | {
-                    "GITHUB_REPOSITORY": "owner/repository", "EVENT_NAME": "workflow_run",
-                    "WORKFLOW_RUN_ID": "9", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
-                    "RUN": json.dumps(run), "PULL": json.dumps(local_source), "PULLS": json.dumps(all_open),
+                    "GITHUB_REPOSITORY": "owner/repository", "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed",
+                    "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                    "RUN": json.dumps(run), "PULL": json.dumps(resolver_current if program == resolver_program else local_source), "PULLS": json.dumps(all_open),
                     "GH_LOG": str(directory / "gh.log"), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 },
                 capture_output=True, text=True, check=False,
@@ -2084,21 +2181,21 @@ raise SystemExit(91)
             self.workflow.index("  reconcile-all-open:")
         ]
         reconciler_job = self.workflow[self.workflow.index("  reconcile-all-open:"):]
-        generation_lock = (
+        preflight_generation_lock = (
             "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n"
-            "      cancel-in-progress: true"
+            "      cancel-in-progress: ${{ needs.preflight-workflow-run-source.outputs.priority == 'true' }}"
         )
-        # An arriving barrier event cancels both an older resolver and an
-        # older reconciler. Thus an old resolver cannot wake after the new
-        # barrier arm and acquire a stale reconciliation/release generation.
-        self.assertIn(generation_lock, job)
-        self.assertIn(generation_lock, resolver_job)
+        resolver_generation_lock = (
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n"
+            "      cancel-in-progress: ${{ needs.establish-resolver-failure-barrier.outputs.priority == 'true' }}"
+        )
+        # A priority event cancels both an older resolver and reconciler. A
+        # validated CI/release event has priority=false and remains serialized,
+        # so ordinary workflow traffic cannot cancel a paced all-open scan.
+        self.assertIn(preflight_generation_lock, job)
+        self.assertIn(resolver_generation_lock, resolver_job)
         self.assertIn("group: pr-governance-dispatcher-${{ github.repository_id }}", reconciler_job)
         self.assertIn("cancel-in-progress: ${{ needs.resolve_event.outputs.priority_targets != '[]' }}", reconciler_job)
-        self.assertIn(
-            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
-            job,
-        )
         self.assertNotIn("actions/checkout", job)
         self.assertNotIn("github.event.pull_request", job)
         self.assertIn("repos/{repository}/git/ref/heads/{branch}", job)
@@ -2557,7 +2654,7 @@ raise SystemExit(91)
             self.workflow.index("  resolve_event:")
         ]
         self.assertIn(
-            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: ${{ needs.preflight-workflow-run-source.outputs.priority == 'true' }}",
             establish,
         )
         resolver = self.workflow[
@@ -2565,7 +2662,7 @@ raise SystemExit(91)
             self.workflow.index("  reconcile-all-open:")
         ]
         self.assertIn(
-            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: true",
+            "concurrency:\n      group: pr-governance-dispatcher-${{ github.repository_id }}\n      cancel-in-progress: ${{ needs.establish-resolver-failure-barrier.outputs.priority == 'true' }}",
             resolver,
         )
         self.assertIn(
@@ -3163,8 +3260,8 @@ raise SystemExit(91)
         pages = [[
             {
                 "number": number, "state": "open", "body": "Fixes #64", "draft": False,
-                "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
-                "head": {"sha": heads[number], "repo": {"full_name": "owner/repository"}},
+                "base": {"ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}},
+                "head": {"sha": heads[number], "repo": {"id": 101, "full_name": "owner/repository"}},
             }
             for number in range(start, min(start + 100, total + 1))
         ] for start in range(1, total + 1, 100)]
@@ -3446,11 +3543,11 @@ raise SystemExit(91)
             "run_number": 1,
             "run_attempt": 1,
             "head_sha": heads[1],
-            "repository": {"full_name": "owner/repository"},
+            "repository": {"id": 101, "full_name": "owner/repository"},
             "pull_requests": [{
                 "number": 1,
-                "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}},
-                "head": {"sha": heads[1], "repo": {"full_name": "owner/repository"}},
+                "base": {"sha": "b" * 40, "ref": "master", "repo": {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}},
+                "head": {"sha": heads[1], "repo": {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}},
             }],
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -3465,6 +3562,7 @@ raise SystemExit(91)
             fake.write_text(
                 "#!/bin/sh\ncase \"$*\" in\n"
                 "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
+                "  *'/pulls/1'*) printf '%s' \"${PULL}\" ;;\n"
                 "  *'/contents/'*) printf '%s' '{\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\"}' ;;\n"
                 "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
                 "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
@@ -3476,9 +3574,10 @@ raise SystemExit(91)
             base_environment = os.environ | {
                 "GITHUB_REPOSITORY": "owner/repository",
                 "DEFAULT_BRANCH": "master",
-                "EVENT_NAME": "workflow_run",
-                "WORKFLOW_RUN_ID": "9",
+                "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed",
+                "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1",
                 "RUN": json.dumps(run, separators=(",", ":")),
+                "PULL": json.dumps({"number": 1, "base": {"sha": "b" * 40, "ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}}, "head": {"sha": heads[1], "repo": {"id": 101, "full_name": "owner/repository"}}}, separators=(",", ":")),
                 "PULLS_FILE": str(pulls_file),
                 "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
             }
