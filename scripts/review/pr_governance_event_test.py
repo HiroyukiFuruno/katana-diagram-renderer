@@ -1629,6 +1629,65 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             with self.subTest(source=mode):
                 run_scope(workflow_run("CI", "pull_request"), local_pull, "true", "false", mode)
 
+    def test_unchanged_fork_pull_request_target_is_excluded_before_barrier_mutation(self) -> None:
+        """Only a fully bound, unchanged foreign/deleted fork may skip the shared lock."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        preflight = self.workflow[
+            self.workflow.index("  preflight-workflow-run-source:"):
+            self.workflow.index("  establish-resolver-failure-barrier:")
+        ]
+        self.assertIn("github.event_name != 'workflow_run'", preflight)
+        self.assertIn("PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}", preflight)
+        self.assertIn("PR_BASE_REF: ${{ github.event.pull_request.base.ref }}", preflight)
+        self.assertNotIn("concurrency:", preflight)
+        establish = self.workflow[
+            self.workflow.index("  establish-resolver-failure-barrier:"):
+            self.workflow.index("  resolve_event:")
+        ]
+        self.assertIn("needs.preflight-workflow-run-source.outputs.reconcile == 'true'", establish)
+
+        source_base, advanced_base, head = "b" * 40, "d" * 40, "a" * 40
+
+        def run_scope(label: str, head_repository: object, current_base: str, expected_reconcile: str, expected_valid: str) -> None:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); output = directory / "scope-output"; fake = directory / "gh"
+                source = {
+                    "number": 72,
+                    "state": "open",
+                    "base": {"sha": current_base, "ref": "master", "repo": {"full_name": "owner/repository"}},
+                    "head": {"sha": head, "repo": head_repository},
+                }
+                fake.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'/pulls/72'*) printf '%s' \"${SOURCE}\" ;;\n"
+                    "  *) exit 91 ;;\nesac\n",
+                    encoding="utf-8",
+                )
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": "owner/repository", "EVENT_NAME": "pull_request_target", "EVENT_ACTION": "opened",
+                    "PR_ACTION": "opened", "PR_NUMBER": "72", "PR_HEAD_SHA": head, "PR_BASE_SHA": source_base,
+                    "PR_BASE_REF": "master", "GITHUB_OUTPUT": str(output), "SOURCE": json.dumps(source),
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(scope_match)], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(values["reconcile"], expected_reconcile)
+                self.assertEqual(values["valid"], expected_valid)
+                self.assertEqual(values["priority"], "true")
+
+        run_scope("foreign-unchanged", {"full_name": "fork/repository", "id": 202}, source_base, "false", "true")
+        run_scope("deleted-unchanged", None, source_base, "false", "true")
+        run_scope("local-unchanged", {"full_name": "owner/repository", "id": 101}, source_base, "true", "true")
+        run_scope("malformed-foreign", {"full_name": "fork/repository"}, source_base, "true", "false")
+        run_scope("foreign-historical-base", {"full_name": "fork/repository", "id": 202}, advanced_base, "true", "true")
+
     def test_workflow_run_out_of_scope_race_keeps_reconciliation_without_workflow_blob(self) -> None:
         """A resolver re-read may observe a deleted fork after scope accepted its local source."""
         scope_match = re.search(
