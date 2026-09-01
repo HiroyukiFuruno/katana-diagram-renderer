@@ -848,6 +848,7 @@ def _status_check_rollup_errors(
         if context in matching:
             matching[context].append(check)
     errors = []
+    required_app_ids = dict(required_checks[1])
     for context in sorted(required_contexts):
         checks = matching[context]
         if len(checks) != 1:
@@ -856,7 +857,17 @@ def _status_check_rollup_errors(
             )
             continue
         check = checks[0]
-        if check.get("status") != "COMPLETED" or check.get("conclusion") != "SUCCESS":
+        app_id = required_app_ids[context]
+        is_legacy_status = check.get("__typename") == "StatusContext"
+        if app_id is None and is_legacy_status:
+            # Classic required contexts have no producer App binding. GitHub
+            # exposes their terminal commit status as a StatusContext rather
+            # than a CheckRun in statusCheckRollup; accept only that exact
+            # terminal-success representation. App-bound contexts remain
+            # CheckRun-only and are validated by the producer fence below.
+            if check.get("state") == "SUCCESS":
+                continue
+        if is_legacy_status or check.get("status") != "COMPLETED" or check.get("conclusion") != "SUCCESS":
             errors.append(f"required CI check がcompleted-successではありません: {context}")
     return errors
 

@@ -1322,6 +1322,87 @@ class VerifyPrReadyTest(unittest.TestCase):
             [],
         )
 
+    def test_null_app_required_context_accepts_terminal_success_status_context(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        rollup = [
+            {"__typename": "StatusContext", "context": "CI", "state": "SUCCESS"},
+            {
+                "__typename": "CheckRun",
+                "name": subject._LATCH_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": subject._TRUSTED_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            },
+        ]
+        self.assertEqual(subject._status_check_rollup_errors(rollup, required), [])
+
+    def test_status_context_is_never_accepted_for_app_bound_required_context(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", 7),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        rollup = [
+            {"__typename": "StatusContext", "context": "CI", "state": "SUCCESS"},
+            {
+                "__typename": "CheckRun",
+                "name": subject._LATCH_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": subject._TRUSTED_CHECK,
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+            },
+        ]
+        errors = subject._status_check_rollup_errors(rollup, required)
+        self.assertIn("CI", " ".join(errors))
+
+    def test_null_app_status_context_requires_exact_success_state(self) -> None:
+        required = (
+            ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
+            (
+                ("CI", None),
+                (subject._LATCH_CHECK, 15368),
+                (subject._TRUSTED_CHECK, 42),
+            ),
+        )
+        for state in ("PENDING", "FAILURE", "success", None):
+            with self.subTest(state=state):
+                rollup = [
+                    {"__typename": "StatusContext", "context": "CI", "state": state},
+                    {
+                        "__typename": "CheckRun",
+                        "name": subject._LATCH_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "name": subject._TRUSTED_CHECK,
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                    },
+                ]
+                self.assertTrue(subject._status_check_rollup_errors(rollup, required))
+
     def test_app_bound_required_context_binds_rollup_to_exact_check_run(self) -> None:
         required = (
             ("CI", subject._LATCH_CHECK, subject._TRUSTED_CHECK),
