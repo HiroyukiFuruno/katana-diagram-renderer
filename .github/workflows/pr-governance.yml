@@ -278,13 +278,32 @@ jobs:
                           # run started has no open target to reconcile.  It is
                           # safe to skip the shared barrier only after both
                           # mutable resources have been re-read and retain the
-                          # exact local workflow/PR binding.
+                          # exact workflow/PR binding. Foreign and deleted
+                          # forks are equally outside this repository's
+                          # governance domain, but their identity must remain
+                          # stable across both reads.
+                          closed_head_binding = None
+                          if source_head_repo is None:
+                              if pull_head_repo is None:
+                                  closed_head_binding = ("deleted",)
+                          elif isinstance(source_head_repo, dict) and isinstance(pull_head_repo, dict):
+                              pull_head_name = pull_head_repo.get("full_name")
+                              pull_head_id = pull_head_repo.get("id")
+                              if (
+                                  isinstance(pull_head_name, str)
+                                  and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", pull_head_name) is not None
+                                  and type(pull_head_id) is int and pull_head_id >= 1
+                                  and source_repository_matches(
+                                      source_head_repo, pull_head_id, pull_head_name.rsplit("/", 1)[1],
+                                      f"https://api.github.com/repos/{pull_head_name}",
+                                  )
+                              ):
+                                  if pull_head_name == repository and pull_head_id == repository_id:
+                                      closed_head_binding = ("local",)
+                                  elif pull_head_id != repository_id:
+                                      closed_head_binding = foreign_head_binding(pull_head_repo)
                           if (
-                              not isinstance(source_head_repo, dict)
-                              or not source_repository_matches(source_head_repo, repository_id, repository_name, repository_url)
-                              or not isinstance(pull_head_repo, dict)
-                              or pull_head_repo.get("full_name") != repository
-                              or type(pull_head_repo.get("id")) is not int or pull_head_repo.get("id") != repository_id
+                              closed_head_binding is None
                               or pull_base.get("sha") != source_base["sha"]
                           ):
                               valid = False
@@ -303,10 +322,34 @@ jobs:
                               final_pull_head = final_pull.get("head") if isinstance(final_pull, dict) else None
                               final_pull_base_repo = final_pull_base.get("repo") if isinstance(final_pull_base, dict) else None
                               final_pull_head_repo = final_pull_head.get("repo") if isinstance(final_pull_head, dict) and "repo" in final_pull_head else missing
+                              final_head_binding_valid = False
+                              if closed_head_binding == ("local",):
+                                  final_head_binding_valid = (
+                                      isinstance(final_source_head_repo, dict)
+                                      and source_repository_matches(final_source_head_repo, repository_id, repository_name, repository_url)
+                                      and isinstance(final_pull_head_repo, dict)
+                                      and final_pull_head_repo.get("full_name") == repository
+                                      and type(final_pull_head_repo.get("id")) is int and final_pull_head_repo.get("id") == repository_id
+                                  )
+                              elif closed_head_binding == ("deleted",):
+                                  final_head_binding_valid = final_source_head_repo is None and final_pull_head_repo is None
+                              elif len(closed_head_binding) == 3:
+                                  _, foreign_name, foreign_id = closed_head_binding
+                                  final_head_binding_valid = (
+                                      isinstance(final_source_head_repo, dict)
+                                      and foreign_id != repository_id
+                                      and source_repository_matches(
+                                          final_source_head_repo, foreign_id, foreign_name.rsplit("/", 1)[1],
+                                          f"https://api.github.com/repos/{foreign_name}",
+                                      )
+                                      and foreign_head_binding(final_pull_head_repo) == closed_head_binding
+                                  )
                               if (
                                   not isinstance(final_run, dict) or final_run.get("name") != name
                                   or not workflow_path_matches(final_run.get("path"), expected[name][0])
+                                  or final_run.get("path") != run.get("path")
                                   or final_run.get("event") not in expected[name][1]
+                                  or final_run.get("event") != run.get("event")
                                   or final_run.get("status") not in lifecycle
                                   or type(final_run.get("id")) is not int or final_run.get("id") != int(run_id)
                                   or type(final_run.get("run_number")) is not int or final_run.get("run_number") != run.get("run_number")
@@ -319,8 +362,6 @@ jobs:
                                   or not isinstance(final_source_base, dict) or final_source_base.get("ref") != default_branch or final_source_base.get("sha") != source_base["sha"]
                                   or not source_repository_matches(final_source_base_repo, repository_id, repository_name, repository_url)
                                   or not isinstance(final_source_head, dict) or final_source_head.get("sha") != source_head["sha"]
-                                  or not isinstance(final_source_head_repo, dict)
-                                  or not source_repository_matches(final_source_head_repo, repository_id, repository_name, repository_url)
                                   or final_run.get("head_sha") != source_head["sha"]
                                   or not isinstance(final_pull, dict)
                                   or type(final_pull.get("number")) is not int or final_pull.get("number") != number
@@ -329,8 +370,7 @@ jobs:
                                   or not isinstance(final_pull_base_repo, dict) or final_pull_base_repo.get("full_name") != repository
                                   or type(final_pull_base_repo.get("id")) is not int or final_pull_base_repo.get("id") != repository_id
                                   or not isinstance(final_pull_head, dict) or final_pull_head.get("sha") != source_head["sha"]
-                                  or not isinstance(final_pull_head_repo, dict) or final_pull_head_repo.get("full_name") != repository
-                                  or type(final_pull_head_repo.get("id")) is not int or final_pull_head_repo.get("id") != repository_id
+                                  or not final_head_binding_valid
                                   or not isinstance(final_repo, dict) or final_repo.get("default_branch") != default_branch
                               ):
                                   valid = False

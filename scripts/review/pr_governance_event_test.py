@@ -1718,6 +1718,104 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 self.assertEqual(pull_reads, 2)
                 self.assertEqual(repository_reads, 2)
 
+    def test_closed_foreign_workflow_run_is_reread_before_prebarrier_noop(self) -> None:
+        """Stable closed fork identities are out of scope; every drift stays fail-closed."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        repository = "owner/repository"; base = "b" * 40; head = "a" * 40
+        base_repository = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository"}
+        run_repository = {"id": 101, "full_name": repository}
+        foreign_source = {"id": 202, "name": "repository", "url": "https://api.github.com/repos/fork/repository"}
+        foreign_pull = {"id": 202, "full_name": "fork/repository"}
+
+        def make_run(
+            source_head_repository: object, name: str = "CI", event: str = "pull_request",
+        ) -> dict[str, object]:
+            paths = {
+                "CI": ".github/workflows/test-and-build.yml",
+                "PR governance review sensor": ".github/workflows/pr-governance-review-events.yml",
+            }
+            return {
+                "id": 9, "name": name, "path": paths[name] + "@master",
+                "event": event, "status": "completed", "run_number": 1, "run_attempt": 1,
+                "head_sha": head, "repository": run_repository,
+                "pull_requests": [{
+                    "number": 72,
+                    "base": {"ref": "master", "sha": base, "repo": base_repository},
+                    "head": {"sha": head, "repo": source_head_repository},
+                }],
+            }
+
+        def make_pull(head_repository: object) -> dict[str, object]:
+            return {
+                "number": 72, "state": "closed",
+                "base": {"ref": "master", "sha": base, "repo": {"id": 101, "full_name": repository}},
+                "head": {"sha": head, "repo": head_repository},
+            }
+
+        cases = (
+            ("foreign-stable", foreign_source, foreign_pull, foreign_source, foreign_pull, {}, {}, {}, "false", "true"),
+            ("deleted-stable", None, None, None, None, {}, {}, {}, "false", "true"),
+            ("foreign-target-id-collision", {**foreign_source, "id": 101}, {**foreign_pull, "id": 101}, {**foreign_source, "id": 101}, {**foreign_pull, "id": 101}, {}, {}, {}, "true", "false"),
+            ("foreign-source-identity-drift", foreign_source, foreign_pull, {**foreign_source, "id": 203}, foreign_pull, {}, {}, {}, "true", "false"),
+            ("foreign-pull-identity-drift", foreign_source, foreign_pull, foreign_source, {"id": 202, "full_name": "fork/other"}, {}, {}, {}, "true", "false"),
+            ("deleted-identity-drift", None, None, None, foreign_pull, {}, {}, {}, "true", "false"),
+            ("run-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {"run_attempt": 2}, {}, {}, "true", "false"),
+            ("repo-drift", foreign_source, foreign_pull, foreign_source, foreign_pull, {"repository": {"id": 101, "full_name": "owner/other"}}, {}, {}, "true", "false"),
+            ("path-ref-drift-foreign", foreign_source, foreign_pull, foreign_source, foreign_pull, {"path": ".github/workflows/test-and-build.yml@release/v0.4"}, {}, {}, "true", "false"),
+            ("path-ref-drift-deleted", None, None, None, None, {"path": ".github/workflows/test-and-build.yml@release/v0.4"}, {}, {}, "true", "false"),
+            ("review-sensor-event-drift-foreign", foreign_source, foreign_pull, foreign_source, foreign_pull, {"event": "pull_request_review"}, {}, {}, "true", "false"),
+            ("review-sensor-event-drift-deleted", None, None, None, None, {"event": "pull_request_review"}, {}, {}, "true", "false"),
+            ("head-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {}, {"head": {"sha": "c" * 40, "repo": foreign_pull}}, {}, "true", "false"),
+            ("base-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {}, {"base": {"ref": "master", "sha": "c" * 40, "repo": {"id": 101, "full_name": repository}}}, {}, "true", "false"),
+            ("default-branch-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {}, {}, {"default_branch": "release/v0.4"}, "true", "false"),
+            ("state-race", foreign_source, foreign_pull, foreign_source, foreign_pull, {}, {"state": "open"}, {}, "true", "false"),
+        )
+        for label, initial_source_head, initial_pull_head, final_source_head, final_pull_head, run_change, pull_change, final_repository, expected_reconcile, expected_valid in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "scope-output"; run_reads = 0; pull_reads = 0; repository_reads = 0
+                run_name = "PR governance review sensor" if label.startswith("review-sensor-") else "CI"
+                initial_run = make_run(initial_source_head, run_name)
+                final_run = {**make_run(final_source_head, run_name), **run_change}
+                initial_pull = make_pull(initial_pull_head)
+                final_pull = {**make_pull(final_pull_head), **pull_change}
+
+                def response(value: object) -> subprocess.CompletedProcess[str]:
+                    return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+                def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    nonlocal run_reads, pull_reads, repository_reads
+                    endpoint = arguments[-1]
+                    if endpoint == f"repos/{repository}":
+                        repository_reads += 1
+                        return response({"default_branch": "master"} if repository_reads == 1 else {"default_branch": "master"} | final_repository)
+                    if endpoint == f"repos/{repository}/actions/runs/9":
+                        run_reads += 1
+                        return response(initial_run if run_reads == 1 else final_run)
+                    if endpoint == f"repos/{repository}/pulls/72":
+                        pull_reads += 1
+                        return response(initial_pull if pull_reads == 1 else final_pull)
+                    raise AssertionError(arguments)
+
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": repository, "EVENT_NAME": "workflow_run", "EVENT_ACTION": "completed",
+                    "WORKFLOW_RUN_ID": "9", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_OUTPUT": str(output),
+                }
+                with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                    exec(self._workflow_program(scope_match), {"__name__": "__main__"})
+                values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(values["reconcile"], expected_reconcile)
+                self.assertEqual(values["valid"], expected_valid)
+                self.assertEqual(values["priority"], "true")
+                expected_reads = 1 if label == "foreign-target-id-collision" else 2
+                self.assertEqual(run_reads, expected_reads)
+                self.assertEqual(pull_reads, expected_reads)
+                self.assertEqual(repository_reads, expected_reads)
+
     def test_unchanged_fork_pull_request_target_is_excluded_before_barrier_mutation(self) -> None:
         """Only a fully bound, unchanged foreign/deleted fork may skip the shared lock."""
         scope_match = re.search(
