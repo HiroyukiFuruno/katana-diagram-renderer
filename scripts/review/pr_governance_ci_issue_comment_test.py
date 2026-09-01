@@ -192,6 +192,28 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
                 self.assertRegex(text, r"(?:人間|human).*(?:禁止|bypass)")
                 self.assertRegex(text, r"admin.*(?:禁止|bypass)")
 
+    def test_review_skills_restart_initial_review_after_every_push_or_body_edit(self) -> None:
+        root = Path(__file__).parents[2]
+        for relative in (
+            ".codex/skills/self-review/SKILL.md",
+            ".codex/skills/gh-address-comments/SKILL.md",
+        ):
+            with self.subTest(path=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                self.assertRegex(
+                    text,
+                    r"(?:修正の push|修正.*push).*?(?:無効|失効).*?(?:strict )?`?initial`?.*(?:完了|cloud review)",
+                )
+                self.assertRegex(
+                    text,
+                    r"(?:同一 HEAD|同じHEAD).*?(?:本文編集|PR本文).*?(?:initial|初回)",
+                )
+                self.assertRegex(
+                    text,
+                    r"(?:initial review|initial marker).*?(?:完了|同一HEAD/body).*?(?:final review|final marker)",
+                )
+                self.assertNotIn("push 後、最終 cloud review", text)
+
     def test_bootstrap_mirrors_require_a_fresh_app_jwt_for_verify(self) -> None:
         root = Path(__file__).parents[2]
         for relative in (

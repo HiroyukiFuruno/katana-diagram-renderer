@@ -87,7 +87,7 @@ P0/P1 は必ず内容を精査し、正当なら必須修正とする。不当�
 
 ## 4. push、返信、スレッド解決
 
-検証が通った修正を commit・push した後、各 thread に具体的な返信を行う。修正時は変更内容と検証、見送り時は技術的根拠、質問時は回答を簡潔に記す。返信・resolve の完了後も、本文を編集した場合は旧reviewを再利用せず、1.5 の新しい initial marker から反復する。REST API は返信に使えるが、thread の resolve には GraphQL を使う。
+検証が通った修正を commit・push した後、各 thread に具体的な返信を行う。修正時は変更内容と検証、見送り時は技術的根拠、質問時は回答を簡潔に記す。**修正の push は旧 marker・review・trusted success を無効化するため、reply / resolve の完了後に 1.5 の current HEAD/body strict `initial` marker と cloud review を完了させてから final review へ進む。** 同一 HEAD の PR本文編集も同じく initial review から反復する。REST API は返信に使えるが、thread の resolve には GraphQL を使う。
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies \
@@ -105,18 +105,18 @@ mutation($threadId:ID!) {
 
 返信対象と resolve 対象を thread ごとに記録し、各指摘が返信済み・resolve 済み（見送りも根拠返信済み）であることを確認する。
 
-reply / resolve が完了しても trusted success を自動的に有効とは扱わない。最終反復へ進む前に、trusted Check Run evidence の query を重複を保持して読み、`pr_body_sha256` が **ちょうど1個** だけ存在し、current PR本文から1.5で再計算した digest と完全一致することを確認する。missing、duplicate、old digest、異なるdigestは fail-closed とし、reply / resolve 済みでも新しい initial marker から review をやり直す。
+reply / resolve が完了しても trusted success を自動的に有効とは扱わない。最終反復へ進む前に、trusted Check Run evidence の query を重複を保持して読み、`pr_body_sha256` が **ちょうど1個** だけ存在し、current PR本文から1.5で再計算した digest と完全一致することを確認する。missing、duplicate、old digest、異なるdigestは fail-closed とし、修正の push または本文編集後は新しい initial marker の cloud review 完了前に final marker を投稿しない。
 
 ## 5. 最新 HEAD・本文の最終レビュー反復
 
-push 後、最終 cloud review を依頼する直前に PR の current HEAD と本文を再取得し、1.5 の厳密な検証と UTF-8 SHA-256 を行う。次の形式で最終 cloud review を依頼する。
+**push 後に final cloud review へ直行しない。** まず 1.5 の current HEAD/body strict `initial` marker と cloud review を完了させる。同一 HEAD の PR本文編集でも同じ initial review の再開が必要である。initial review、全指摘の reply / resolve、検証の完了後に限り、最終 cloud review を依頼する直前にPRの current HEAD と本文を再取得し、latest initial marker と完全一致することを確認したうえで、1.5 の厳密な検証と UTF-8 SHA-256 を行う。次の形式で最終 cloud review を依頼する。
 
 ```text
 <!-- krr-review phase=final head=<40-lowerhex> body-sha256=<64-lowerhex> -->
 @codex review
 ```
 
-旧 HEAD の review、または同一 HEAD でも旧本文 digest の review は無効として扱う。新規指摘があれば 2〜5 を繰り返し、修正、検証、push、返信、resolve、最新 HEAD・本文に束縛した最終 review を完了する。
+旧 HEAD の review、または同一 HEAD でも旧本文 digest の review は無効として扱う。新規指摘があれば 2〜5 を繰り返し、修正、検証、push、返信、resolve、current HEAD・本文の strict initial review 完了、最新 HEAD・本文に束縛した最終 review の順に完了する。
 
 ## no-issues の Issue comment 証跡
 

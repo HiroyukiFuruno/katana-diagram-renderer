@@ -82,10 +82,11 @@ Draft PR 作成後は、必ず次の順序で後続工程へ接続します。cl
 1. Draft PR の依頼直前にGitHub APIからcurrentのHEAD/bodyを再取得し、body digest付き`phase=initial` markerとともに初回 cloud review を依頼する。
 2. 指摘を取得・分類し、分離可能な指摘の修正を subagent へ委譲する。
 3. 各指摘の修正を確認し、review thread へ reply して resolve する。
-4. 指摘がなかった場合や修正による push がなかった場合も省略せず、依頼直前に再取得した最新HEAD/bodyに対してbody digest付き`phase=final` markerで最終 cloud reviewを依頼する。最終 reviewは必ず依頼時点の最新HEADを対象にする。
-5. `pr-ready-check` で review 完了、未 resolve thread 0、CI / DoD PASS を機械確認する。
+4. 修正の push または同一 HEAD の PR本文編集後は、旧 marker・review・trusted success を無効として扱う。GitHub APIから current HEAD/body を再取得し、strict検証とdigest計算をやり直して、新しい`phase=initial` markerによる cloud review を**完了**させる。initial review を飛ばして final review へ進まない。
+5. 指摘がなかった場合、または 4 の current HEAD/body に束縛した initial review 完了後に全指摘の reply / resolve と検証が済んだ場合だけ、依頼直前に再取得した同一HEAD/bodyに対してbody digest付き`phase=final` markerで最終 cloud reviewを依頼する。取得値が latest initial marker と異なる場合は final を投稿せず、4 の新しい initial review からやり直す。
+6. `pr-ready-check` で review 完了、未 resolve thread 0、CI / DoD PASS を機械確認する。
 
-最終 cloud review で新規指摘が出た場合は、指摘を subagent へ修正委譲し、修正確認、push、review thread への reply、resolve を行ったうえで、更新後の最新HEAD/bodyを再取得してbody digest付き`phase=final` markerで最終reviewを再依頼します。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを失効させ、initial marker→bot review→final marker→bot reviewをやり直します。self-reviewの引き渡し確認ではmarkerのHEAD/body digestとtrusted evidenceのHEAD/external_idが同一境界に一致することを確認します。trusted Check Run evidenceの`pr_body_sha256`は、current PR bodyをstrict UTF-8 SHA-256した値と一致する64桁小文字hexが**ちょうど1個**だけ存在しなければならず、missing、duplicate、stale、または異なるdigestはfail-closedで拒否します。
+initial / final のいずれで新規指摘が出ても、指摘を subagent へ修正委譲し、修正確認、push、review thread への reply、resolve を行います。修正の push または PR本文編集は必ず current HEAD/body の strict initial review を完了させてから final review へ戻ります。PR bodyを編集した場合は同じHEADでも旧markerと旧reviewを失効させ、initial marker→bot review→final marker→bot reviewをやり直します。self-reviewの引き渡し確認ではmarkerのHEAD/body digestとtrusted evidenceのHEAD/external_idが同一境界に一致することを確認します。trusted Check Run evidenceの`pr_body_sha256`は、current PR bodyをstrict UTF-8 SHA-256した値と一致する64桁小文字hexが**ちょうど1個**だけ存在しなければならず、missing、duplicate、stale、または異なるdigestはfail-closedで拒否します。
 
 CI green だけでレビュー完了、Ready 化、または merge 準備完了とは扱いません。
 
