@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 import re
+import runpy
+import shlex
 import unittest
 from pathlib import Path
 
 
 class GovernanceCiAndIssueContractTest(unittest.TestCase):
+    def test_documented_commit_recipes_satisfy_the_real_issue_reference_parser(self) -> None:
+        root = Path(__file__).parents[2]
+        parser = runpy.run_path(str(root / "scripts/hooks/verify_push_issue.py"))["issue_numbers"]
+        for relative in (
+            ".codex/skills/commit_and_push/SKILL.md",
+            ".agents/skills/commit_and_push/SKILL.md",
+            ".codex/skills/impl-release/SKILL.md",
+            ".agents/skills/impl-release/SKILL.md",
+        ):
+            text = (root / relative).read_text(encoding="utf-8")
+            recipes = re.findall(r"(?m)^git commit -m .+$", text)
+            self.assertTrue(recipes, relative)
+            for recipe in recipes:
+                with self.subTest(path=relative, recipe=recipe):
+                    arguments = shlex.split(recipe.replace("${issue_number}", "64"))
+                    message = arguments[arguments.index("-m") + 1]
+                    self.assertEqual(parser(message, "HiroyukiFuruno/katana-render-runtime"), {64})
+
     def setUp(self) -> None:
         root = Path(__file__).parents[2]
         self.dispatcher = (root / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")

@@ -20,6 +20,8 @@ git diff --stat
 - `.serena/`、`target/`、一時ファイルを含めない。
 - ユーザーが指定した範囲だけを扱う。
 
+commit 前に、対象変更に対応する同一 repository の canonical な OPEN Issue を選び、Issue 番号が正整数であることを確認します。以後の各 commit メッセージには、その Issue への `Refs #${issue_number}` を必ず含めます。Issue の選択・番号確認ができない場合は commit しません。
+
 ## 2. 検証する
 
 変更内容に応じて `/lint-and-ast-lint` と `/self-review` を実行します。
@@ -49,16 +51,16 @@ git diff --cached
 良い例:
 
 ```text
-feat: renderer の公開 API を追加
-fix: Mermaid bundle の checksum 検証を修正
-docs: OpenSpec タスクを更新
+feat: renderer の公開 API を追加 Refs #${issue_number}
+fix: Mermaid bundle の checksum 検証を修正 Refs #${issue_number}
+docs: OpenSpec タスクを更新 Refs #${issue_number}
 ```
 
 悪い例:
 
 ```text
-fix: 色々修正
-feat: API と CLI とテストと文書をまとめて追加
+fix: 色々修正 Refs #${issue_number}
+feat: API と CLI とテストと文書をまとめて追加 Refs #${issue_number}
 ```
 
 ## 4. commit する
@@ -66,7 +68,7 @@ feat: API と CLI とテストと文書をまとめて追加
 コミットメッセージは日本語にします。
 
 ```bash
-git commit -m "<type>: <日本語の要約>"
+git commit -m "<type>: <日本語の要約> Refs #${issue_number}"
 ```
 
 `git commit --no-verify` は、コード変更を含む場合は使いません。

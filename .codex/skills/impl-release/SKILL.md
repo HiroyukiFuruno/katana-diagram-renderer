@@ -50,12 +50,12 @@ git diff --check
 
 ## Phase 3: commit と push
 
-`lefthook` を通すため、通常の commit / push を使います。
+`lefthook` を通すため、通常の commit / push を使います。commit 前に、対象変更に対応する同一 repository の canonical な OPEN Issue を選び、Issue 番号が正整数であることを確認します。以後の各 commit メッセージには、その Issue への `Refs #${issue_number}` を必ず含めます。Issue の選択・番号確認ができない場合は commit しません。
 
 ```bash
 git status --short --branch
 git add <release に必要な files>
-git commit -m "release: vX.Y.Z リリース準備"
+git commit -m "release: vX.Y.Z リリース準備 Refs #${issue_number}"
 git push -u origin release/vX.Y.Z
 ```
 
