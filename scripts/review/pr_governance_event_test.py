@@ -283,9 +283,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     if endpoint == f"repos/{repository}":
                         repository_reads += 1
                         return response({"id": 101, "full_name": repository, "default_branch": "master"})
-                    if endpoint == f"repos/{repository}/pulls/72":
+                    if endpoint.startswith(f"repos/{repository}/pulls/"):
                         pull_reads += 1
-                        return response(pull())
+                        number = int(endpoint.rsplit("/", 1)[1])
+                        return response({**pull(), "number": number})
                     if endpoint == f"repos/{repository}/pulls?state=open&per_page=100":
                         value = pages[min(page_reads, len(pages) - 1)] if isinstance(pages, tuple) else pages
                         page_reads += 1
@@ -305,7 +306,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 if event["EVENT_NAME"] == "pull_request_target" and values["reconcile"] == "false":
                     self.assertEqual(pull_reads, 2)
                     self.assertEqual(repository_reads, 2)
-                if event["EVENT_NAME"] in {"issues", "issue_comment"} and values["reconcile"] == "false":
+                if event["EVENT_NAME"] == "issues" and values["reconcile"] == "false":
                     self.assertEqual(page_reads, 2)
                 return values
 
@@ -320,12 +321,16 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "true",
         )
         self.assertEqual(
+            execute({"EVENT_NAME": "pull_request_target", "EVENT_ACTION": "edited", "PR_PREVIOUS_BASE_REF": "release/v0"}, unrelated)["reconcile"],
+            "false",
+        )
+        self.assertEqual(
             execute({"EVENT_NAME": "issues", "EVENT_ACTION": "edited"}, unrelated)["reconcile"],
             "false",
         )
         self.assertEqual(
-            execute({"EVENT_NAME": "issue_comment", "EVENT_ACTION": "created", "ISSUE_PULL_REQUEST_URL": "https://api.github.com/repos/owner/repository/pulls/72"}, unrelated)["reconcile"],
-            "true",
+            execute({"EVENT_NAME": "issue_comment", "EVENT_ACTION": "created", "ISSUE_PULL_REQUEST_URL": "https://api.github.com/repos/owner/repository/pulls/999"}, unrelated)["reconcile"],
+            "false",
         )
         self.assertEqual(
             execute({"EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_NUMBER": "64"}, governed)["reconcile"],
@@ -353,6 +358,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         )
         self.assertEqual(values["reconcile"], "true")
         self.assertEqual(values["valid"], "false")
+
         for head_repository in (
             {"id": 101, "full_name": "fork/repository"},
             {"id": 202, "full_name": repository},
@@ -397,6 +403,43 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     [[pull(base_ref="master", body=body)]],
                 )
                 self.assertEqual(values["reconcile"], "true" if expected else "false")
+
+    def test_issue_comment_preflight_rejects_unstable_identity_and_skips_stable_out_of_scope_prs(self) -> None:
+        """Issue comments use the PR URL identity and fail closed on races."""
+        scope_match = re.search(r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        scope = self._workflow_program(scope_match); repository = "owner/repository"
+        identity = {"id": 101, "full_name": repository}
+        def pr(base_ref: str = "master", state: str = "open", head_repo: object = identity, number: int = 999) -> dict[str, object]:
+            return {"number": number, "state": state, "base": {"ref": base_ref, "sha": "b" * 40, "repo": identity}, "head": {"sha": "a" * 40, "repo": head_repo}}
+        def execute(values: list[dict[str, object]], event_url: str) -> dict[str, str]:
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "scope-output"; reads = 0
+                def response(value: object) -> subprocess.CompletedProcess[str]: return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+                def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    nonlocal reads; endpoint = arguments[-1]
+                    if endpoint == f"repos/{repository}": return response({"id": 101, "full_name": repository, "default_branch": "master"})
+                    if endpoint.startswith(f"repos/{repository}/pulls/"):
+                        value = values[min(reads, len(values) - 1)]; reads += 1; return response(value)
+                    raise AssertionError(arguments)
+                env = os.environ | {"GITHUB_REPOSITORY": repository, "GITHUB_OUTPUT": str(output), "EVENT_NAME": "issue_comment", "EVENT_ACTION": "created", "ISSUE_NUMBER": "999", "ISSUE_PULL_REQUEST_URL": event_url}
+                with patch.dict(os.environ, env, clear=True), patch("subprocess.run", side_effect=fake_run): exec(scope, {"__name__": "__main__"})
+                return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+        url = f"https://api.github.com/repos/{repository}/pulls/999"
+        mismatched = execute([pr(number=72), pr(number=72)], f"https://api.github.com/repos/{repository}/pulls/72",)
+        self.assertEqual(mismatched["reconcile"], "true")
+        self.assertEqual(mismatched["valid"], "false")
+        for label, source, expected in (("closed", pr(state="closed"), "false"), ("fork", pr(head_repo={"id": 202, "full_name": "fork/repository"}), "false"), ("non-default", pr(base_ref="release/v1"), "false"), ("local-default-open", pr(), "true")):
+            with self.subTest(label=label):
+                result = execute([source, source], url)
+                self.assertEqual(result["reconcile"], expected)
+                if expected == "false":
+                    self.assertEqual(result["valid"], "true")
+                    self.assertEqual(result["issue_event_noop"], "true")
+        malformed = pr(); malformed["head"] = {"sha": "a" * 40, "repo": {"id": 101}}
+        result = execute([malformed, malformed], url); self.assertEqual(result["reconcile"], "true"); self.assertEqual(result["valid"], "false")
+        changed = pr(); changed["head"] = {"sha": "c" * 40, "repo": identity}
+        self.assertEqual(execute([pr(), changed], url)["reconcile"], "true")
 
     def test_release_generation_fence_requires_explicit_pull_request_target_noop_step(self) -> None:
         match = re.search(
@@ -615,6 +658,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 }
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'repos/owner/repository') printf '%s' '{\"id\":101,\"full_name\":\"owner/repository\",\"default_branch\":\"master\"}' ;;\n"
                     "  *'/actions/runs/9'*) printf '%s' \"${RUN}\" ;;\n"
                     "  *'/pulls/72'*) printf '%s' \"${PULL}\" ;;\n"
                     "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}' ;;\n"
@@ -891,14 +935,14 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             "number": 72,
             "state": "open",
             "body": "Fixes #64",
-            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
-            "head": {"repo": {"full_name": "owner/repository"}},
+            "base": {"ref": "master", "repo": {"id": 101, "full_name": "owner/repository"}},
+            "head": {"repo": {"id": 101, "full_name": "owner/repository"}},
         }
         retargeted = {
             "number": 73,
             "state": "open",
-            "base": {"sha": base, "ref": "release/v1", "repo": {"full_name": "owner/repository"}},
-            "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+            "base": {"sha": base, "ref": "release/v1", "repo": {"id": 101, "full_name": "owner/repository"}},
+            "head": {"sha": head, "repo": {"id": 101, "full_name": "owner/repository"}},
         }
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
@@ -944,6 +988,27 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             values = dict(line.split("=", 1) for line in nondefault_output.read_text(encoding="utf-8").splitlines())
             self.assertEqual(values["event_targets"], "[]")
             self.assertEqual(values["priority_targets"], "[]")
+
+            for label, repo_change in (
+                ("base-id-missing", ("base", {"full_name": "owner/repository"})),
+                ("base-id-bool", ("base", {"id": True, "full_name": "owner/repository"})),
+                ("base-same-name-wrong-id", ("base", {"id": 202, "full_name": "owner/repository"})),
+                ("base-same-id-foreign-name", ("base", {"id": 101, "full_name": "other/repository"})),
+                ("head-id-missing", ("head", {"full_name": "owner/repository"})),
+                ("head-id-bool", ("head", {"id": False, "full_name": "owner/repository"})),
+                ("head-same-name-wrong-id", ("head", {"id": 202, "full_name": "owner/repository"})),
+                ("head-same-id-foreign-name", ("head", {"id": 101, "full_name": "other/repository"})),
+            ):
+                with self.subTest(identity=label):
+                    malformed = json.loads(json.dumps(retargeted))
+                    malformed[repo_change[0]]["repo"] = repo_change[1]
+                    malformed_output = directory / f"output-{label}"
+                    malformed_environment = base_environment | {"GITHUB_OUTPUT": str(malformed_output), "SOURCE": json.dumps(malformed), "PR_PREVIOUS_BASE_REF": "release/v0"}
+                    result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=malformed_environment, capture_output=True, text=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    malformed_values = dict(line.split("=", 1) for line in malformed_output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(malformed_values["event_targets"], "[]")
+                    self.assertEqual(malformed_values["priority_targets"], "[]")
 
             for previous_base in ("../master", "/master"):
                 with self.subTest(previous_base=previous_base):
@@ -2124,16 +2189,19 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         ) -> None:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); output = directory / "scope-output"; fake = directory / "gh"
+                if isinstance(head_repository, dict) and isinstance(head_repository.get("full_name"), str):
+                    head_repository = {"name": head_repository["full_name"].rsplit("/", 1)[-1], "url": f"https://api.github.com/repos/{head_repository['full_name']}", **head_repository}
                 source = {
                     "number": 72,
                     "state": "open",
-                    "base": {"sha": current_base, "ref": "master", "repo": {"full_name": "owner/repository"}},
+                    "base": {"sha": current_base, "ref": "master", "repo": {"id": 101, "name": "repository", "full_name": "owner/repository", "url": "https://api.github.com/repos/owner/repository"}},
                     "head": {"sha": head, "repo": head_repository},
                 }
                 fake.write_text(
                     "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'repos/owner/repository') printf '%s' '{\"id\":101,\"full_name\":\"owner/repository\",\"default_branch\":\"master\"}' ;;\n"
                     "  *'/pulls/72'*) printf '%s' \"${SOURCE}\" ;;\n"
-                    "  *) exit 91 ;;\nesac\n",
+                    "  *) printf '%s' '{\"id\":101,\"full_name\":\"owner/repository\",\"default_branch\":\"master\"}' ;;\nesac\n",
                     encoding="utf-8",
                 )
                 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
@@ -2151,9 +2219,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 self.assertEqual(values["priority"], "true")
                 self.assertEqual(values["pull_request_target_noop"], expected_pull_request_target_noop)
 
-        run_scope("foreign-unchanged", {"full_name": "fork/repository", "id": 202}, source_base, "false", "true", "true")
+        run_scope("foreign-unchanged", {"full_name": "fork/repository", "name": "repository", "id": 202}, source_base, "false", "true", "true")
         run_scope("deleted-unchanged", None, source_base, "false", "true", "true")
-        run_scope("local-unchanged", {"full_name": "owner/repository", "id": 101}, source_base, "true", "true", "false")
+        run_scope("local-unchanged", {"full_name": "owner/repository", "name": "repository", "id": 101}, source_base, "true", "true", "false")
         run_scope("malformed-foreign", {"full_name": "fork/repository"}, source_base, "true", "false", "false")
         run_scope("foreign-historical-base", {"full_name": "fork/repository", "id": 202}, advanced_base, "true", "true", "false")
 
