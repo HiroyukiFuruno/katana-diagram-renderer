@@ -89,6 +89,8 @@ P0/P1 は必ず内容を精査し、正当なら必須修正とする。不当�
 
 検証が通った修正を commit・push した後、各 thread に具体的な返信を行う。修正時は変更内容と検証、見送り時は技術的根拠、質問時は回答を簡潔に記す。**修正の push は旧 marker・review・trusted success を無効化するため、reply / resolve の完了後に 1.5 の current HEAD/body strict `initial` marker と cloud review を完了させてから final review へ進む。** 同一 HEAD の PR本文編集も同じく initial review から反復する。REST API は返信に使えるが、thread の resolve には GraphQL を使う。
 
+返信後は `pull_request_review_id` の `state` と `submitted_at` を確認する。`PENDING` なら、自分が今回の修正に対して作成した返信だけであることを確認してから review event `COMMENT` として submit し、approval と混同しない。他人の返信や未知の draft を無断で公開しない。submit 後は独立した read で公開状態を確認する。App の read で返信が見えないだけでは権限を増やさず、既に `COMMENTED` なのに見えない場合も対象 comment、pagination、取得 scope を先に調査する。
+
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies \
   -X POST -f body="対応しました。{変更内容と検証結果}"

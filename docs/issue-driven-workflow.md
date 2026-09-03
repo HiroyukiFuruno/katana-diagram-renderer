@@ -49,7 +49,7 @@ Pull Requestは、Issue契約とレビュー結果を同じ変更履歴として
 2. Draftの初回レビュー依頼に、対象HEADを記録したinitial markerと `@codex review` を含める。
 3. レビュー結果とreview threadを全件取得し、P0/P1/P2などの優先度と対応要否を分類する。CI greenだけではレビュー完了と判定しない。
 4. 分離可能な指摘修正は、ファイルまたは非重複責務単位でsubagentへ並列委譲する。main agentは指摘を直列実装せず、各担当の変更範囲を重複させない。
-5. 各指摘を修正したら、担当範囲の検証、全体検証、push、該当threadへのreply、threadのresolveを順に行う。P0/P1は必須対応とする。
+5. 各指摘を修正したら、担当範囲の検証、全体検証、push、該当threadへのreply、threadのresolveを順に行う。返信後は `pull_request_review_id` の `state` と `submitted_at` を確認し、`PENDING` なら自分の当該修正返信だけであることを確認して review event `COMMENT` として submitする（approvalとは別物）。他人の返信や未知のdraftを無断公開せず、submit後は独立readで公開を確認する。App readで返信が見えないだけで増権せず、既に `COMMENTED` なのに見えない場合も対象・pagination・取得scopeを調査する。P0/P1は必須対応とする。
 6. pushでHEADが変わるたび、旧HEADのレビューを有効な最終レビューとみなさない。latest initial markerのHEAD・本文digestもcurrent PRと完全一致させ、古いinitial markerと新しいfinal markerを組み合わせない。最新HEADに対してinitial markerからレビューをやり直し、final markerと `@codex review` を付けて再レビューを依頼し、新しい指摘がなくなるまで4〜5を繰り返す。
 7. 最新HEAD、レビュー完了、未resolve thread 0、CI、Issue/DoDを次のゲートで機械確認する。ゲートはまず参照IssueがOPENであること、依存更新証跡が揃っていること、PR rangeのIssue契約が完全一致することを検査する。
 
