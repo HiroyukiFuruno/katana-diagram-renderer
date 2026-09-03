@@ -86,6 +86,8 @@ class StatusWriterUnitTest(unittest.TestCase):
         preflight_status: str = "completed", preflight_conclusion: object = "success",
         barrier_status: str = "completed", barrier_conclusion: object = "skipped",
         pull_request_target_noop_step: object = None,
+        issue_noop_step: object = None,
+        issue_noop_step_status: str = "completed",
         total_count: int | None = None,
     ) -> dict[str, object]:
         jobs = [
@@ -98,6 +100,13 @@ class StatusWriterUnitTest(unittest.TestCase):
                         "status": "completed", "conclusion": pull_request_target_noop_step,
                     }]}
                     if pull_request_target_noop_step is not None else {}
+                ),
+                **(
+                    {"steps": [{
+                        "number": 1, "name": WRITER.PREFLIGHT_ISSUE_NOOP_STEP_NAME,
+                        "status": issue_noop_step_status, "conclusion": issue_noop_step,
+                    }]}
+                    if issue_noop_step is not None else {}
                 ),
             },
             {
@@ -372,6 +381,65 @@ class StatusWriterUnitTest(unittest.TestCase):
             with self.subTest(evidence=label), self.identity(), patch.dict(os.environ, environment), \
                  patch.object(WRITER, "api_json", return_value=current), \
                  patch.object(WRITER, "object_page", side_effect=(self.dispatcher_page(current, target_noop), jobs)):
+                with self.assertRaises(WRITER.NoPostGovernanceError):
+                    WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_verified_issue_preflight_noop_does_not_preempt_a_local_writer(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        for event in ("issues", "issue_comment"):
+            WRITER._nonreconciling_dispatcher_generations.clear()
+            candidate = self.dispatcher_run(
+                7, event=event, status="completed", conclusion="success",
+                created_at="2026-08-30T00:01:00Z",
+            )
+            with self.subTest(event=event), self.identity(), patch.dict(os.environ, environment), \
+                 patch.object(WRITER, "api_json", return_value=current), \
+                 patch.object(
+                     WRITER, "object_page",
+                     side_effect=(
+                         self.dispatcher_page(current, candidate),
+                         self.dispatcher_jobs(issue_noop_step="success"),
+                     ),
+                 ):
+                WRITER.reject_newer_dispatcher_barrier(head)
+
+    def test_issue_preflight_noop_requires_exact_success_step_evidence(self) -> None:
+        head = "a" * 40
+        current = self.dispatcher_run(88, created_at="2026-08-30T00:00:00Z")
+        candidate = self.dispatcher_run(
+            7, event="issues", status="completed", conclusion="success",
+            created_at="2026-08-30T00:01:00Z",
+        )
+        environment = {
+            "GITHUB_ACTIONS": "true", "GITHUB_SHA": "d" * 40, "GITHUB_REF_NAME": "master",
+            "GOVERNANCE_DISPATCHER_RUN_ID": "88", "KRR_GOVERNANCE_CHECK_APP_ID": "42",
+        }
+        cases: list[tuple[str, dict[str, object]]] = [
+            ("missing", self.dispatcher_jobs()),
+            ("failure", self.dispatcher_jobs(issue_noop_step="failure")),
+            ("pending", self.dispatcher_jobs(issue_noop_step="success", issue_noop_step_status="pending")),
+            ("unknown", self.dispatcher_jobs(issue_noop_step="success", issue_noop_step_status="mystery")),
+        ]
+        duplicate = self.dispatcher_jobs(issue_noop_step="success")
+        steps = duplicate["jobs"][0]["steps"]  # type: ignore[index]
+        steps.append(dict(steps[0]))  # type: ignore[union-attr]
+        cases.append(("duplicate", duplicate))
+        malformed = self.dispatcher_jobs(issue_noop_step="success")
+        malformed["jobs"][0]["steps"][0]["number"] = True  # type: ignore[index]
+        cases.append(("malformed", malformed))
+        for label, jobs in cases:
+            WRITER._nonreconciling_dispatcher_generations.clear()
+            with self.subTest(evidence=label), self.identity(), patch.dict(os.environ, environment), \
+                 patch.object(WRITER, "api_json", return_value=current), \
+                 patch.object(
+                     WRITER, "object_page",
+                     side_effect=(self.dispatcher_page(current, candidate), jobs),
+                 ):
                 with self.assertRaises(WRITER.NoPostGovernanceError):
                     WRITER.reject_newer_dispatcher_barrier(head)
 
@@ -2391,7 +2459,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         template = WRITER.Generation("CI", "p", 44, 1, 1, 1, "completed", "success")
         self.assertEqual(WRITER.verdict(template), "success")
         self.assertEqual(WRITER.verdict(template.__class__("CI", "p", 44, 1, 1, 1, "queued", None)), "pending")
+        self.assertEqual(WRITER.verdict(template.__class__("CI", "p", 44, 1, 1, 1, "pending", None)), "pending")
         self.assertEqual(WRITER.verdict(template.__class__("CI", "p", 44, 1, 1, 1, "completed", "failure")), "failure")
+        for status in ("", "unknown", "requested-but-invalid"):
+            with self.subTest(status=status):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.verdict(template.__class__("CI", "p", 44, 1, 1, 1, status, None))
 
     def test_draft_process_stays_pending_without_sensor_or_ci(self) -> None:
         current = self.pull(72, draft=True)

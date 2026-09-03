@@ -219,7 +219,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIsNotNone(match); assert match is not None
         release = self._workflow_program(match)
         self.assertIn("def reconciles(run):", release)
-        self.assertIn('run.get("event") not in {"workflow_run","pull_request_target"}', release)
+        self.assertIn('run.get("event") not in {"workflow_run","pull_request_target","issues","issue_comment"}', release)
         self.assertIn('run.get("status")!="completed"', release)
         self.assertIn('run.get("conclusion")!="success"', release)
         self.assertIn('actions/runs/{identifier}/jobs?per_page=100', release)
@@ -228,6 +228,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         self.assertIn('named_job("Establish resolver-failure merge barrier")', release)
         self.assertIn('barrier.get("conclusion")=="skipped"', release)
         self.assertIn('Record verified pull_request_target preflight no-op', release)
+        self.assertIn('Record verified Issue preflight no-op', release)
         self.assertIn(
             "candidate>current_generation and reconciles(run)", release,
         )
@@ -237,9 +238,165 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.workflow.index("  preflight-workflow-run-source:"):
             self.workflow.index("  establish-resolver-failure-barrier:")
         ]
+        self.assertIn("name: Preflight workflow_run governance source", preflight)
         self.assertIn("pull_request_target_noop: ${{ steps.scope.outputs.pull_request_target_noop }}", preflight)
         self.assertIn('output.write("pull_request_target_noop="', preflight)
         self.assertIn("- name: Record verified pull_request_target preflight no-op", preflight)
+
+    def test_preflight_skips_only_stable_nondefault_or_unclaimed_issue_events(self) -> None:
+        """No-op classification happens before the shared dispatcher lock."""
+        scope_match = re.search(
+            r"- name: Exclude unavailable fork sources before dispatcher lock.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(scope_match); assert scope_match is not None
+        scope = self._workflow_program(scope_match)
+        repository = "owner/repository"
+        base = "b" * 40
+        head = "a" * 40
+
+        def pull(base_ref: str = "release/v1", body: str = "Fixes #64") -> dict[str, object]:
+            return {
+                "number": 72, "state": "open",
+                "draft": False,
+                "base": {"ref": base_ref, "sha": base, "repo": {"id": 101, "full_name": repository}},
+                "head": {"sha": head, "repo": {"id": 101, "full_name": repository}},
+                "body": body,
+            }
+
+        def execute(
+            event: dict[str, str], pages: list[list[dict[str, object]]] | tuple[list[list[dict[str, object]]], list[list[dict[str, object]]]],
+        ) -> dict[str, str]:
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "scope-output"
+                pull_reads = 0
+                repository_reads = 0
+                page_reads = 0
+
+                def response(value: object) -> subprocess.CompletedProcess[str]:
+                    return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+                def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    nonlocal pull_reads, repository_reads, page_reads
+                    endpoint = arguments[-1]
+                    if endpoint == f"repos/{repository}":
+                        repository_reads += 1
+                        return response({"id": 101, "full_name": repository, "default_branch": "master"})
+                    if endpoint == f"repos/{repository}/pulls/72":
+                        pull_reads += 1
+                        return response(pull())
+                    if endpoint == f"repos/{repository}/pulls?state=open&per_page=100":
+                        value = pages[min(page_reads, len(pages) - 1)] if isinstance(pages, tuple) else pages
+                        page_reads += 1
+                        return response(value)
+                    raise AssertionError(arguments)
+
+                environment = os.environ | {
+                    "GITHUB_REPOSITORY": repository, "GITHUB_OUTPUT": str(output),
+                    "PR_NUMBER": "72", "PR_HEAD_SHA": head, "PR_BASE_SHA": base,
+                    "PR_BASE_REF": "release/v1", "PR_ACTION": "edited",
+                    "PR_PREVIOUS_BASE_REF": "", "ISSUE_NUMBER": "999",
+                    "ISSUE_PULL_REQUEST_URL": "", **event,
+                }
+                with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                    exec(scope, {"__name__": "__main__"})
+                values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                if event["EVENT_NAME"] == "pull_request_target" and values["reconcile"] == "false":
+                    self.assertEqual(pull_reads, 2)
+                    self.assertEqual(repository_reads, 2)
+                if event["EVENT_NAME"] in {"issues", "issue_comment"} and values["reconcile"] == "false":
+                    self.assertEqual(page_reads, 2)
+                return values
+
+        unrelated = [[pull(body="Fixes #64")]]
+        governed = [[pull(base_ref="master", body="Fixes #64")]]
+        self.assertEqual(
+            execute({"EVENT_NAME": "pull_request_target", "EVENT_ACTION": "edited"}, unrelated)["reconcile"],
+            "false",
+        )
+        self.assertEqual(
+            execute({"EVENT_NAME": "pull_request_target", "EVENT_ACTION": "edited", "PR_PREVIOUS_BASE_REF": "master"}, unrelated)["reconcile"],
+            "true",
+        )
+        self.assertEqual(
+            execute({"EVENT_NAME": "issues", "EVENT_ACTION": "edited"}, unrelated)["reconcile"],
+            "false",
+        )
+        self.assertEqual(
+            execute({"EVENT_NAME": "issue_comment", "EVENT_ACTION": "created", "ISSUE_PULL_REQUEST_URL": "https://api.github.com/repos/owner/repository/pulls/72"}, unrelated)["reconcile"],
+            "true",
+        )
+        self.assertEqual(
+            execute({"EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_NUMBER": "64"}, governed)["reconcile"],
+            "true",
+        )
+        self.assertEqual(
+            execute(
+                {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+                (unrelated, [[pull(base_ref="master", body="Fixes #999")]]),
+            )["reconcile"],
+            "true",
+        )
+        self.assertEqual(
+            execute(
+                {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+                ([[pull(base_ref="master", body="Fixes #64")]], []),
+            )["reconcile"],
+            "true",
+        )
+        malformed = pull(base_ref="master", body="Fixes #64")
+        malformed["head"] = {"sha": head, "repo": {"full_name": repository}}
+        values = execute(
+            {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+            ([[pull(base_ref="master", body="Fixes #64")]], [[malformed]]),
+        )
+        self.assertEqual(values["reconcile"], "true")
+        self.assertEqual(values["valid"], "false")
+        for head_repository in (
+            {"id": 101, "full_name": "fork/repository"},
+            {"id": 202, "full_name": repository},
+        ):
+            with self.subTest(head_repository=head_repository):
+                ambiguous_head = pull(base_ref="master", body="Fixes #64")
+                ambiguous_head["head"] = {"sha": head, "repo": head_repository}
+                values = execute(
+                    {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+                    ([[pull(base_ref="master", body="Fixes #64")]], [[ambiguous_head]]),
+                )
+                self.assertEqual(values["reconcile"], "true")
+                self.assertEqual(values["valid"], "false")
+        body_none = pull(base_ref="master", body="Fixes #64")
+        body_none["body"] = None
+        self.assertEqual(
+            execute(
+                {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+                ([[body_none]], [[pull(base_ref="master", body="")]]),
+            )["reconcile"],
+            "true",
+        )
+        invalid_base = pull(base_ref="master", body="Fixes #64")
+        invalid_base["base"] = {"ref": "master", "sha": base, "repo": {"id": 102, "full_name": "owner/other"}}
+        values = execute(
+            {"EVENT_NAME": "issues", "EVENT_ACTION": "edited"},
+            ([[pull(base_ref="master", body="Fixes #64")]], [[invalid_base]]),
+        )
+        self.assertEqual(values["reconcile"], "true")
+        self.assertEqual(values["valid"], "false")
+        for body in (
+            "Fixes https://github.com/owner/repository/issues/64",
+            "FIXES https://github.com/OWNER/REPOSITORY/issues/64)",
+            "Fixes https://github.com/owner/repository/issues/64/",
+            "Fixes https://github.com/owner/repository/issues/64?source=pr",
+            "Fixes https://github.com/owner/repository/issues/64#fragment",
+        ):
+            with self.subTest(body=body):
+                expected = 64 in canonical_issue_contract.closing_issue_numbers(body, repository)
+                values = execute(
+                    {"EVENT_NAME": "issues", "EVENT_ACTION": "edited", "ISSUE_NUMBER": "64"},
+                    [[pull(base_ref="master", body=body)]],
+                )
+                self.assertEqual(values["reconcile"], "true" if expected else "false")
 
     def test_release_generation_fence_requires_explicit_pull_request_target_noop_step(self) -> None:
         match = re.search(
@@ -281,6 +438,17 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             with self.subTest(evidence=label):
                 runs["jobs"] = {"total_count": 2, "jobs": jobs}
                 self.assertEqual(namespace["reconciles"](candidate), expected)
+
+        issue_candidate = {**candidate, "event": "issues"}
+        issue_step = {"number": 1, "name": "Record verified Issue preflight no-op", "status": "completed", "conclusion": "success"}
+        for label, steps, expected in (
+            ("verified-issue", [issue_step], False),
+            ("missing-issue", [], True),
+            ("failed-issue", [{**issue_step, "conclusion": "failure"}], True),
+        ):
+            with self.subTest(evidence=label):
+                runs["jobs"] = {"total_count": 2, "jobs": [{**base_jobs[0], "steps": steps}, base_jobs[1]]}
+                self.assertEqual(namespace["reconciles"](issue_candidate), expected)
 
     def test_workflow_run_source_is_strict_before_app_tokens_exist(self) -> None:
         validation = self.workflow[:self.workflow.index("- name: Create dispatcher App token")]

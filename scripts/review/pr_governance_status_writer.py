@@ -44,6 +44,7 @@ WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
 PREFLIGHT_WORKFLOW_RUN_SOURCE_NAME = "Preflight workflow_run governance source"
 RESOLVER_FAILURE_BARRIER_NAME = "Establish resolver-failure merge barrier"
 PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME = "Record verified pull_request_target preflight no-op"
+PREFLIGHT_ISSUE_NOOP_STEP_NAME = "Record verified Issue preflight no-op"
 # Manual recovery dispatches are a trusted dispatcher generation too.  The
 # workflow and its default-branch binding are still validated below; this is
 # only the event-kind allowlist, not permission to accept an arbitrary replay.
@@ -416,13 +417,20 @@ def dispatcher_generation_is_newer(
 def dispatcher_generation_reconciles(generation: DispatcherGeneration) -> bool:
     """Return whether a trusted generation can preempt writer ordering.
 
-    A ``workflow_run`` fork no-op and an explicitly recorded
-    ``pull_request_target`` fork no-op complete with reconciliation disabled.
-    They have no authority over a local writer. Only that exact completed
-    shape is excluded; missing or malformed target evidence remains a
-    reconciling, fail-closed fence.
+    A ``workflow_run`` fork no-op、明示的に記録された
+    ``pull_request_target`` fork no-op、および Issue 系 prelock no-op は、
+    検証済みの完了形だけ reconciliation を無効にする。これらは local
+    writer に対する権限を持たない。証跡が欠落または不正な場合は
+    reconciliation 対象として fail-closed の fence を維持する。
     """
-    if generation.event not in {"workflow_run", "pull_request_target"}:
+    if generation.event not in {"workflow_run", "pull_request_target", "issues", "issue_comment"}:
+        return True
+    # 失敗中・実行中の Issue 系世代はそれ自体が有効な fence なので、
+    # 追加の step 証跡を読むのは prelock 成功経路に限定する。
+    if (
+        generation.event in {"issues", "issue_comment"}
+        and (generation.status != "completed" or generation.conclusion != "success")
+    ):
         return True
     cached = _nonreconciling_dispatcher_generations.get(generation.identifier)
     if cached is not None:
@@ -469,10 +477,14 @@ def dispatcher_generation_reconciles(generation: DispatcherGeneration) -> bool:
         and preflight["status"] == "completed" and preflight["conclusion"] == "success"
     ):
         raise GovernanceError("Dispatcher no-op reconciliation evidence is incomplete.")
-    if generation.event == "pull_request_target":
+    if generation.event in {"pull_request_target", "issues", "issue_comment"}:
+        step_name = (
+            PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME
+            if generation.event == "pull_request_target" else PREFLIGHT_ISSUE_NOOP_STEP_NAME
+        )
         steps = preflight.get("steps")
         matches = (
-            [step for step in steps if step.get("name") == PREFLIGHT_PULL_REQUEST_TARGET_NOOP_STEP_NAME]
+            [step for step in steps if step.get("name") == step_name]
             if isinstance(steps, list) and all(isinstance(step, dict) for step in steps) else []
         )
         if len(matches) != 1:
@@ -1297,7 +1309,7 @@ def generation(number: int, base: str, head: str, name: str, path: str, evidence
 
 
 def verdict(value: Generation) -> str:
-    if value.status in {"queued", "in_progress", "waiting", "requested"}:
+    if value.status in {"queued", "in_progress", "pending", "waiting", "requested"}:
         return "pending"
     if value.status == "completed" and value.conclusion == "success":
         return "success"
