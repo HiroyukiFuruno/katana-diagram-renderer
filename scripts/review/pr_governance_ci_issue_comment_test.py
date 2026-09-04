@@ -169,6 +169,19 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         self.assertIn("bootstrap-validation bound this immutable dispatch SHA", self.writer_workflow)
         self.assertIn("persist-credentials: false", self.writer_workflow)
         self.assertIn("permission-checks: write", self.writer_workflow)
+        read_token_start = self.writer_workflow.index(
+            "      - name: Create read-only governance App token"
+        )
+        read_token_end = self.writer_workflow.index(
+            "      - name:", read_token_start + 1
+        )
+        read_token_step = self.writer_workflow[read_token_start:read_token_end]
+        self.assertIn("id: read-token", read_token_step)
+        self.assertIn("permission-administration: read", read_token_step)
+        self.assertNotIn("permission-checks: write", read_token_step)
+        self.assertEqual(
+            self.writer_workflow.count("permission-administration: read"), 1
+        )
         self.assertIn("def read_environment(*, default_token: bool = False)", self.writer)
         self.assertIn('return {"GH_TOKEN": token, "PATH": os.environ["PATH"]}', self.writer)
         self.assertIn("environment = {\"GH_TOKEN\": token, \"PATH\": environment[\"PATH\"]}", self.writer)

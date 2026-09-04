@@ -2186,8 +2186,240 @@ class VerifyPrReadyTest(unittest.TestCase):
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
-    def test_fails_closed_when_review_thread_comments_are_truncated(self) -> None:
+    def test_reads_author_reply_past_first_review_thread_comment_page(self) -> None:
+        initial_page = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-1",
+                                    "isResolved": True,
+                                    "comments": {
+                                        "nodes": [
+                                            {"author": {"login": "reviewer"}}
+                                            for _ in range(100)
+                                        ],
+                                        "pageInfo": {
+                                            "hasNextPage": True,
+                                            "endCursor": "comments-cursor",
+                                        },
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+        reply_page = {
+            "data": {
+                "node": {
+                    "__typename": "PullRequestReviewThread",
+                    "comments": {
+                        "nodes": [{"author": {"login": "HiroyukiFuruno"}}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+
+        def gh_json(*arguments: str) -> object:
+            query = next(argument for argument in arguments if argument.startswith("query="))
+            if "node(id: $threadId)" in query:
+                self.assertIn("threadId=thread-1", arguments)
+                self.assertIn("commentsCursor=comments-cursor", arguments)
+                return reply_page
+            self.assertNotIn("commentsCursor=comments-cursor", arguments)
+            return initial_page
+
+        pull_request, _, comments = successful_state()
+        pull_request["author"] = {"login": "HiroyukiFuruno"}
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            threads = subject._review_threads("owner/repo", 72)
+
+        self.assertEqual(len(threads[0]["comments"]), 101)
+        self.assertEqual(
+            self.errors(pull_request=pull_request, threads=threads, comments=comments),
+            [],
+        )
+
+    def test_review_thread_comment_cursor_is_distinct_from_threads_cursor(self) -> None:
+        first_threads_page = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": "threads-cursor",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        second_threads_page = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread-2",
+                                    "isResolved": True,
+                                    "comments": {
+                                        "nodes": [],
+                                        "pageInfo": {
+                                            "hasNextPage": True,
+                                            "endCursor": "comments-cursor",
+                                        },
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+        comment_page = {
+            "data": {
+                "node": {
+                    "__typename": "PullRequestReviewThread",
+                    "comments": {
+                        "nodes": [{"author": {"login": "reviewer"}}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def gh_json(*arguments: str) -> object:
+            calls.append(arguments)
+            query = next(argument for argument in arguments if argument.startswith("query="))
+            if "node(id: $threadId)" in query:
+                self.assertIn("threadId=thread-2", arguments)
+                self.assertIn("commentsCursor=comments-cursor", arguments)
+                self.assertNotIn("cursor=threads-cursor", arguments)
+                return comment_page
+            if "cursor=threads-cursor" in arguments:
+                self.assertNotIn("commentsCursor=comments-cursor", arguments)
+                return second_threads_page
+            return first_threads_page
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            threads = subject._review_threads("owner/repo", 72)
+
+        self.assertEqual(threads[0]["id"], "thread-2")
+        self.assertEqual(len(threads[0]["comments"]), 1)
+        self.assertEqual(len(calls), 3)
+
+    def test_fails_closed_when_review_thread_comment_cursor_is_invalid(self) -> None:
+        for name, page_info in (
+            ("missing", {"hasNextPage": True}),
+            ("empty", {"hasNextPage": True, "endCursor": ""}),
+            ("wrong-type", {"hasNextPage": True, "endCursor": 1}),
+            ("non-boolean", {"hasNextPage": None, "endCursor": None}),
+        ):
+            with self.subTest(name=name):
+                payload = {
+                    "data": {
+                        "node": {
+                            "__typename": "PullRequestReviewThread",
+                            "comments": {"nodes": [], "pageInfo": page_info},
+                        }
+                    }
+                }
+                with patch.object(subject, "_gh_json", return_value=payload):
+                    with self.assertRaisesRegex(TypeError, "review thread comments"):
+                        subject._review_thread_comments("thread-1", "initial-cursor")
+
+    def test_fails_closed_when_review_thread_comment_cursor_repeats(self) -> None:
         payload = {
+            "data": {
+                "node": {
+                    "__typename": "PullRequestReviewThread",
+                    "comments": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "again"},
+                    },
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            with self.assertRaisesRegex(TypeError, "endCursor"):
+                subject._review_thread_comments("thread-1", "again")
+
+    def test_reads_all_review_thread_comment_pages_within_follow_up_limit(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def gh_json(*arguments: str) -> object:
+            calls.append(arguments)
+            page_number = len(calls)
+            return {
+                "data": {
+                    "node": {
+                        "__typename": "PullRequestReviewThread",
+                        "comments": {
+                            "nodes": [{"page": page_number}],
+                            "pageInfo": {
+                                "hasNextPage": (
+                                    page_number
+                                    < subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+                                ),
+                                "endCursor": f"cursor-{page_number}",
+                            },
+                        },
+                    }
+                }
+            }
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            comments = subject._review_thread_comments("thread-1", "initial-cursor")
+
+        self.assertEqual(
+            len(comments), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+        )
+        self.assertEqual(
+            len(calls), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+        )
+
+    def test_rejects_review_thread_comments_beyond_follow_up_limit(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def gh_json(*arguments: str) -> object:
+            calls.append(arguments)
+            page_number = len(calls)
+            return {
+                "data": {
+                    "node": {
+                        "__typename": "PullRequestReviewThread",
+                        "comments": {
+                            "nodes": [{"page": page_number}],
+                            "pageInfo": {
+                                "hasNextPage": True,
+                                "endCursor": f"cursor-{page_number}",
+                            },
+                        },
+                    }
+                }
+            }
+
+        with patch.object(subject, "_gh_json", side_effect=gh_json):
+            with self.assertRaisesRegex(ValueError, "follow-up page limit"):
+                subject._review_thread_comments("thread-1", "initial-cursor")
+
+        self.assertEqual(
+            len(calls), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+        )
+
+    def test_fails_closed_when_review_thread_comment_request_fails(self) -> None:
+        initial_page = {
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2211,8 +2443,9 @@ class VerifyPrReadyTest(unittest.TestCase):
                 }
             }
         }
-        with patch.object(subject, "_gh_json", return_value=payload):
-            with self.assertRaisesRegex(ValueError, "thread comments"):
+        failure = subprocess.CalledProcessError(1, ["gh", "api", "graphql"])
+        with patch.object(subject, "_gh_json", side_effect=[initial_page, failure]):
+            with self.assertRaises(subprocess.CalledProcessError):
                 subject._review_threads("owner/repo", 72)
 
     def test_fails_closed_when_review_thread_cursor_repeats(self) -> None:

@@ -46,6 +46,8 @@ _SHA = re.compile(r"[0-9a-fA-F]{40}")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
 _LATCH_CHECK = "KRR / PR governance review latch"
+# The initial thread query returns the first 100 comments; continuation is bounded.
+_MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES = 10
 _ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
@@ -1398,6 +1400,82 @@ def _require_boundary(
     return boundary
 
 
+def _review_thread_comments(
+    thread_id: object, initial_cursor: object
+) -> list[dict[str, object]]:
+    """Read every comment on one review thread with its own cursor."""
+
+    if not isinstance(thread_id, str) or not thread_id:
+        raise TypeError("review thread id must be a non-empty string")
+    if not isinstance(initial_cursor, str) or not initial_cursor:
+        raise TypeError("review thread comments endCursor must be a unique string")
+    query = """
+query($threadId: ID!, $commentsCursor: String) {
+  node(id: $threadId) {
+    __typename
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $commentsCursor) {
+        nodes { author { login } authorAssociation }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+    comments: list[dict[str, object]] = []
+    cursor = initial_cursor
+    seen_cursors = {cursor}
+    follow_up_pages = 0
+    while True:
+        arguments = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"threadId={thread_id}",
+        ]
+        arguments.extend(("-F", f"commentsCursor={cursor}"))
+        payload = _gh_json(*arguments)
+        if not isinstance(payload, Mapping):
+            raise TypeError("review thread comments response must be an object")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise TypeError("review thread comments data must be an object")
+        node = data.get("node")
+        if not isinstance(node, Mapping):
+            raise TypeError("review thread comments node must be an object")
+        if node.get("__typename") != "PullRequestReviewThread":
+            raise TypeError("review thread comments node has an invalid type")
+        connection = node.get("comments")
+        if not isinstance(connection, Mapping):
+            raise TypeError("review thread comments must be an object")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list):
+            raise TypeError("review thread comments nodes must be an array")
+        for comment in nodes:
+            if not isinstance(comment, dict):
+                raise TypeError("review thread comment must be an object")
+            comments.append(comment)
+        follow_up_pages += 1
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, Mapping):
+            raise TypeError("review thread comments pageInfo must be an object")
+        has_next_page = page_info.get("hasNextPage")
+        if has_next_page is False:
+            return comments
+        if has_next_page is not True:
+            raise TypeError("review thread comments hasNextPage must be a boolean")
+        if follow_up_pages >= _MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES:
+            raise ValueError(
+                "review thread comments exceed the follow-up page limit (10)"
+            )
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise TypeError("review thread comments endCursor must be a unique string")
+        seen_cursors.add(cursor)
+
+
 def _review_threads(repository: str, pull_request: int) -> list[dict[str, object]]:
     query = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
@@ -1459,11 +1537,25 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
                 page_info = thread_comments.get("pageInfo")
                 if not isinstance(page_info, Mapping):
                     raise TypeError("review thread comments pageInfo must be an object")
-                if page_info.get("hasNextPage") is not False:
-                    raise ValueError("thread comments are truncated")
                 comment_nodes = thread_comments.get("nodes")
                 if not isinstance(comment_nodes, list):
                     raise TypeError("review thread comments nodes must be an array")
+                has_next_page = page_info.get("hasNextPage")
+                if has_next_page is True:
+                    comments_cursor = page_info.get("endCursor")
+                    if (
+                        not isinstance(comments_cursor, str)
+                        or not comments_cursor
+                    ):
+                        raise TypeError(
+                            "review thread comments endCursor must be a unique string"
+                        )
+                    comment_nodes = [
+                        *comment_nodes,
+                        *_review_thread_comments(node.get("id"), comments_cursor),
+                    ]
+                elif has_next_page is not False:
+                    raise TypeError("review thread comments hasNextPage must be a boolean")
                 node = {**node, "comments": comment_nodes}
             threads.append(node)
         page_info = connection["pageInfo"]
