@@ -55,6 +55,8 @@ _ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
 _ReviewMarker = tuple[str, str, str, Mapping[str, object]]
 _ReviewMarkerIdentity = tuple[int, str, str, str, str, str, str, str]
 _RequiredStatusChecks = tuple[tuple[str, ...], tuple[tuple[str, int | None], ...]]
+_RepositoryRestIdentity = tuple[int, str, str]
+_INVALID_REPOSITORY_IDENTITY = object()
 
 
 def _safe_branch_name(value: object) -> bool:
@@ -1773,6 +1775,63 @@ def _latch_source_run_id(details_url: object, repository: str) -> str | None:
     return run_id
 
 
+def _repository_rest_identity(
+    value: object, repository: str
+) -> _RepositoryRestIdentity | None | object:
+    """REST の id/name/url を検証し、既存の full_name fixture も維持する。"""
+
+    if not isinstance(value, Mapping) or repository.count("/") != 1:
+        return _INVALID_REPOSITORY_IDENTITY
+    repository_name = repository.rsplit("/", 1)[1]
+    canonical_url = f"https://api.github.com/repos/{repository}"
+    rest_fields = ("id", "name", "url")
+    if not any(field in value for field in rest_fields):
+        return (
+            None
+            if value.get("full_name") == repository
+            else _INVALID_REPOSITORY_IDENTITY
+        )
+    identifier = value.get("id")
+    name = value.get("name")
+    url = value.get("url")
+    if (
+        type(identifier) is not int
+        or identifier < 1
+        or name != repository_name
+        or url != canonical_url
+        or ("full_name" in value and value.get("full_name") != repository)
+    ):
+        return _INVALID_REPOSITORY_IDENTITY
+    return identifier, repository_name, canonical_url
+
+
+def _repository_boundary_matches(
+    repository_value: object,
+    nested_values: Sequence[object],
+    repository: str,
+) -> bool:
+    """PR 内の repository を workflow run の REST identity に束縛する。"""
+
+    run_identity = _repository_rest_identity(repository_value, repository)
+    if run_identity is _INVALID_REPOSITORY_IDENTITY:
+        return False
+    nested_identities = [
+        _repository_rest_identity(value, repository) for value in nested_values
+    ]
+    if any(identity is _INVALID_REPOSITORY_IDENTITY for identity in nested_identities):
+        return False
+    if run_identity is not None:
+        return all(identity == run_identity for identity in nested_identities)
+    if not nested_identities or all(identity is None for identity in nested_identities):
+        return True
+    # 既存の top-level fixture と REST 形式の nested identity が混在しても、
+    # nested 側は同一の不変 identity を全て保持していなければならない。
+    return all(
+        identity is not None and identity == nested_identities[0]
+        for identity in nested_identities
+    )
+
+
 def _latest_sensor_generation(
     *,
     repository: str,
@@ -1824,8 +1883,6 @@ def _latest_sensor_generation(
                 runs_pr = value.get("pull_requests")
                 repo = value.get("repository")
                 path = value.get("path", "")
-                if not isinstance(repo, Mapping) or repo.get("full_name") != repository:
-                    raise TypeError("sensor workflow run repository is invalid")
                 if (
                     not isinstance(runs_pr, list)
                     or len(runs_pr) != 1
@@ -1853,12 +1910,14 @@ def _latest_sensor_generation(
                     or not isinstance(source_head_repo, Mapping)
                 ):
                     raise TypeError("sensor workflow run PR boundary is invalid")
+                if not _repository_boundary_matches(
+                    repo, (source_base_repo, source_head_repo), repository
+                ):
+                    raise TypeError("sensor workflow run repository is invalid")
                 if (
                     source_base_sha.lower() != base_sha.lower()
                     or source_base.get("ref") != base_branch
-                    or source_base_repo.get("full_name") != repository
                     or source_head_sha.lower() != head.lower()
-                    or source_head_repo.get("full_name") != repository
                 ):
                     continue
                 if (
@@ -2037,13 +2096,15 @@ def _governance_check_error(
     source_repo = source.get("repository")
     source_base = source_pr.get("base")
     source_head = source_pr.get("head")
+    source_base_repo = source_base.get("repo") if isinstance(source_base, Mapping) else None
+    source_head_repo = source_head.get("repo") if isinstance(source_head, Mapping) else None
     if (
-        not isinstance(source_repo, Mapping) or source_repo.get("full_name") != repository
+        not _repository_boundary_matches(
+            source_repo, (source_base_repo, source_head_repo), repository
+        )
         or not isinstance(source_base, Mapping) or source_base.get("sha", "").lower() != base_sha.lower()
         or source_base.get("ref") != base_branch
-        or not isinstance(source_base.get("repo"), Mapping) or source_base["repo"].get("full_name") != repository
         or not isinstance(source_head, Mapping) or source_head.get("sha", "").lower() != head.lower()
-        or not isinstance(source_head.get("repo"), Mapping) or source_head["repo"].get("full_name") != repository
     ):
         return "trusted source Actions run PR boundary does not match"
     latest = _latest_sensor_generation(

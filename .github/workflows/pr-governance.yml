@@ -1277,7 +1277,6 @@ jobs:
               if current_base["sha"] != source_base:
                   if (
                       os.environ.get("PR_BASE_REF") != default_branch
-                      or expected_state != "open"
                       or current_base_ref != default_branch
                       or current_base_repository.get("full_name") != repository
                   ):
@@ -1307,7 +1306,7 @@ jobs:
                           or source_blob != head_blob or source_blob != tip_blob
                           or not isinstance(final_repo, dict) or final_repo.get("default_branch") != default_branch
                           or final_tip != tip
-                          or not isinstance(final_pull, dict) or type(final_pull.get("number")) is not int or final_pull.get("number") != source_number_value or final_pull.get("state") != "open"
+                          or not isinstance(final_pull, dict) or type(final_pull.get("number")) is not int or final_pull.get("number") != source_number_value or final_pull.get("state") != expected_state
                           or not isinstance(final_base, dict) or not isinstance(final_head, dict)
                           or final_base.get("ref") != default_branch or final_base.get("sha") != tip or final_head.get("sha") != source_head
                           or not isinstance(final_base_repo, dict) or final_base_repo.get("full_name") != repository
@@ -2813,6 +2812,7 @@ jobs:
           import os
           import re
           import subprocess
+          from urllib.parse import urlencode
 
           repository = os.environ["GITHUB_REPOSITORY"]
           branch = os.environ.get("DEFAULT_BRANCH", "")
@@ -2947,7 +2947,8 @@ jobs:
               raise SystemExit("Trusted default branch advanced before terminal dispatch.")
           source_run = get(f"repos/{repository}/actions/runs/{dispatcher_run_id}")
           source_repository = source_run.get("repository") if isinstance(source_run, dict) else None
-          if not isinstance(source_run, dict) or source_run.get("id") != int(dispatcher_run_id) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or not isinstance(source_repository, dict) or source_repository.get("full_name") != repository or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or source_run.get("status") not in {"requested", "queued", "in_progress"}:
+          source_created_at = source_run.get("created_at") if isinstance(source_run, dict) else None
+          if not isinstance(source_run, dict) or source_run.get("id") != int(dispatcher_run_id) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or not isinstance(source_repository, dict) or source_repository.get("full_name") != repository or type(source_run.get("run_number")) is not int or source_run["run_number"] < 1 or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or source_run.get("status") not in {"requested", "queued", "in_progress"} or not isinstance(source_created_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", source_created_at) is None:
               raise SystemExit("Governance dispatcher source identity changed before terminal dispatch.")
           listed = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"], capture_output=True, text=True, check=False)
           if listed.returncode != 0:
@@ -2989,17 +2990,19 @@ jobs:
                   return False
               ref = value[len(workflow_path) + 1:]
               return re.fullmatch(r"[A-Za-z0-9._/-]+", ref) is not None and ref not in {".", ".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"", ".", ".."} for part in ref.split("/"))
+          writer_runs_query = urlencode({"event": "workflow_dispatch", "branch": branch, "head_sha": writer_head, "created": f">={source_created_at}", "per_page": "100"})
           def runs():
-              listed = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"], capture_output=True, text=True, check=False)
+              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False)
               if listed.returncode != 0:
                   raise SystemExit("Unable to enumerate governance writer runs.")
               try:
-                  pages = json.loads(listed.stdout)
+                  response = json.loads(listed.stdout)
               except json.JSONDecodeError as error:
                   raise SystemExit("Governance writer runs are not JSON.") from error
-              if not isinstance(pages, list) or not all(isinstance(page, dict) and isinstance(page.get("workflow_runs"), list) for page in pages):
+              total = response.get("total_count") if isinstance(response, dict) else None
+              flattened = response.get("workflow_runs") if isinstance(response, dict) else None
+              if type(total) is not int or total < 0 or total > 100 or not isinstance(flattened, list) or len(flattened) != total:
                   raise SystemExit("Governance writer runs are invalid.")
-              flattened = [run for page in pages for run in page["workflow_runs"]]
               if not all(isinstance(run, dict) for run in flattened):
                   raise SystemExit("Governance writer run is invalid.")
               return flattened
@@ -3151,6 +3154,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
+          from urllib.parse import urlencode
           repository = os.environ["GITHUB_REPOSITORY"]
           branch = os.environ.get("DEFAULT_BRANCH", "")
           writer_head = os.environ.get("WRITER_HEAD", "")
@@ -3190,7 +3194,8 @@ jobs:
           source_run = get(f"repos/{repository}/actions/runs/{source}")
           ref_head = ref.get("object", {}).get("sha") if isinstance(ref, dict) and isinstance(ref.get("object"), dict) else None
           source_repo = source_run.get("repository") if isinstance(source_run, dict) else None
-          if not isinstance(repo, dict) or repo.get("default_branch") != branch or ref_head != writer_head or not isinstance(source_run, dict) or source_run.get("id") != int(source) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or source_run.get("status") not in {"requested", "queued", "in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or not isinstance(source_repo, dict) or source_repo.get("full_name") != repository:
+          source_created_at = source_run.get("created_at") if isinstance(source_run, dict) else None
+          if not isinstance(repo, dict) or repo.get("default_branch") != branch or ref_head != writer_head or not isinstance(source_run, dict) or source_run.get("id") != int(source) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or source_run.get("status") not in {"requested", "queued", "in_progress"} or type(source_run.get("run_number")) is not int or source_run["run_number"] < 1 or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or not isinstance(source_repo, dict) or source_repo.get("full_name") != repository or not isinstance(source_created_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", source_created_at) is None:
               raise SystemExit("Governance terminal segment source changed.")
           writer_path = ".github/workflows/pr-governance-status-writer.yml"
           bot_login = os.environ.get("APP_BOT_LOGIN", "")
@@ -3225,13 +3230,15 @@ jobs:
           workflow_path = ".github/workflows/pr-governance-status-writer.yml"; title = f"source={source} scope=all segment={index}"
           def path_matches(value):
               return value == workflow_path or (isinstance(value, str) and value.startswith(workflow_path + "@") and re.fullmatch(r"[A-Za-z0-9._/-]+", value[len(workflow_path) + 1:]) is not None)
+          writer_runs_query = urlencode({"event": "workflow_dispatch", "branch": branch, "head_sha": writer_head, "created": f">={source_created_at}", "per_page": "100"})
           def runs():
-              listed = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"], capture_output=True, text=True, check=False)
+              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False)
               if listed.returncode != 0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
-              try: pages = json.loads(listed.stdout)
+              try: response = json.loads(listed.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
-              if not isinstance(pages, list) or not all(isinstance(page, dict) and isinstance(page.get("workflow_runs"), list) for page in pages): raise SystemExit("Governance terminal writer runs are invalid.")
-              return [run for page in pages for run in page["workflow_runs"] if isinstance(run, dict)]
+              total = response.get("total_count") if isinstance(response, dict) else None; runs = response.get("workflow_runs") if isinstance(response, dict) else None
+              if type(total) is not int or total < 0 or total > 100 or not isinstance(runs, list) or len(runs) != total or not all(isinstance(run, dict) for run in runs): raise SystemExit("Governance terminal writer runs are invalid.")
+              return runs
           before = {run.get("id") for run in runs() if type(run.get("id")) is int}
           if len(before) == 0 and False: raise SystemExit("unreachable")
           dispatched = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={source}", "-f", "inputs[scope]=all", "-f", f"inputs[target_numbers]={raw_targets}", "-f", f"inputs[preserved_target_numbers]={raw_preserved}", "-f", f"inputs[preserved_writer_run_id]={preserved_writer}", "-f", f"inputs[check_manifest]={raw_manifest}", "-f", f"inputs[terminal_batch_numbers]={raw_batch}", "-f", "inputs[continuation_index]=2", "-f", f"inputs[terminal_order_numbers]={raw_order}", "-f", f"inputs[completed_writer_run_ids]={raw_completed}"], capture_output=True, text=True, check=False)
@@ -3329,6 +3336,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
+          from urllib.parse import urlencode
           repo=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", ""); raw_targets=os.environ.get("WRITER_TARGETS", ""); raw_snapshots=os.environ.get("WRITER_ALL_OPEN_SNAPSHOTS", ""); raw_preserved=os.environ.get("WRITER_PRESERVED_TARGETS", ""); preserved_writer=os.environ.get("PRESERVED_WRITER_RUN_ID", ""); raw_manifest=os.environ.get("WRITER_CHECK_MANIFEST", ""); raw_batch=os.environ.get("TERMINAL_BATCH", ""); raw_order=os.environ.get("WRITER_TERMINAL_ORDER", ""); raw_completed=os.environ.get("COMPLETED_WRITER_RUN_IDS", "")
           try: targets,snapshots,preserved,manifest,batch,terminal_order,completed=(json.loads(item) for item in (raw_targets,raw_snapshots,raw_preserved,raw_manifest,raw_batch,raw_order,raw_completed))
           except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment boundary is invalid.") from error
@@ -3343,8 +3351,8 @@ jobs:
               if result.returncode!=0: raise SystemExit("Unable to revalidate governance terminal segment.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
-          repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None
-          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
+          repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None; source_created_at=source_run.get("created_at") if isinstance(source_run,dict) else None
+          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_number")) is not int or source_run["run_number"]<1 or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo or not isinstance(source_created_at,str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",source_created_at) is None: raise SystemExit("Governance terminal segment source changed.")
           writer_path=".github/workflows/pr-governance-status-writer.yml"; bot=os.environ.get("APP_BOT_LOGIN", "")
           if re.fullmatch(r"[A-Za-z0-9-]+\[bot\]",bot) is None: raise SystemExit("Governance terminal writer actor is invalid.")
           for segment,previous_id in enumerate(completed,start=1):
@@ -3368,13 +3376,15 @@ jobs:
                       current[number]=(sha.lower(),draft)
           if current!=expected: raise SystemExit("All-open terminal segment snapshot changed.")
           path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=all segment={index}"
+          writer_runs_query=urlencode({"event":"workflow_dispatch","branch":branch,"head_sha":head,"created":f">={source_created_at}","per_page":"100"})
           def runs():
-              response=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"],capture_output=True,text=True,check=False)
+              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False)
               if response.returncode!=0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
-              try: pages=json.loads(response.stdout)
+              try: listed=json.loads(response.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
-              if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in pages): raise SystemExit("Governance terminal writer runs are invalid.")
-              return [run for page in pages for run in page["workflow_runs"] if isinstance(run,dict)]
+              total=listed.get("total_count") if isinstance(listed,dict) else None; runs=listed.get("workflow_runs") if isinstance(listed,dict) else None
+              if type(total) is not int or total<0 or total>100 or not isinstance(runs,list) or len(runs)!=total or not all(isinstance(run,dict) for run in runs): raise SystemExit("Governance terminal writer runs are invalid.")
+              return runs
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
           posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=3","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}"],capture_output=True,text=True,check=False)
           if posted.returncode!=0: raise SystemExit("Unable to dispatch governance terminal segment.")
@@ -3469,6 +3479,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
+          from urllib.parse import urlencode
           repo=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", ""); raw_targets=os.environ.get("WRITER_TARGETS", ""); raw_snapshots=os.environ.get("WRITER_ALL_OPEN_SNAPSHOTS", ""); raw_preserved=os.environ.get("WRITER_PRESERVED_TARGETS", ""); preserved_writer=os.environ.get("PRESERVED_WRITER_RUN_ID", ""); raw_manifest=os.environ.get("WRITER_CHECK_MANIFEST", ""); raw_batch=os.environ.get("TERMINAL_BATCH", ""); raw_order=os.environ.get("WRITER_TERMINAL_ORDER", ""); raw_completed=os.environ.get("COMPLETED_WRITER_RUN_IDS", "")
           try: targets,snapshots,preserved,manifest,batch,terminal_order,completed=(json.loads(item) for item in (raw_targets,raw_snapshots,raw_preserved,raw_manifest,raw_batch,raw_order,raw_completed))
           except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment boundary is invalid.") from error
@@ -3483,8 +3494,8 @@ jobs:
               if result.returncode!=0: raise SystemExit("Unable to revalidate governance terminal segment.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
-          repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None
-          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo: raise SystemExit("Governance terminal segment source changed.")
+          repository=get(f"repos/{repo}"); reference=get(f"repos/{repo}/git/ref/heads/{branch}"); source_run=get(f"repos/{repo}/actions/runs/{source}"); reference_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None; source_repo=source_run.get("repository") if isinstance(source_run,dict) else None; source_created_at=source_run.get("created_at") if isinstance(source_run,dict) else None
+          if not isinstance(repository,dict) or repository.get("default_branch")!=branch or reference_head!=head or not isinstance(source_run,dict) or source_run.get("id")!=int(source) or source_run.get("name")!="PR governance dispatcher" or source_run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or source_run.get("head_branch")!=branch or source_run.get("head_sha")!=head or source_run.get("status") not in {"requested","queued","in_progress"} or type(source_run.get("run_number")) is not int or source_run["run_number"]<1 or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"]!=1 or not isinstance(source_repo,dict) or source_repo.get("full_name")!=repo or not isinstance(source_created_at,str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",source_created_at) is None: raise SystemExit("Governance terminal segment source changed.")
           writer_path=".github/workflows/pr-governance-status-writer.yml"; bot=os.environ.get("APP_BOT_LOGIN", "")
           if re.fullmatch(r"[A-Za-z0-9-]+\[bot\]",bot) is None: raise SystemExit("Governance terminal writer actor is invalid.")
           for segment,previous_id in enumerate(completed,start=1):
@@ -3508,13 +3519,15 @@ jobs:
                       current[number]=(sha.lower(),draft)
           if current!=expected: raise SystemExit("All-open terminal segment snapshot changed.")
           path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=all segment={index}"
+          writer_runs_query=urlencode({"event":"workflow_dispatch","branch":branch,"head_sha":head,"created":f">={source_created_at}","per_page":"100"})
           def runs():
-              response=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"],capture_output=True,text=True,check=False)
+              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False)
               if response.returncode!=0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
-              try: pages=json.loads(response.stdout)
+              try: listed=json.loads(response.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
-              if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in pages): raise SystemExit("Governance terminal writer runs are invalid.")
-              return [run for page in pages for run in page["workflow_runs"] if isinstance(run,dict)]
+              total=listed.get("total_count") if isinstance(listed,dict) else None; runs=listed.get("workflow_runs") if isinstance(listed,dict) else None
+              if type(total) is not int or total<0 or total>100 or not isinstance(runs,list) or len(runs)!=total or not all(isinstance(run,dict) for run in runs): raise SystemExit("Governance terminal writer runs are invalid.")
+              return runs
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
           posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=4","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}"],capture_output=True,text=True,check=False)
           if posted.returncode!=0: raise SystemExit("Unable to dispatch governance terminal segment.")

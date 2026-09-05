@@ -3210,6 +3210,22 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             ],
         }
 
+    def _source_with_rest_repository_identity(
+        self, *, include_run_identity: bool = True
+    ) -> dict[str, object]:
+        source = self._source()
+        repository = {
+            "id": 101,
+            "name": "repo",
+            "url": "https://api.github.com/repos/owner/repo",
+        }
+        if include_run_identity:
+            source["repository"] = dict(repository)
+        pull = source["pull_requests"][0]  # type: ignore[index]
+        pull["base"]["repo"] = dict(repository)  # type: ignore[index]
+        pull["head"]["repo"] = dict(repository)  # type: ignore[index]
+        return source
+
     def _run(self) -> dict[str, object]:
         return {
             "id": 101,
@@ -3939,6 +3955,36 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
         for name, source in variants.items():
             with self.subTest(name=name):
                 self.assertIsNotNone(self._gate(source=source))
+
+    def test_governance_check_accepts_rest_repository_identity_without_full_name(self) -> None:
+        source = self._source_with_rest_repository_identity(include_run_identity=False)
+        self.assertIsNone(self._gate(source=source, source_history=[source]))
+
+    def test_governance_check_accepts_rest_identity_at_every_repository_boundary(self) -> None:
+        source = self._source_with_rest_repository_identity()
+        self.assertIsNone(self._gate(source=source, source_history=[source]))
+
+    def test_governance_check_rejects_run_repository_id_drift(self) -> None:
+        source = self._source_with_rest_repository_identity()
+        source["repository"]["id"] = 202  # type: ignore[index]
+        self.assertIsNotNone(self._gate(source=source, source_history=[source]))
+
+    def test_governance_check_rejects_malformed_rest_repository_identity(self) -> None:
+        for name, field, value in (
+            ("id-bool", "id", True),
+            ("id-string", "id", "101"),
+            ("id-foreign", "id", 202),
+            ("id-missing", "id", None),
+            ("name-foreign", "name", "other-repository"),
+            ("name-missing", "name", None),
+            ("url-foreign", "url", "https://api.github.com/repos/other/repository"),
+            ("url-missing", "url", None),
+        ):
+            with self.subTest(name=name):
+                source = self._source_with_rest_repository_identity()
+                pull = source["pull_requests"][0]  # type: ignore[index]
+                pull["head"]["repo"][field] = value  # type: ignore[index]
+                self.assertIsNotNone(self._gate(source=source, source_history=[source]))
 
     def test_governance_check_reads_a_matching_run_from_page_two(self) -> None:
         self.assertIsNone(

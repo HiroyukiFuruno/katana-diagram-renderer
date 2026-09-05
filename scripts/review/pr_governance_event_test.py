@@ -1364,11 +1364,11 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 if isinstance(endpoint, str) and endpoint.endswith("/git/ref/heads/master"):
                     return response({"object": {"sha": "a" * 40}})
                 if isinstance(endpoint, str) and endpoint.endswith("/actions/runs/9"):
-                    return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress"})
+                    return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress", "created_at": "2026-09-01T00:00:00Z"})
                 if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
                     return response([list(records.values())])
                 if isinstance(endpoint, str) and "pr-governance-status-writer.yml/runs?" in endpoint:
-                    return response([{"workflow_runs": writer_runs}])
+                    return response({"total_count": len(writer_runs), "workflow_runs": writer_runs})
                 if "--method" in arguments and "POST" in arguments and any(isinstance(item, str) and "/dispatches" in item for item in arguments):
                     writer_dispatches.append(arguments)
                     writer_runs.append({"id": 901, "name": "PR governance status writer", "display_title": "source=9 scope=all segment=1", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40, "status": "queued", "run_number": 1, "run_attempt": 1})
@@ -1519,6 +1519,53 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 if expected == 0:
                     values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
                     self.assertEqual(values["event_targets"], "[72,73]")
+
+    def test_closed_local_pull_request_target_accepts_only_a_stable_monotonic_default_base(self) -> None:
+        """A delayed local close event is a no-op only after every reread agrees."""
+        match = re.search(r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY", self.workflow, re.DOTALL)
+        self.assertIsNotNone(match); assert match is not None
+        source_base, tip, head = "b" * 40, "d" * 40, "a" * 40
+        local = {"id": 1, "name": "repository", "full_name": "owner/repository", "url": "https://api.github.com/repos/owner/repository"}
+        initial = {"number": 72, "state": "closed", "base": {"sha": tip, "ref": "master", "repo": local}, "head": {"sha": head, "repo": local}}
+        cases = {
+            "accepted": ({}, 0),
+            "rewind": ({"COMPARE": {"status": "behind", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": source_base}, "head_commit": {"sha": tip}}}, 1),
+            "workflow": ({"TIP_BLOB": {"sha": "e" * 40}}, 1),
+            "retarget": ({"FINAL": {**initial, "base": {"sha": tip, "ref": "release/v1", "repo": local}}}, 1),
+            "final-tip": ({"FINAL_TIP": "e" * 40}, 1),
+        }
+        for name, (override, expected) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
+                fake.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'pulls?state=open'*) printf '%s' '[[]]' ;;\n"
+                    "  *'/pulls/72'*) if [ -e \"${PULL_STATE}\" ]; then printf '%s' \"${FINAL}\"; else : > \"${PULL_STATE}\"; printf '%s' \"${INITIAL}\"; fi ;;\n"
+                    "  *'/git/ref/heads/master'*) if [ -e \"${REF_STATE}\" ]; then printf '%s' \"${FINAL_REF}\"; else : > \"${REF_STATE}\"; printf '%s' \"${INITIAL_REF}\"; fi ;;\n"
+                    "  *'/compare/'*) printf '%s' \"${COMPARE}\" ;;\n"
+                    "  *'/contents/'*'ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) printf '%s' \"${SOURCE_BLOB}\" ;;\n"
+                    "  *'/contents/'*'ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'*) printf '%s' \"${HEAD_BLOB}\" ;;\n"
+                    "  *'/contents/'*) printf '%s' \"${TIP_BLOB}\" ;;\n"
+                    "  *'repos/owner/repository'*) printf '%s' \"${REPOSITORY}\" ;;\n"
+                    "  *) exit 91 ;;\nesac\n",
+                    encoding="utf-8",
+                )
+                fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+                compare = override.get("COMPARE", {"status": "ahead", "base_commit": {"sha": source_base}, "merge_base_commit": {"sha": source_base}, "head_commit": {"sha": tip}})
+                environment = os.environ | {
+                    "EVENT_NAME": "pull_request_target", "PR_ACTION": "closed", "PR_NUMBER": "72", "PR_HEAD_SHA": head,
+                    "PR_BASE_SHA": source_base, "PR_BASE_REF": "master", "PR_BODY": "Fixes #64", "PR_PREVIOUS_BODY": "",
+                    "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output),
+                    "INITIAL": json.dumps(initial), "FINAL": json.dumps(override.get("FINAL", initial)), "REPOSITORY": json.dumps({**local, "default_branch": "master"}),
+                    "INITIAL_REF": json.dumps({"object": {"sha": tip}}), "FINAL_REF": json.dumps({"object": {"sha": override.get("FINAL_TIP", tip)}}),
+                    "COMPARE": json.dumps(compare), "SOURCE_BLOB": json.dumps({"sha": "c" * 40}), "HEAD_BLOB": json.dumps({"sha": "c" * 40}), "TIP_BLOB": json.dumps(override.get("TIP_BLOB", {"sha": "c" * 40})),
+                    "PULL_STATE": str(directory / "pull-state"), "REF_STATE": str(directory / "ref-state"), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                }
+                result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected == 0:
+                    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+                    self.assertEqual(values["reconcile"], "true")
 
     def test_pull_request_target_historical_fork_base_is_a_stable_no_op(self) -> None:
         """A historical default-base event must not pin the barrier for an explicit fork."""
@@ -2457,7 +2504,7 @@ if "/actions/workflows/pr-governance-status-writer.yml/runs?" in joined:
     if value["dispatched"]:
         index = int(os.environ.get("CONTINUATION_INDEX", fixture["continuation_index"]))
         runs.append({"id": 90_000 + index, "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={index}", "path": ".github/workflows/pr-governance-status-writer.yml@" + branch, "event": "workflow_dispatch", "repository": {"full_name": repository}, "head_branch": branch, "head_sha": head, "status": "queued", "run_number": index, "run_attempt": 1})
-    emit([{"workflow_runs": runs}])
+    emit({"total_count": len(runs), "workflow_runs": runs})
 if "/dispatches" in joined and "--method POST" in joined:
     record("dispatch")
     value = load_state()
@@ -2919,7 +2966,7 @@ raise SystemExit(91)
                 {"number": 74, "state": "open", "draft": False, "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "c" * 40, "repo": None}},
             ],
         }
-        run = {"id": 99, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@master", "event": "issue_comment", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": head, "run_attempt": 1, "status": "in_progress", "created_at": "2026-08-30T00:00:00Z"}
+        run = {"id": 99, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@master", "event": "issue_comment", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": head, "run_number": 1, "run_attempt": 1, "status": "in_progress", "created_at": "2026-08-30T00:00:00Z"}
         state["runs"] = [run]
         state["manifest_checks"] = {
             801: {"id": 801, "name": "KRR / PR governance (trusted check)", "head_sha": head, "external_id": f"krr-governance/v1/{head}/dispatcher-99", "status": "in_progress", "conclusion": None, "details_url": "https://github.com/owner/repository/actions/runs/99?dispatcher_run_id=99&carry_pending=0", "app": {"id": 4_766_933}},
@@ -4141,7 +4188,7 @@ raise SystemExit(91)
             "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40,
             "status": "queued", "run_number": 1, "run_attempt": 1,
         }
-        for mode, expected in (("gap", 0), ("bad", 1), ("bad-attempt", 1), ("timeout", 1)):
+        for mode, expected in (("gap", 0), ("bad", 1), ("bad-attempt", 1), ("overbound", 1), ("incomplete-page", 1), ("timeout", 1)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; state = directory / "state"
                 fake.write_text(
@@ -4154,16 +4201,21 @@ raise SystemExit(91)
                     "elif '/actions/runs/99' in arguments: print(os.environ['SOURCE'])\n"
                     "elif 'pulls?state=open' in arguments: print(os.environ['PULLS'])\n"
                     "elif arguments.endswith('repos/owner/repository'): print(json.dumps({'default_branch': 'master'}))\n"
-                    "elif '/runs?per_page=100' in arguments:\n"
+                    "elif '/actions/workflows/pr-governance-status-writer.yml/runs?' in arguments:\n"
+                    "    if 'event=workflow_dispatch' not in arguments or 'branch=master' not in arguments or 'head_sha=' + ('a' * 40) not in arguments or 'created=%3E%3D2026-09-01T00%3A00%3A00Z' not in arguments or 'per_page=100' not in arguments: raise SystemExit(93)\n"
                     "    open(state, 'w').write(str(count + 1))\n"
-                    "    if count < 2 or os.environ['MODE'] == 'timeout':\n"
-                    "        print(json.dumps([{'workflow_runs': []}]))\n"
+                    "    if os.environ['MODE'] == 'overbound':\n"
+                    "        print(json.dumps({'total_count': 101, 'workflow_runs': []}))\n"
+                    "    elif os.environ['MODE'] == 'incomplete-page':\n"
+                    "        print(json.dumps({'total_count': 1, 'workflow_runs': []}))\n"
+                    "    elif count < 2 or os.environ['MODE'] == 'timeout':\n"
+                    "        print(json.dumps({'total_count': 0, 'workflow_runs': []}))\n"
                     "    else:\n"
                     "        run = json.loads(os.environ['RUN'])\n"
                     "        if os.environ['MODE'] == 'bad': run['head_sha'] = 'b' * 40\n"
                     "        if os.environ['MODE'] == 'bad-attempt': run['run_attempt'] = True\n"
                     "        unrelated = dict(run, id=70, display_title='source=other scope=all')\n"
-                    "        print(json.dumps([{'workflow_runs': [unrelated, run]}]))\n"
+                    "        print(json.dumps({'total_count': 2, 'workflow_runs': [unrelated, run]}))\n"
                     "elif '/dispatches' in arguments:\n"
                     "    if 'inputs[target_numbers]=[72,73]' not in arguments or 'inputs[preserved_target_numbers]=[]' not in arguments or 'inputs[preserved_writer_run_id]=0' not in arguments: raise SystemExit(92)\n"
                     "else:\n"
@@ -4175,7 +4227,7 @@ raise SystemExit(91)
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "WRITER_HEAD": "a" * 40,
                     "DISPATCHER_RUN_ID": "99", "WRITER_SCOPE": "all", "WRITER_TARGETS": "[72,73]",
                     "WRITER_PRESERVED_TARGETS": "[]", "PRESERVED_WRITER_RUN_ID": "0", "MODE": mode, "STATE": str(state), "RUN": json.dumps(valid),
-                    "SOURCE": json.dumps({"id": 99, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}}),
+                    "SOURCE": json.dumps({"id": 99, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_number": 1, "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "created_at": "2026-09-01T00:00:00Z"}),
                     "PULLS": json.dumps([[{"number": 72, "state": "open", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}, "draft": False}, {"number": 73, "state": "open", "base": {"ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}}, "draft": False}]]),
                     "WRITER_ALL_OPEN_TARGETS": "[72,73]", "WRITER_ALL_OPEN_SNAPSHOTS": "[[72,\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",false],[73,\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",false]]",
                     "WRITER_PREINVALIDATE_TARGETS": "[]", "WRITER_PRE_CHECK_MANIFEST_1": "[]", "WRITER_PRE_CHECK_MANIFEST_2": "[]",
@@ -4185,6 +4237,27 @@ raise SystemExit(91)
                 }
                 result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_writer_registration_queries_are_filtered_bounded_and_not_paginated(self) -> None:
+        """Every segment polls only the current dispatch generation's bounded window."""
+        for name in (
+            "Dispatch one repository-wide governance arbiter segment",
+            "Dispatch second repository-wide governance arbiter segment",
+            "Dispatch third repository-wide governance arbiter segment",
+            "Dispatch fourth repository-wide governance arbiter segment",
+        ):
+            match = re.search(rf"^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - name: |\Z)", self.workflow, re.MULTILINE | re.DOTALL)
+            self.assertIsNotNone(match, name); assert match is not None
+            body = match.group("body")
+            registration = body[body.index("writer_runs_query"):]
+            compact = re.sub(r"\s+", "", registration)
+            self.assertIn('"event":"workflow_dispatch"', compact)
+            self.assertIn('"head_sha"', compact)
+            self.assertIn('"created"', compact)
+            self.assertIn('"per_page":"100"', compact)
+            self.assertNotIn('"--paginate"', registration)
+            self.assertIn("total>100", compact)
+            self.assertTrue("len(runs)!=total" in compact or "len(flattened)!=total" in compact)
 
     def test_invalidator_rejects_wrong_or_malformed_check_app_before_dispatch(self) -> None:
         match = re.search(
@@ -5004,10 +5077,10 @@ raise SystemExit(91)
                 if isinstance(endpoint, str) and "/actions/runs/" in endpoint:
                     identifier = int(endpoint.rsplit("/", 1)[1])
                     if identifier == 9:
-                        return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}})
+                        return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_number": 1, "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "created_at": "2026-09-01T00:00:00Z"})
                     return response(next(candidate for candidate in candidates if candidate["id"] == identifier))
                 if isinstance(endpoint, str) and "actions/workflows/pr-governance-status-writer.yml/runs?" in endpoint:
-                    return response([{"workflow_runs": candidates}])
+                    return response({"total_count": len(candidates), "workflow_runs": candidates})
                 if "--method" in arguments and "POST" in arguments and any(isinstance(item, str) and "/dispatches" in item for item in arguments):
                     dispatches.append(arguments)
                     fields = {item.split("=", 1)[0]: item.split("=", 1)[1] for item in arguments if "=" in item}
@@ -5115,7 +5188,7 @@ raise SystemExit(91)
             if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
                 return response([carry_pulls])
             if isinstance(endpoint, str) and "pr-governance-status-writer.yml/runs?" in endpoint:
-                return response([{"workflow_runs": registered}])
+                return response({"total_count": len(registered), "workflow_runs": registered})
             if "--method" in arguments and "POST" in arguments and any(isinstance(item, str) and "/dispatches" in item for item in arguments):
                 carried_dispatches.append(arguments)
                 registered.append({
