@@ -50,24 +50,25 @@ jobs:
             exit 1
           fi
 
-      - name: Reject Draft state
-        if: github.event.pull_request.draft
+      - name: Reject out-of-scope PR
+        if: ${{ github.event.pull_request.draft != false || github.event.pull_request.base.repo.full_name != github.repository || github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.base.ref != github.event.repository.default_branch }}
         run: |
-          echo 'Draft PR cannot satisfy the governance review latch.' >&2
+          echo 'Only non-Draft local PRs targeting the default branch can satisfy the governance review latch.' >&2
           exit 1
 
       - name: Await matching trusted governance Check Run
-        if: github.event.pull_request.draft == false
+        if: ${{ github.run_attempt == 1 && github.event.pull_request.draft == false && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == github.event.repository.default_branch }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           SOURCE_RUN_ID: ${{ github.run_id }}
           CHECK_APP_ID: ${{ vars.KRR_GOVERNANCE_APP_ID }}
           # 600 * 8.1 = 4,860 seconds. Sixty-second polls permit at most
-          # 91 bounded one/two-page Check Run reads within this 90-minute wait.
+          # 91 bounded three-read Check Run polls within this 90-minute wait.
           POLL_INTERVAL_SECONDS: '60'
           POLL_TIMEOUT_SECONDS: '5400'
         run: |
@@ -99,9 +100,10 @@ jobs:
           min_reconciliation_seconds = int(max_reconciliation_heads * check_write_pace_seconds)
           max_latch_timeout_seconds = 5400
           # One repository identity read, one source validation, up to 91
-          # bounded two-page Check Run polls, then repository/source/writer
+          # bounded three-read Check Run polls (two pages plus the page-one
+          # race anchor), then repository/source/writer
           # revalidation on success remain below this request budget.
-          max_latch_api_reads = 200
+          max_latch_api_reads = 300
 
           def fail(message: str) -> None:
               print(message, file=sys.stderr)
@@ -111,6 +113,7 @@ jobs:
           pr_number = os.environ.get("PR_NUMBER", "")
           pr_base_sha = os.environ.get("PR_BASE_SHA", "")
           pr_base_ref = os.environ.get("PR_BASE_REF", "")
+          default_branch = os.environ.get("DEFAULT_BRANCH", "")
           source_run_id = os.environ.get("SOURCE_RUN_ID", "")
           app_id = os.environ.get("CHECK_APP_ID", "")
           repository = os.environ.get("GITHUB_REPOSITORY", "")
@@ -133,6 +136,12 @@ jobs:
               or positive_number.fullmatch(source_run_id) is None
               or not repository
               or workflow_ref_pattern.fullmatch(pr_base_ref) is None
+              or workflow_ref_pattern.fullmatch(default_branch) is None
+              or default_branch in {".", ".."}
+              or default_branch.startswith("/")
+              or "//" in default_branch
+              or any(part in {"", ".", ".."} for part in default_branch.split("/"))
+              or pr_base_ref != default_branch
               or pr_base_ref in {".", ".."}
               or pr_base_ref.startswith("/")
               or "//" in pr_base_ref
@@ -163,7 +172,7 @@ jobs:
               interval < 1
               or timeout < min_reconciliation_seconds
               or timeout > max_latch_timeout_seconds
-              or check_run_polls * 2 + 3 > max_latch_api_reads
+              or check_run_polls * 3 + 3 > max_latch_api_reads
           ):
               fail("Governance latch polling configuration is invalid.")
 
@@ -254,7 +263,7 @@ jobs:
                   and type(value.get("run_number")) is int and value["run_number"] > 0
                   and pull.get("number") == int(pr_number)
                   and isinstance(pull_base, dict) and isinstance(pull_head, dict)
-                  and pull_base.get("sha") == pr_base_sha and pull_base.get("ref") == pr_base_ref
+                  and pull_base.get("sha") == pr_base_sha and pull_base.get("ref") == default_branch
                   and pull_head.get("sha") == head_sha
                   and isinstance(pull_base.get("repo"), dict) and isinstance(pull_head.get("repo"), dict)
                   and source_repository_matches(pull_base["repo"], expected)
@@ -280,17 +289,34 @@ jobs:
                   )
               )
 
-          def api_json(endpoint: str, failure: str) -> object:
-              result = subprocess.run(
-                  ["gh", "api", endpoint],
-                  capture_output=True,
-                  text=True,
-                  check=False,
-              )
+          def api_json(endpoint: str, failure: str, *, terminal_page: bool = False) -> object:
+              arguments = ["gh", "api"]
+              if terminal_page:
+                  arguments.append("--include")
+              arguments.append(endpoint)
+              try:
+                  result = subprocess.run(
+                      arguments,
+                      capture_output=True,
+                      text=True,
+                      check=False,
+                      timeout=20,
+                  )
+              except subprocess.TimeoutExpired:
+                  fail(failure)
               if result.returncode != 0:
                   fail(failure)
               try:
-                  return json.loads(result.stdout)
+                  raw = result.stdout
+                  if terminal_page:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if (
+                          not separator
+                          or not headers.startswith("HTTP/")
+                          or re.search(r'(?im)^link:.*rel="next"', headers)
+                      ):
+                          fail(failure)
+                  return json.loads(raw)
               except json.JSONDecodeError:
                   fail(failure)
 
@@ -316,8 +342,14 @@ jobs:
 
           endpoint = f"repos/{repository}/commits/{head_sha}/check-runs?" + urlencode({"check_name": check_name, "app_id": app_id, "filter": "all", "per_page": 100})
 
-          def check_run_page(page: int) -> tuple[int, list[dict[str, object]], set[int]]:
-              value = api_json(endpoint + f"&page={page}", "Unable to read the trusted governance Check Run.")
+          def check_run_page(
+              page: int, *, terminal_page: bool = False,
+          ) -> tuple[int, list[dict[str, object]], set[int]]:
+              value = api_json(
+                  endpoint + f"&page={page}",
+                  "Unable to read the trusted governance Check Run.",
+                  terminal_page=terminal_page,
+              )
               if not isinstance(value, dict) or type(value.get("total_count")) is not int:
                   fail("Trusted governance Check Run response is invalid.")
               total_count = value["total_count"]
@@ -337,16 +369,22 @@ jobs:
               if total_count <= 100:
                   if len(first_page) != total_count:
                       fail("Trusted governance Check Run response is invalid.")
+                  if check_run_page(1, terminal_page=True) != (
+                      total_count, first_page, first_identifiers,
+                  ):
+                      fail("Trusted governance Check Run response changed during pagination.")
                   return first_page
               if total_count > 200 or len(first_page) != 100:
                   fail("Trusted governance Check Run response exceeds the bounded page window.")
-              second_total, second_page, second_identifiers = check_run_page(2)
+              second_total, second_page, second_identifiers = check_run_page(2, terminal_page=True)
               if (
                   second_total != total_count
                   or len(second_page) != total_count - 100
                   or first_identifiers & second_identifiers
               ):
                   fail("Trusted governance Check Run response is invalid.")
+              if check_run_page(1) != (total_count, first_page, first_identifiers):
+                  fail("Trusted governance Check Run response changed during pagination.")
               return first_page + second_page
 
           deadline = time.monotonic() + timeout

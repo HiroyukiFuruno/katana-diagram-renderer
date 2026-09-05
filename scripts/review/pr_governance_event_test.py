@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +42,7 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             "PR_NUMBER": "72",
             "PR_BASE_SHA": self.base,
             "PR_BASE_REF": "master",
+            "DEFAULT_BRANCH": "master",
             "SOURCE_RUN_ID": "17",
             "CHECK_APP_ID": "4766933",
             "POLL_INTERVAL_SECONDS": "60",
@@ -205,20 +207,103 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
 class GovernanceDispatcherContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        prior_started_at = os.environ.get("TERMINAL_SEGMENT_STARTED_AT")
+        os.environ["TERMINAL_SEGMENT_STARTED_AT"] = str(int(time.time()))
+        if prior_started_at is None:
+            self.addCleanup(os.environ.pop, "TERMINAL_SEGMENT_STARTED_AT", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "TERMINAL_SEGMENT_STARTED_AT", prior_started_at)
 
     @staticmethod
     def _workflow_program(match: re.Match[str]) -> str:
         """Normalize extracted YAML Python and neutralize its polling delay for tests."""
-        return (
+        program = (
             textwrap.dedent(match.group(1))
             .replace("time.sleep(2)", "None")
             .replace("time.sleep(5)", "None")
             .replace("time.sleep(8.1)", "None")
             .replace("time.sleep(30)", "None")
+            .replace("time.sleep(min(5,remaining))", "None")
+            .replace("time.sleep(min(30,remaining))", "None")
             .replace('subprocess.run(["sleep", "2"], check=False)', "None")
             .replace('subprocess.run(["sleep", "5"], check=False)', "None")
             .replace('subprocess.run(["sleep", "30"], check=False)', "None")
         )
+        # Production pagination deliberately uses one bounded request per
+        # page, rereads page one as an anchor, and uses ``--include`` on the
+        # terminal page.  Most fixtures predate that contract and model the
+        # former ``--paginate --slurp`` response as a list of pages.  Keep
+        # those fixtures meaningful by adapting only their returned payload
+        # at this test boundary; the extracted production program remains
+        # unchanged and still exercises all pagination validation branches.
+        compatibility = textwrap.dedent(
+            r'''
+            import json as _krr_json
+            import re as _krr_re
+            import subprocess
+
+            _krr_underlying_run = subprocess.run
+
+            def _krr_run(*args, **kwargs):
+                result = _krr_underlying_run(*args, **kwargs)
+                argv = args[0] if args else kwargs.get("args", [])
+                if not isinstance(argv, (list, tuple)) or result.returncode != 0:
+                    return result
+                endpoint = next((item for item in argv if isinstance(item, str) and item.startswith("repos/")), "")
+                page_match = _krr_re.search(r"[?&]page=(\d+)", endpoint)
+                page_number = int(page_match.group(1)) if page_match else 1
+                is_terminal = page_number == 6 and "--include" in argv
+                is_pull_page = "/pulls?state=open" in endpoint
+                is_run_page = "/actions/workflows/" in endpoint and "/runs?" in endpoint
+                is_check_page = "/check-runs?" in endpoint
+                if not (is_pull_page or is_run_page or is_check_page) or not isinstance(result.stdout, str):
+                    return result
+                raw = result.stdout
+                try:
+                    payload = _krr_json.loads(raw)
+                except (TypeError, _krr_json.JSONDecodeError):
+                    return result
+                if is_pull_page and isinstance(payload, list) and payload and all(isinstance(item, list) for item in payload):
+                    payload = payload[page_number - 1] if page_number <= len(payload) else []
+                elif is_run_page and isinstance(payload, list):
+                    if payload and all(isinstance(item, dict) and "workflow_runs" in item for item in payload):
+                        payload = payload[page_number - 1] if page_number <= len(payload) else {"total_count": 0, "workflow_runs": []}
+                elif is_check_page and isinstance(payload, list):
+                    if payload and all(isinstance(item, dict) and "check_runs" in item for item in payload):
+                        payload = payload[page_number - 1] if page_number <= len(payload) else {"total_count": 0, "check_runs": []}
+                if is_run_page and isinstance(payload, dict) and "workflow_runs" in payload and "total_count" not in payload:
+                    payload = {**payload, "total_count": len(payload["workflow_runs"]) if isinstance(payload["workflow_runs"], list) else -1}
+                if is_check_page and isinstance(payload, dict) and "check_runs" in payload and "total_count" not in payload:
+                    payload = {**payload, "total_count": len(payload["check_runs"]) if isinstance(payload["check_runs"], list) else -1}
+                normalized = _krr_json.dumps(payload)
+                if is_terminal and not raw.startswith("HTTP/"):
+                    normalized = "HTTP/2 200 OK\n\n" + normalized
+                return subprocess.CompletedProcess(result.args, result.returncode, normalized, result.stderr)
+
+            '''
+        )
+        return compatibility + program.replace("subprocess.run(", "_krr_run(")
+
+    def test_empty_paginated_check_run_fixture_remains_fail_closed(self) -> None:
+        """The pagination adapter may unwrap a real page, never an empty malformed response."""
+
+        program_match = re.match(
+            r"(?s)(.*)",
+            """
+            response = subprocess.run(["gh", "api", "repos/owner/repository/commits/a/check-runs?per_page=100&page=1"])
+            value = _krr_json.loads(response.stdout)
+            if not isinstance(value, dict) or not isinstance(value.get("check_runs"), list):
+                raise SystemExit("malformed check-run response")
+            """,
+        )
+        assert program_match is not None
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(arguments, 0, "[]", "")
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(SystemExit):
+                exec(self._workflow_program(program_match), {})
 
     def _step_if(self, name: str) -> str:
         match = re.search(
@@ -327,7 +412,10 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             self.assertIn(action, self.workflow)
         self.assertIn("schedule:", self.workflow)
         self.assertIn("single arbiter removes the former 256-target matrix/rotation", self.workflow)
-        self.assertIn('"--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"', self.workflow)
+        terminal = self.workflow[self.workflow.index("id: dispatch-all-1"):]
+        self.assertNotIn("--paginate", terminal)
+        self.assertNotIn("--slurp", terminal)
+        self.assertEqual(terminal.count("pulls?state=open&per_page=100&page={page_number}"), 4)
 
     def test_github_if_rejects_python_and_unbound_or_dangling_tokens(self) -> None:
         values = {"steps.check.outputs.ready": "true"}
@@ -469,8 +557,12 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                         pull_reads += 1
                         number = int(endpoint.rsplit("/", 1)[1])
                         return response({**pull(), "number": number})
-                    if endpoint == f"repos/{repository}/pulls?state=open&per_page=100":
-                        value = pages[min(page_reads, len(pages) - 1)] if isinstance(pages, tuple) else pages
+                    if endpoint.startswith(f"repos/{repository}/pulls?state=open&per_page=100"):
+                        if isinstance(pages, tuple):
+                            value = pages[min(page_reads, len(pages) - 1)]
+                        else:
+                            page_number = int(parse_qs(urlparse(endpoint).query).get("page", ["1"])[0])
+                            value = pages[page_number - 1] if page_number <= len(pages) else []
                         page_reads += 1
                         return response(value)
                     raise AssertionError(arguments)
@@ -489,7 +581,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     self.assertEqual(pull_reads, 2)
                     self.assertEqual(repository_reads, 2)
                 if event["EVENT_NAME"] == "issues" and values["reconcile"] == "false":
-                    self.assertEqual(page_reads, 2)
+                    self.assertEqual(page_reads, 4)
                 return values
 
         unrelated = [[pull(body="Fixes #64")]]
@@ -1209,7 +1301,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         assert resolver is not None and current is not None
         base, head = "b" * 40, "a" * 40
         local_base = {"ref": "master", "repo": {"full_name": "owner/repository"}}
-        pulls = [[
+        all_pulls = [
             {
                 "number": number,
                 "state": "open",
@@ -1219,7 +1311,8 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 "head": {"sha": f"{number:040x}", "repo": {"full_name": "owner/repository"}},
             }
             for number in range(1, 106)
-        ]]
+        ]
+        pulls = [all_pulls[:100], all_pulls[100:]]
         source = {"number": 72, "state": "open", "base": {"sha": base, **local_base}, "head": {"sha": head, "repo": {"full_name": "owner/repository"}}}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "resolve-output"
@@ -1547,7 +1640,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 if isinstance(endpoint, str) and endpoint.endswith("/actions/runs/9"):
                     return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress", "created_at": "2026-09-01T00:00:00Z"})
                 if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
-                    return response([list(records.values())])
+                    return response(list(records.values()))
                 if isinstance(endpoint, str) and "pr-governance-status-writer.yml/runs?" in endpoint:
                     return response({"total_count": len(writer_runs), "workflow_runs": writer_runs})
                 if "--method" in arguments and "POST" in arguments and any(isinstance(item, str) and "/dispatches" in item for item in arguments):
@@ -1840,7 +1933,8 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
             fake.write_text("#!/bin/sh\nprintf '%s' \"${PULLS}\"\n", encoding="utf-8"); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-            environment = os.environ | {"EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps([[fork], [fork]]), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+            first_page = [{**fork, "number": number} for number in range(1, 101)]
+            environment = os.environ | {"EVENT_NAME": "issues", "ISSUE_NUMBER": "64", "ISSUE_PULL_REQUEST_URL": "", "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "GITHUB_OUTPUT": str(output), "PULLS": json.dumps([first_page, [fork]]), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
             result = subprocess.run([sys.executable, "-c", self._workflow_program(match)], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
 
@@ -1886,7 +1980,8 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             # governance domain and must not fail the all-open local scan.
             {"number": 67, "state": "open", "body": "Fixes #4", "draft": False, "base": local_base, "head": {"repo": None}},
         ]]
-        for pages, expected in ((pulls, 0), ([[pulls[0][0]], [pulls[0][0]]], 1)):
+        duplicate_page = [pulls[0][0]] + [{**pulls[0][0], "number": number} for number in range(100, 199)]
+        for pages, expected in ((pulls, 0), ([duplicate_page, [pulls[0][0]]], 1)):
             with self.subTest(duplicate=expected == 1), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); fake = directory / "gh"; output = directory / "output"
                 fake.write_text(
@@ -2585,7 +2680,9 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
         snapshots = [[number, heads[number], False] for number in all_targets]
         manifest = [[number, 100_000 + number] for number in all_targets]
 
-        def pages(head: object, branch: str, count: int) -> list[list[dict[str, object]]]:
+        def pages(
+            head: object, branch: str, count: int, *, append_malformed: bool,
+        ) -> list[list[dict[str, object]]]:
             values = [[
                 {
                     "number": number,
@@ -2596,17 +2693,21 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 }
                 for number in range(start, min(start + 100, count + 1))
             ] for start in range(1, count + 1, 100)]
-            values[0].append({
+            # Keep malformed-shape cases explicit even at the 600-target
+            # boundary; the nullable fork case itself must not create a
+            # seventh page that would be rejected before fork filtering.
+            if count < len(all_targets) or append_malformed:
+                values[-1].append({
                 "number": 1001,
                 "state": "open",
                 "draft": False,
                 "base": {"ref": branch, "repo": {"full_name": "owner/repository"}},
                 "head": head,
-            })
+                })
             return values
 
         fake_gh = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, re, sys
 
 arguments = sys.argv[1:]
 joined = " ".join(arguments)
@@ -2643,7 +2744,15 @@ def emit(value):
 source = {"id": 9, "name": "PR governance dispatcher", "path": ".github/workflows/pr-governance.yml@" + branch, "event": "issues", "status": "in_progress", "run_attempt": 1, "run_number": 1, "head_branch": branch, "head_sha": head, "repository": {"full_name": repository}, "created_at": "2026-09-01T00:00:00Z"}
 
 if "pulls?state=open" in joined:
-    emit(fixture["pulls"])
+    if "--paginate" in arguments:
+        emit(fixture["pulls"])
+    page_match = re.search(r"[?&]page=(\\d+)", joined)
+    page = int(page_match.group(1)) if page_match else 1
+    value = fixture["pulls"][page - 1] if page <= len(fixture["pulls"]) else []
+    if "--include" in arguments:
+        print("HTTP/2 200 OK\\n\\n" + json.dumps(value, separators=(",", ":")))
+        raise SystemExit(0)
+    emit(value)
 if joined.endswith("/git/ref/heads/" + branch):
     emit({"object": {"sha": head}})
 if joined.endswith("repos/" + repository):
@@ -2767,10 +2876,15 @@ raise SystemExit(91)
                 unavailable = {"sha": "f" * 40, "repo": None}
                 count = 1 if name == step_names[2] else len(all_targets)
                 if head is missing_head:
-                    fixture_pages = pages(unavailable, branch, count)
+                    fixture_pages = pages(unavailable, branch, count, append_malformed=True)
                     del fixture_pages[0][-1]["head"]
                 else:
-                    fixture_pages = pages(unavailable if head is None else head, branch, count)
+                    fixture_pages = pages(
+                        unavailable if head is None else head,
+                        branch,
+                        count,
+                        append_malformed=head is not None,
+                    )
                 fixture = directory / "fixture.json"
                 fixture.write_text(json.dumps({
                     "repository": "owner/repository", "branch": branch, "log": str(log), "state": str(state),
@@ -2833,7 +2947,8 @@ raise SystemExit(91)
         self.assertNotIn("has_preinvalidate_targets != 'true'", self.workflow[drain:next_step])
         self.assertIn("GH_TOKEN: ${{ steps.dispatcher-token.outputs.token }}", section)
         self.assertNotIn("CHECK_WRITE_TOKEN", section)
-        self.assertIn('"--paginate", "--slurp", f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100"', section)
+        self.assertNotIn('"--paginate", "--slurp"', section)
+        self.assertIn('f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100&page={page_number}"', section)
         self.assertIn('f"repos/{repository}/actions/runs/{identifier}/cancel"', section)
         self.assertIn('active = {"requested", "queued", "pending", "waiting", "in_progress"}', section)
         self.assertIn("for _ in range(150):", section)
@@ -2896,7 +3011,12 @@ raise SystemExit(91)
                     "else: raise SystemExit(91)\n",
                     encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-                program = base_program.replace("range(150)", "range(2)") if mode == "timeout" else base_program
+                sleeper = directory / "sleep"
+                sleeper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                sleeper.chmod(sleeper.stat().st_mode | stat.S_IXUSR)
+                program = base_program.replace('subprocess.run(["sleep", str(min(5, remaining))], check=False)', "None")
+                if mode == "timeout":
+                    program = program.replace("range(60)", "range(2)")
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "WRITER_HEAD": "a" * 40,
                     "DISPATCHER_RUN_ID": "99", "TARGETS": "[72,73]", "MODE": mode, "STATE": str(state),
@@ -3218,14 +3338,14 @@ raise SystemExit(91)
                         state["late_event_observed_at_release"] = True
                     if state["uncertain_delete"]: return completed([], 1)
                 return completed(required["contexts"])
-            if endpoint == "repos/owner/repository/pulls?state=open&per_page=100":
+            if endpoint.startswith("repos/owner/repository/pulls?state=open&per_page=100"):
                 self.assertEqual(token, "read"); return completed([state["pulls"]])
             if endpoint == "repos/owner/repository/actions/runs/99":
                 self.assertEqual(token, "read"); return completed(run)
             if endpoint == "repos/owner/repository/actions/runs/100/jobs?per_page=100":
                 self.assertEqual(token, "read"); jobs = state["dispatcher_jobs"]
                 self.assertIsInstance(jobs, dict); return completed(jobs[100])
-            if endpoint == "repos/owner/repository/actions/workflows/pr-governance.yml/runs?per_page=100":
+            if endpoint.startswith("repos/owner/repository/actions/workflows/pr-governance.yml/runs?per_page=100"):
                 self.assertEqual(token, "read"); return completed([{"workflow_runs": state["runs"]}])
             if endpoint == "repos/owner/repository/check-runs":
                 self.assertEqual(token, "marker-write"); return completed({"id": 501, "name": barrier, "head_sha": head, "external_id": f"krr-governance-affected-head-barrier/v1/{head}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4_766_933}})
@@ -4380,7 +4500,9 @@ raise SystemExit(91)
                     "count = int(open(state).read()) if os.path.exists(state) else 0\n"
                     "if '/git/ref/heads/master' in arguments: print(json.dumps({'object': {'sha': 'a' * 40}}))\n"
                     "elif '/actions/runs/99' in arguments: print(os.environ['SOURCE'])\n"
-                    "elif 'pulls?state=open' in arguments: print(os.environ['PULLS'])\n"
+                    "elif 'pulls?state=open' in arguments:\n"
+                    "    pages = json.loads(os.environ['PULLS']); page = 1\n"
+                    "    print(json.dumps(pages[page - 1] if page <= len(pages) else []))\n"
                     "elif arguments.endswith('repos/owner/repository'): print(json.dumps({'default_branch': 'master'}))\n"
                     "elif '/actions/workflows/pr-governance-status-writer.yml/runs?' in arguments:\n"
                     "    if 'event=workflow_dispatch' not in arguments or 'branch=master' not in arguments or 'head_sha=' + ('a' * 40) not in arguments or 'created=%3E%3D2026-09-01T00%3A00%3A00Z' not in arguments or 'per_page=100' not in arguments: raise SystemExit(93)\n"
@@ -4403,7 +4525,12 @@ raise SystemExit(91)
                     "    raise SystemExit(91)\n",
                     encoding="utf-8",
                 ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-                program = base_program.replace("range(150)", "range(2)") if mode == "timeout" else base_program
+                sleeper = directory / "sleep"
+                sleeper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                sleeper.chmod(sleeper.stat().st_mode | stat.S_IXUSR)
+                program = base_program.replace('subprocess.run(["sleep", str(min(5, remaining))], check=False)', "None")
+                if mode == "timeout":
+                    program = program.replace("range(60)", "range(2)")
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master", "WRITER_HEAD": "a" * 40,
                     "DISPATCHER_RUN_ID": "99", "WRITER_SCOPE": "all", "WRITER_TARGETS": "[72,73]",
@@ -4525,10 +4652,11 @@ raise SystemExit(91)
                     self.fail(result.stdout + result.stderr + (calls.read_text(encoding="utf-8") if calls.exists() else ""))
                 self.assertEqual(result.returncode, expected, result.stderr)
                 calls = (directory / "calls.log").read_text(encoding="utf-8").splitlines()
-                self.assertTrue(calls[0].startswith("read:"))
-                self.assertTrue(calls[1].startswith("write:"))
+                first_write = next(index for index, line in enumerate(calls) if line.startswith("write:"))
+                self.assertGreater(first_write, 0)
+                self.assertTrue(all(line.startswith("read:") for line in calls[:first_write]))
                 if expected == 0:
-                    self.assertTrue(all(line.startswith("read:") for line in (calls[2], calls[3])))
+                    self.assertTrue(all(line.startswith("read:") for line in calls[first_write + 1:]))
                 if log.exists():
                     self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), total)
 
@@ -4831,7 +4959,7 @@ raise SystemExit(91)
             )
 
     def test_oversized_all_invalidation_keeps_affected_prechunk_and_holds_barrier(self) -> None:
-        """602 unique heads finish discovery before oversized all-open invalidation fails closed."""
+        """The bounded six-page snapshot carries 600 unique heads to both invalidation chunks."""
         resolver = re.search(
             r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
@@ -4851,7 +4979,7 @@ raise SystemExit(91)
         self.assertLess(hold_position, dispatcher)
         self.assertIn("invalidation_head_cap_exceeded == 'true'", self.workflow[hold_position:])
 
-        total = 602
+        total = 600
 
         def pull(number: int) -> dict[str, object]:
             return {
@@ -4914,9 +5042,9 @@ raise SystemExit(91)
             self.assertEqual(json.loads(values["preinvalidate_chunk_2_snapshots"]), [])
             self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(2, total + 1)))
             self.assertEqual(json.loads(values["all_invalidation_target_snapshots"]), [[number, f"{number:040x}", False] for number in range(2, total + 1)])
-            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
-            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
-            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), list(range(2, 302)))
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), list(range(302, 601)))
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "false")
 
         hold_program = self._workflow_program(hold)
         base_environment = {
@@ -4932,8 +5060,92 @@ raise SystemExit(91)
                         exec(hold_program, {"__name__": "__main__"})
                 self.assertEqual(hold_environment["BARRIER_ACTIVE"], active)
 
+    def test_oversized_snapshot_over_600_heads_fails_closed(self) -> None:
+        match = re.search(
+            r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        total = 602
+        pages = [[
+            {"number": number, "state": "open", "body": "Fixes #64", "draft": False,
+             "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+             "head": {"sha": f"{number:040x}", "repo": {"full_name": "owner/repository"}}}
+            for number in range(start, min(start + 100, total + 1))
+        ] for start in range(1, total + 1, 100)]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); output = directory / "output"; payload = directory / "pulls.json"
+            payload.write_text(json.dumps(pages), encoding="utf-8")
+            fake = directory / "gh"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'--include'*'pulls?state=open'*) printf 'HTTP/2 200 OK\\nLink: <https://api.github.com/repos/owner/repository/pulls?state=open&per_page=100&page=7>; rel=\"next\"\\n\\n'; cat \"${PULLS_FILE}\" ;;\n"
+                "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                "  *) exit 91 ;;\nesac\n", encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master",
+                "EVENT_NAME": "pull_request_target", "EVENT_TARGETS": "[1]",
+                "EVENT_PRIORITY_TARGETS": "[1]", "GITHUB_OUTPUT": str(output),
+                "PULLS_FILE": str(payload), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(match)], env=environment,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixed page window", result.stderr.lower())
+
+    def test_six_page_continuation_excludes_unavailable_fork_within_600_target_bound(self) -> None:
+        match = re.search(
+            r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        governed = list(range(1, 600))
+        pages = [[
+            {"number": number, "state": "open", "body": "Fixes #64", "draft": False,
+             "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+             "head": {"sha": f"{number:040x}", "repo": {"full_name": "owner/repository"}}}
+            for number in governed[start:start + 100]
+        ] for start in range(0, len(governed), 100)]
+        pages[-1].append({
+            "number": 1001, "state": "open", "body": "Fixes #64", "draft": False,
+            "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+            "head": {"sha": "f" * 40, "repo": None},
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); output = directory / "output"; payload = directory / "pulls.json"
+            payload.write_text(json.dumps(pages), encoding="utf-8")
+            fake = directory / "gh"
+            fake.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'pulls?state=open'*) cat \"${PULLS_FILE}\" ;;\n"
+                "  *'git/ref/heads/master'*) printf '%s' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;\n"
+                "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
+                "  *) exit 91 ;;\nesac\n", encoding="utf-8",
+            ); fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "DEFAULT_BRANCH": "master",
+                "EVENT_NAME": "workflow_run", "EVENT_TARGETS": "[]",
+                "EVENT_PRIORITY_TARGETS": "[]", "GITHUB_OUTPUT": str(output),
+                "PULLS_FILE": str(payload), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+            }
+            result = subprocess.run(
+                [sys.executable, "-c", self._workflow_program(match)], env=environment,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+            targets = json.loads(values["targets"])
+            self.assertEqual(targets, governed)
+            self.assertNotIn(1001, targets)
+            self.assertEqual(len(json.loads(values["target_snapshots"])), len(governed))
+
     def test_nonpriority_workflow_run_oversized_snapshot_seeds_barrier_and_stops_before_dispatch(self) -> None:
-        """A non-priority CI workflow_run still binds the cap barrier for 602 heads."""
+        """A non-priority CI workflow_run still carries the bounded 600-head snapshot."""
         source_resolver = re.search(
             r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
@@ -4971,7 +5183,7 @@ raise SystemExit(91)
             activation_match.group("body"),
         )
 
-        total = 602
+        total = 600
         heads = {number: f"{number:040x}" for number in range(1, total + 1)}
         pages = [[
             {
@@ -5067,9 +5279,9 @@ raise SystemExit(91)
             self.assertEqual(json.loads(values["preinvalidate_targets"]), [])
             self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(1, total + 1)))
             self.assertEqual(len(json.loads(values["all_invalidation_target_snapshots"])), total)
-            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
-            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
-            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "false")
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), list(range(1, 301)))
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), list(range(301, 601)))
 
             marker_calls: list[list[str]] = []
 
@@ -5111,7 +5323,7 @@ raise SystemExit(91)
             with patch.dict(os.environ, marker_environment, clear=True), patch("subprocess.run", side_effect=marker_run):
                 exec(self._workflow_program(marker), {"__name__": "__main__"})
             self.assertEqual(len(marker_calls), 2)
-            self.assertEqual(marker_environment["INVALIDATION_HEAD_CAP_EXCEEDED"], "true")
+            self.assertEqual(marker_environment["INVALIDATION_HEAD_CAP_EXCEEDED"], "false")
 
         hold_program = self._workflow_program(hold)
         for active, message in (("false", "before the affected-head barrier was active"), ("true", "head cap exceeded")):
@@ -5183,7 +5395,15 @@ raise SystemExit(91)
             body = step.group("body")
             step_number = steps.index(step)
             self.assertGreater(step_number, 0)
-            self.assertIn("actions/create-github-app-token", steps[step_number - 1].group("body"))
+            # A conservative terminal-window marker may sit between the
+            # dispatcher token and its POST.  The token must nevertheless be
+            # created in this same fail-closed continuation chain.
+            prior_token = next(
+                (candidate for candidate in reversed(steps[:step_number])
+                 if "actions/create-github-app-token" in candidate.group("body")),
+                None,
+            )
+            self.assertIsNotNone(prior_token)
             index_match = re.search(r"inputs\[continuation_index\][^\n]*?=([1-4])(?:\"|')?", body)
             self.assertIsNotNone(index_match, step.group("name")); assert index_match is not None
             index = int(index_match.group(1)); dispatch_indices.append(index)
@@ -5234,24 +5454,19 @@ raise SystemExit(91)
                  "head": {"sha": heads[number], "repo": rest_repository}}
                 for number in range(start, min(start + 100, 601))
             ] for start in range(1, 601, 100)]
-            # The continuation snapshots must ignore an unavailable fork
-            # without changing the governed 600-target manifest.
-            pages[0].append({
-                "number": 1001,
-                "state": "open",
-                "body": "Fixes #64",
-                "draft": False,
-                "base": {"ref": "master", "repo": rest_repository},
-                "head": {"sha": "f" * 40, "repo": None},
-            })
-
             def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess([], code, json.dumps(value), "")
+                body = json.dumps(value)
+                if current_arguments[0] is not None and "--include" in current_arguments[0]:
+                    body = f"HTTP/2 200 OK\n\n{body}"
+                return subprocess.CompletedProcess([], code, body, "")
 
+            current_arguments: list[list[str] | None] = [None]
             def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                current_arguments[0] = arguments
                 endpoint = next((item for item in arguments if isinstance(item, str) and item.startswith("repos/")), arguments[-1])
                 if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
-                    return response(pages)
+                    page = int(parse_qs(urlparse(endpoint).query).get("page", ["1"])[0])
+                    return response(pages[page - 1] if page <= len(pages) else [])
                 if isinstance(endpoint, str) and endpoint.endswith("/git/ref/heads/master"):
                     return response({"object": {"sha": "a" * 40}})
                 if isinstance(endpoint, str) and endpoint == "repos/owner/repository":
@@ -5368,7 +5583,7 @@ raise SystemExit(91)
             if isinstance(endpoint, str) and endpoint.endswith("/actions/runs/9"):
                 return response(dispatcher_source_active)
             if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
-                return response([carry_pulls])
+                return response(carry_pulls)
             if isinstance(endpoint, str) and "pr-governance-status-writer.yml/runs?" in endpoint:
                 return response({"total_count": len(registered), "workflow_runs": registered})
             if "--method" in arguments and "POST" in arguments and any(isinstance(item, str) and "/dispatches" in item for item in arguments):
@@ -5435,7 +5650,7 @@ raise SystemExit(91)
                     return subprocess.CompletedProcess(arguments, 1, "", "")
                 endpoint = next((item for item in arguments if isinstance(item, str) and item.startswith("repos/")), arguments[-1])
                 if isinstance(endpoint, str) and "pulls?state=open" in endpoint:
-                    return response([carry_pulls])
+                    return response(carry_pulls)
                 if isinstance(endpoint, str) and "/pulls/" in endpoint:
                     number = int(endpoint.rsplit("/", 1)[1])
                     return response(next(pull for pull in carry_pulls if pull["number"] == number))

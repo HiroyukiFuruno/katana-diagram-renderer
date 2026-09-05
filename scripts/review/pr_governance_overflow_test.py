@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +23,10 @@ class GovernanceOverflowContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.writer = (ROOT / "scripts/review/pr_governance_status_writer.py").read_text(encoding="utf-8")
         self.workflow = (ROOT / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
+        self.dispatcher = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.review_events = (ROOT / ".github/workflows/pr-governance-review-events.yml").read_text(
+            encoding="utf-8"
+        )
 
     def test_writer_has_no_matrix_or_256_target_limit(self) -> None:
         self.assertNotIn("matrix:", self.workflow)
@@ -89,10 +95,90 @@ class GovernanceOverflowContractTest(unittest.TestCase):
         )
         self.assertEqual(WRITER.governance_order(selected, frozenset(), (73,)), (73, 74))
 
-    def test_open_pr_and_check_run_api_reads_are_fully_paginated(self) -> None:
+    def test_open_pr_and_check_run_api_reads_use_fixed_pages_and_anchor_fences(self) -> None:
         self.assertIn('pulls?state=open&per_page=100', self.writer)
         self.assertIn('"check_name": CHECK_NAME', self.writer)
-        self.assertIn('["--paginate", "--slurp", endpoint]', self.writer)
+        self.assertIn("MAX_SHARED_SNAPSHOT_PAGES = 6", self.writer)
+        self.assertIn("def _page_endpoint", self.writer)
+        self.assertIn("def _included_page", self.writer)
+        self.assertIn('command(["--include", endpoint]', self.writer)
+        self.assertIn("GitHub pagination first page changed.", self.writer)
+        self.assertNotIn("--paginate", self.writer)
+        self.assertNotIn("--slurp", self.writer)
+
+    def test_dispatcher_pagination_is_bounded_and_event_safe(self) -> None:
+        self.assertNotIn("--paginate", self.dispatcher)
+        self.assertNotIn("--slurp", self.dispatcher)
+        self.assertGreaterEqual(self.dispatcher.count("timeout=20"), 9)
+        self.assertGreaterEqual(self.dispatcher.count('rel="next"'), 9)
+        self.assertGreaterEqual(
+            self.dispatcher.count("range(2, 7)") + self.dispatcher.count("range(2,7)"), 9
+        )
+        for marker in (
+            "Open pull request response first page changed.",
+            "Current open pull request response first page changed.",
+            "Governance writer run list first page changed.",
+            "Governance writer runs first page changed.",
+            "Early governance Check Run first page changed.",
+            "Affected-head barrier current pull request response first page changed.",
+            "Affected-head barrier dispatcher generation is incomplete.",
+        ):
+            self.assertIn(marker, self.dispatcher)
+
+    def test_every_governance_workflow_api_subprocess_has_a_twenty_second_timeout(self) -> None:
+        """Keep the complete API-call inventory bounded as the three workflows grow."""
+        workflows = (
+            ("dispatcher", self.dispatcher, 79),
+            ("status writer", self.workflow, 2),
+            ("review events", self.review_events, 1),
+        )
+        for name, workflow, expected_count in workflows:
+            with self.subTest(workflow=name):
+                blocks = re.finditer(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)
+                api_calls: list[ast.Call] = []
+                for block in blocks:
+                    source = "".join(
+                        line[10:] if line.startswith("          ") else line
+                        for line in block.group(1).splitlines(keepends=True)
+                    )
+                    for call in ast.walk(ast.parse(source)):
+                        if not (
+                            isinstance(call, ast.Call)
+                            and isinstance(call.func, ast.Attribute)
+                            and isinstance(call.func.value, ast.Name)
+                            and call.func.value.id == "subprocess"
+                            and call.func.attr == "run"
+                        ):
+                            continue
+                        rendered = ast.get_source_segment(source, call) or ""
+                        if '["sleep"' in rendered or "['sleep'" in rendered:
+                            continue
+                        api_calls.append(call)
+                        timeout = next((item.value for item in call.keywords if item.arg == "timeout"), None)
+                        self.assertIsNotNone(timeout, rendered)
+                        if isinstance(timeout, ast.Constant):
+                            self.assertIsInstance(timeout.value, (int, float))
+                            self.assertLessEqual(timeout.value, 20)
+                        else:
+                            self.assertEqual(ast.unparse(timeout).split("(", 1)[0], "min")
+                            self.assertIn("20", ast.unparse(timeout))
+
+                # Updating this count makes a new production subprocess explicit
+                # in review; the assertion above makes its timeout non-optional.
+                self.assertEqual(len(api_calls), expected_count)
+
+    def test_phase_deadlines_leave_a_terminal_start_margin_inside_six_hours(self) -> None:
+        phase_seconds = (15 + 15 + 30 + 290) * 60
+        self.assertLess(phase_seconds, 6 * 60 * 60)
+        self.assertIn("root_deadline_epoch = int(time.time()) + 21_000", self.dispatcher)
+        self.assertEqual(self.dispatcher.count("timeout-minutes: 15"), 2)
+        self.assertIn("timeout-minutes: 30", self.dispatcher)
+        self.assertIn("timeout-minutes: 290", self.dispatcher)
+        self.assertEqual(self.dispatcher.count("ROOT_DEADLINE_EPOCH:"), 4)
+        self.assertEqual(
+            self.dispatcher.count("Terminal dispatch cannot complete before the root deadline."), 4
+        )
+        self.assertEqual(self.dispatcher.count("terminal_segment_seconds = 3_750"), 4)
 
     def test_malformed_or_multi_closing_prs_fail_closed_without_aborting_other_prs(self) -> None:
         self.assertIn("A malformed multi-Issue closer is a claimant", self.writer)

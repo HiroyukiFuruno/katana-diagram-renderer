@@ -50,6 +50,11 @@ on:
         description: Canonical completed prior all-writer run IDs; early and segment one are empty.
         required: true
         type: string
+      terminal_deadline_epoch:
+        description: Absolute terminal-window deadline for all-scope continuations; zero for early scope.
+        required: false
+        default: '0'
+        type: string
 
 # This workflow never accepts a PR ref or a caller supplied target. The
 # bootstrap job binds both the executed bytes and the ref to default.
@@ -80,22 +85,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, time
           repository=os.environ["GITHUB_REPOSITORY"]
-          result=subprocess.run(["gh","api",f"repos/{repository}"],capture_output=True,text=True,check=False)
+          deadline=time.monotonic()+120
+          def request(endpoint):
+              remaining=deadline-time.monotonic()
+              if remaining<=0: raise SystemExit("Writer bootstrap API deadline elapsed.")
+              try: result=subprocess.run(["gh","api",endpoint],capture_output=True,text=True,check=False,timeout=min(20,remaining))
+              except subprocess.TimeoutExpired as error: raise SystemExit("Writer bootstrap API timed out.") from error
+              if time.monotonic()>deadline: raise SystemExit("Writer bootstrap API deadline elapsed.")
+              return result
+          result=request(f"repos/{repository}")
           if result.returncode != 0: raise SystemExit("Unable to load repository default branch.")
           try: repo=json.loads(result.stdout)
           except json.JSONDecodeError as error: raise SystemExit("Repository response is not JSON.") from error
           branch=repo.get("default_branch") if isinstance(repo,dict) else None
           if not isinstance(branch,str) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch): raise SystemExit("Repository default branch is invalid.")
           if os.environ.get("GITHUB_REF") != f"refs/heads/{branch}": raise SystemExit("Writer is not running from the trusted default branch.")
-          commit=subprocess.run(["gh","api",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False)
+          commit=request(f"repos/{repository}/git/ref/heads/{branch}")
           if commit.returncode != 0: raise SystemExit("Unable to load default branch head.")
           try: head=json.loads(commit.stdout).get("object",{}).get("sha")
           except json.JSONDecodeError as error: raise SystemExit("Default branch head is not JSON.") from error
           if not isinstance(head,str) or not re.fullmatch(r"[0-9a-fA-F]{40}",head) or os.environ.get("GITHUB_SHA") != head: raise SystemExit("Writer SHA does not match default branch head.")
           for ref in (branch, head):
-              blob=subprocess.run(["gh","api",f"repos/{repository}/contents/.github/workflows/pr-governance-status-writer.yml?ref={ref}"],capture_output=True,text=True,check=False)
+              blob=request(f"repos/{repository}/contents/.github/workflows/pr-governance-status-writer.yml?ref={ref}")
               if blob.returncode != 0: raise SystemExit("Unable to load writer workflow blob.")
               try: payload=json.loads(blob.stdout); sha=payload.get("sha") if isinstance(payload,dict) else None
               except json.JSONDecodeError as error: raise SystemExit("Writer workflow blob is not JSON.") from error
@@ -121,13 +134,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import json, os, re, subprocess
+          import json, os, re, subprocess, time
           repository = os.environ["GITHUB_REPOSITORY"]
           expected_head = os.environ.get("GITHUB_SHA", "")
           if re.fullmatch(r"[0-9a-fA-F]{40}", expected_head) is None:
               raise SystemExit("Writer SHA is invalid.")
+          deadline = time.monotonic() + 120
           def get(endpoint):
-              result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False)
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise SystemExit("Trusted default-branch rebind deadline elapsed.")
+              try:
+                  result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False, timeout=min(20, remaining))
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit("Trusted default-branch rebind timed out.") from error
+              if time.monotonic() > deadline:
+                  raise SystemExit("Trusted default-branch rebind deadline elapsed.")
               if result.returncode != 0:
                   raise SystemExit("Unable to rebind trusted default branch.")
               try:
@@ -200,5 +222,7 @@ jobs:
           GOVERNANCE_CONTINUATION_INDEX: ${{ inputs.continuation_index }}
           GOVERNANCE_TERMINAL_ORDER_NUMBERS: ${{ inputs.terminal_order_numbers }}
           GOVERNANCE_COMPLETED_WRITER_RUN_IDS: ${{ inputs.completed_writer_run_ids }}
+          GOVERNANCE_TERMINAL_DEADLINE_EPOCH: ${{ inputs.terminal_deadline_epoch }}
+          GOVERNANCE_TERMINAL_DEADLINE_REQUIRED: 'true'
           KRR_GOVERNANCE_APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
         run: python3 scripts/review/pr_governance_status_writer.py

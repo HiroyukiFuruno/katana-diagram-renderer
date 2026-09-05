@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import hashlib
+import multiprocessing
+import os
+import queue
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -75,6 +80,118 @@ def no_issues_review(
     }
 
 
+def _shared_ledger_worker(
+    snapshot_path: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[object, ...]],
+    operations: int,
+) -> None:
+    """Exercise creation and reservation through a separate verifier process."""
+
+    try:
+        if not start.wait(5):
+            raise RuntimeError("shared ledger start barrier timed out")
+        ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(snapshot_path)
+        consumed = 0
+        for operation in range(operations):
+            reservation = ledger.reserve()
+            cost = 1 + operation % 2
+            ledger.settle(reservation, cost)
+            consumed += cost
+        results.put(("ok", consumed))
+    except BaseException as error:
+        results.put(("error", type(error).__name__, str(error)))
+
+
+def _shared_ledger_lease_worker(
+    snapshot_path: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[object, ...]],
+) -> None:
+    """Reserve once to model one high-quota verifier process without settling."""
+
+    try:
+        if not start.wait(10):
+            raise RuntimeError("shared ledger start barrier timed out")
+        ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(snapshot_path)
+        results.put(("reserved", ledger.reserve()))
+    except ValueError as error:
+        if "budget is exhausted" in str(error):
+            results.put(("exhausted",))
+        else:
+            results.put(("error", type(error).__name__, str(error)))
+    except BaseException as error:
+        results.put(("error", type(error).__name__, str(error)))
+
+
+def _paused_shared_ledger_creator(
+    snapshot_path: str,
+    initialized: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[object, ...]],
+) -> None:
+    """Pause after O_EXCL + LOCK_EX and before the creator writes its first byte."""
+
+    original_write = subject._SharedGraphQLLedger._write
+
+    def paused_write(
+        ledger: subject._SharedGraphQLLedger,
+        descriptor: int,
+        state: dict[str, object],
+    ) -> None:
+        initialized.set()
+        if not release.wait(5):
+            raise RuntimeError("creator release barrier timed out")
+        original_write(ledger, descriptor, state)
+
+    try:
+        with patch.object(subject._SharedGraphQLLedger, "_write", paused_write):
+            subject._SharedGraphQLLedger.from_open_pull_snapshot(snapshot_path)
+        results.put(("creator", "ok"))
+    except BaseException as error:
+        results.put(("creator", type(error).__name__, str(error)))
+
+
+def _initializing_shared_ledger_peer(
+    snapshot_path: str,
+    blocked: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[object, ...]],
+) -> None:
+    """Report the exact nonblocking flock contention before retrying normally."""
+
+    original_flock = subject.fcntl.flock
+
+    def observing_flock(descriptor: int, operation: int) -> None:
+        try:
+            original_flock(descriptor, operation)
+        except BlockingIOError:
+            if operation & fcntl.LOCK_NB:
+                blocked.set()
+            raise
+
+    try:
+        with patch.object(subject.fcntl, "flock", side_effect=observing_flock):
+            subject._SharedGraphQLLedger.from_open_pull_snapshot(snapshot_path)
+        results.put(("peer", "ok"))
+    except BaseException as error:
+        results.put(("peer", type(error).__name__, str(error)))
+
+
+def _hold_shared_ledger_lock(
+    ledger_path: str,
+    acquired: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    descriptor = os.open(ledger_path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        acquired.set()
+        release.wait(5)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def successful_state() -> tuple[
     dict[str, object],
     list[dict[str, object]],
@@ -130,6 +247,30 @@ def successful_state() -> tuple[
 
 def current_canonical_closer() -> list[dict[str, object]]:
     return [{"number": 72, "isDraft": True, "body": "Closes #64"}]
+
+
+def rate_limited(
+    payload: dict[str, object], *, remaining: int = 4_500, cost: int = 1
+) -> dict[str, object]:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise AssertionError("GraphQL fixture data must be an object")
+    data["rateLimit"] = {
+        "cost": cost,
+        "remaining": remaining,
+        "resetAt": "2026-08-29T04:00:00Z",
+    }
+    return payload
+
+
+def rest_rate_limited(
+    *, remaining: int = 4_500, limit: int = 5_000, reset: int = 1_800_000_000
+) -> dict[str, object]:
+    return {
+        "resources": {
+            "core": {"limit": limit, "remaining": remaining, "reset": reset}
+        }
+    }
 
 
 class VerifyPrReadyTest(unittest.TestCase):
@@ -1122,6 +1263,33 @@ class VerifyPrReadyTest(unittest.TestCase):
                 [71, 72],
             )
 
+    def test_open_pull_requests_fails_closed_when_initial_page_changes_at_race_fence(self) -> None:
+        def payload(number: int) -> dict[str, object]:
+            return {
+                "data": {"repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [{
+                            "number": number,
+                            "isDraft": True,
+                            "body": "Closes #64",
+                            "baseRefName": "master",
+                            "headRefOid": f"{number:040x}",
+                            "headRepository": {"nameWithOwner": "owner/repo"},
+                        }],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }},
+            }
+
+        with patch.object(
+            subject,
+            "_gh_json",
+            side_effect=[rate_limited(payload(72)), rate_limited(payload(73))],
+        ):
+            with self.assertRaisesRegex(ValueError, "open pull requests changed"):
+                subject._open_pull_requests("owner/repo")
+
     def test_open_pull_requests_fails_closed_on_malformed_response(self) -> None:
         malformed = {
             "data": {
@@ -1243,6 +1411,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "duplicate governed head SHA"):
                 subject._open_pull_requests("owner/repo")
         query = gh_json.call_args.args[3]
+        self.assertIn("rateLimit { cost remaining resetAt }", query)
         self.assertIn("defaultBranchRef { name }", query)
         self.assertIn("baseRefName headRefOid", query)
         self.assertIn("headRepository { nameWithOwner }", query)
@@ -1579,8 +1748,9 @@ class VerifyPrReadyTest(unittest.TestCase):
                 [],
             )
         arguments = gh_json.call_args.args
-        self.assertIn("--paginate", arguments)
-        self.assertIn("--slurp", arguments)
+        self.assertNotIn("--paginate", arguments)
+        self.assertNotIn("--slurp", arguments)
+        self.assertIn("page=1", arguments[-1])
         self.assertIn("app_id=7", arguments[-1])
 
     def test_app_bound_required_context_rejects_unbound_or_malformed_producer(self) -> None:
@@ -1767,7 +1937,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             nonlocal check_run_calls
             if arguments[:2] == ("pr", "view"):
                 return pull_request
-            if arguments[:2] == ("api", "--paginate") and "check-runs?" in arguments[-1]:
+            if arguments[:1] == ("api",) and "check-runs?" in arguments[-1]:
                 check_run_calls += 1
                 return [{"check_runs": [producer]}]
             raise AssertionError(f"unexpected gh call: {arguments}")
@@ -2176,7 +2346,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 "created_at": "2026-08-29T03:00:00Z",
                 "user": {"login": "reviewer"},
             }
-            for index in range(1, 31)
+            for index in range(1, 101)
         ]
         all_comments = filler + [
             {
@@ -2204,12 +2374,12 @@ class VerifyPrReadyTest(unittest.TestCase):
         def gh_json(*arguments: str) -> object:
             if arguments[:2] == ("pr", "view"):
                 return pull_request
-            if arguments[:2] == ("api", "repos/owner/repo/issues/72/comments"):
-                if "--paginate" in arguments or any("page=2" in arg for arg in arguments):
-                    return all_comments
-                return filler
+            if arguments[0] == "api" and arguments[1].startswith(
+                "repos/owner/repo/issues/72/comments"
+            ):
+                return filler if "page=1&" in arguments[-1] else all_comments[100:]
             if arguments[0:2] == ("api", "graphql"):
-                return {
+                return rate_limited({
                     "data": {
                         "repository": {
                             "pullRequest": {
@@ -2235,7 +2405,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                             }
                         }
                     }
-                }
+                })
             raise AssertionError(f"unexpected gh call: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
@@ -2251,7 +2421,9 @@ class VerifyPrReadyTest(unittest.TestCase):
         def gh_json(*arguments: str) -> object:
             if arguments[:2] == ("pr", "view"):
                 return pull_request
-            if arguments[:2] == ("api", "repos/owner/repo/issues/72/comments"):
+            if arguments[0] == "api" and arguments[1].startswith(
+                "repos/owner/repo/issues/72/comments"
+            ):
                 return comments
             if arguments[0:2] == ("api", "graphql"):
                 query = next((arg for arg in arguments if "reviews" in arg), "")
@@ -2270,7 +2442,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                             }
                             for _ in range(100)
                         ]
-                        return {
+                        return rate_limited({
                             "data": {
                                 "repository": {
                                     "pullRequest": {
@@ -2284,8 +2456,8 @@ class VerifyPrReadyTest(unittest.TestCase):
                                     }
                                 }
                             }
-                        }
-                    return {
+                        })
+                    return rate_limited({
                         "data": {
                             "repository": {
                                 "pullRequest": {
@@ -2309,8 +2481,8 @@ class VerifyPrReadyTest(unittest.TestCase):
                                 }
                             }
                         }
-                    }
-                return {
+                    })
+                return rate_limited({
                     "data": {
                         "repository": {
                             "pullRequest": {
@@ -2333,7 +2505,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                             }
                         }
                     }
-                }
+                })
             raise AssertionError(f"unexpected gh call: {arguments}")
 
         with patch.object(subject, "_gh_json", side_effect=gh_json), patch.object(
@@ -2342,8 +2514,834 @@ class VerifyPrReadyTest(unittest.TestCase):
         ):
             self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
+    def test_outer_review_connections_accept_the_page_boundary(self) -> None:
+        for connection_name, reader in (
+            ("reviews", subject._reviews),
+            ("reviewThreads", subject._review_threads),
+        ):
+            with self.subTest(connection=connection_name):
+                calls: list[tuple[str, ...]] = []
+
+                def gh_json(*arguments: str) -> object:
+                    calls.append(arguments)
+                    page_number = 1 if not any(
+                        argument.startswith("cursor=") for argument in arguments
+                    ) else len(calls)
+                    if connection_name == "reviews":
+                        nodes: list[dict[str, object]] = [{"id": page_number}]
+                    else:
+                        nodes = [
+                            {
+                                "id": f"thread-{page_number}",
+                                "isResolved": True,
+                                "comments": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                            }
+                        ]
+                    return rate_limited(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        connection_name: {
+                                            "nodes": nodes,
+                                            "pageInfo": {
+                                                "hasNextPage": page_number
+                                                < subject._MAX_REVIEW_CONNECTION_PAGES,
+                                                "endCursor": f"cursor-{page_number}",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        # race fence の再読も実リクエストなので、接続のページは
+                        # 初回と同じでも server remaining は通算で減少させる。
+                        remaining=subject._GRAPHQL_REVIEW_BUDGET - len(calls),
+                        cost=page_number % 3 + 1,
+                    )
+
+                with patch.object(subject, "_gh_json", side_effect=gh_json):
+                    values = reader("owner/repo", 72)
+
+                self.assertEqual(
+                    len(values), subject._MAX_REVIEW_CONNECTION_PAGES
+                )
+                self.assertEqual(
+                    len(calls), subject._MAX_REVIEW_CONNECTION_PAGES + 1
+                )
+
+    def test_outer_review_connections_refuse_a_cursor_after_the_page_boundary(self) -> None:
+        for connection_name, reader in (
+            ("reviews", subject._reviews),
+            ("reviewThreads", subject._review_threads),
+        ):
+            with self.subTest(connection=connection_name):
+                calls: list[tuple[str, ...]] = []
+
+                def gh_json(*arguments: str) -> object:
+                    calls.append(arguments)
+                    page_number = 1 if not any(
+                        argument.startswith("cursor=") for argument in arguments
+                    ) else len(calls)
+                    nodes: list[dict[str, object]] = (
+                        [{"id": page_number}]
+                        if connection_name == "reviews"
+                        else [
+                            {
+                                "id": f"thread-{page_number}",
+                                "isResolved": True,
+                                "comments": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                            }
+                        ]
+                    )
+                    return rate_limited(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        connection_name: {
+                                            "nodes": nodes,
+                                            "pageInfo": {
+                                                "hasNextPage": True,
+                                                "endCursor": f"cursor-{page_number}",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        remaining=subject._GRAPHQL_REVIEW_BUDGET - page_number,
+                    )
+
+                with patch.object(subject, "_gh_json", side_effect=gh_json):
+                    with self.assertRaisesRegex(ValueError, "outer page limit"):
+                        reader("owner/repo", 72)
+
+                self.assertEqual(
+                    len(calls), subject._MAX_REVIEW_CONNECTION_PAGES
+                )
+
+    def test_outer_review_connections_reject_a_raced_invalid_second_cursor(self) -> None:
+        for connection_name, reader in (
+            ("reviews", subject._reviews),
+            ("reviewThreads", subject._review_threads),
+        ):
+            with self.subTest(connection=connection_name):
+                def page(end_cursor: object, has_next_page: bool) -> dict[str, object]:
+                    nodes: list[dict[str, object]] = (
+                        [{"id": 1}]
+                        if connection_name == "reviews"
+                        else [
+                            {
+                                "id": "thread-1",
+                                "isResolved": True,
+                                "comments": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                            }
+                        ]
+                    )
+                    return rate_limited(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        connection_name: {
+                                            "nodes": nodes,
+                                            "pageInfo": {
+                                                "hasNextPage": has_next_page,
+                                                "endCursor": end_cursor,
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    )
+
+                with patch.object(
+                    subject,
+                    "_gh_json",
+                    side_effect=[page("cursor-1", True), page(None, True)],
+                ) as request:
+                    with self.assertRaisesRegex(TypeError, "endCursor"):
+                        reader("owner/repo", 72)
+                self.assertEqual(request.call_count, 2)
+
+    def test_reviews_fails_closed_when_initial_page_changes_at_race_fence(self) -> None:
+        first = rate_limited({
+            "data": {"repository": {"pullRequest": {"reviews": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}
+        })
+        changed = rate_limited(deepcopy(first))
+        changed["data"]["repository"]["pullRequest"]["reviews"]["nodes"] = [
+            {"id": "replacement"}
+        ]  # type: ignore[index]
+        with patch.object(subject, "_gh_json", side_effect=[first, changed]):
+            with self.assertRaisesRegex(ValueError, "reviews changed"):
+                subject._reviews("owner/repo", 72)
+
+    def test_review_threads_fails_closed_when_initial_page_changes_at_race_fence(self) -> None:
+        first = rate_limited({
+            "data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}
+        })
+        changed = rate_limited(deepcopy(first))
+        changed["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = [
+            {"id": "replacement"}
+        ]  # type: ignore[index]
+        with patch.object(subject, "_gh_json", side_effect=[first, changed]):
+            with self.assertRaisesRegex(ValueError, "reviewThreads changed"):
+                subject._review_threads("owner/repo", 72)
+
+    def test_nested_comments_fail_closed_when_initial_page_changes_at_race_fence(self) -> None:
+        first = rate_limited({
+            "data": {"node": {"__typename": "PullRequestReviewThread", "comments": {
+                "nodes": [{"author": {"login": "reviewer"}}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}
+        })
+        changed = rate_limited(deepcopy(first))
+        changed["data"]["node"]["comments"]["nodes"] = []  # type: ignore[index]
+        with patch.object(subject, "_gh_json", side_effect=[first, changed]):
+            with self.assertRaisesRegex(ValueError, "comments changed"):
+                subject._review_thread_comments("thread-1", "initial-cursor")
+
+    def test_rest_pages_fail_closed_when_initial_page_changes_at_race_fence(self) -> None:
+        first = [{"id": 1}]
+        changed = [{"id": 2}]
+        with patch.object(subject, "_gh_json", side_effect=[first, changed]):
+            with self.assertRaisesRegex(ValueError, "REST page changed"):
+                subject._paginated_api_array("repos/owner/repo/issues/72/comments")
+
+    def test_review_graphql_page_cap_fits_the_all_writer_budget(self) -> None:
+        review_pages = 2 * subject._MAX_REVIEW_CONNECTION_PAGES
+        bounded_review_points = subject._MAX_ALL_WRITER_TARGETS * review_pages
+        self.assertEqual(bounded_review_points, 3_000)
+        nested_overflow_points = subject._MAX_ALL_WRITER_TARGETS * (
+            review_pages + subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+        )
+        self.assertEqual(nested_overflow_points, 4_500)
+        self.assertGreater(
+            nested_overflow_points,
+            subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR,
+        )
+        self.assertLessEqual(
+            bounded_review_points
+            + subject._GRAPHQL_OTHER_WORK_RESERVE
+            + subject._GRAPHQL_OPERATIONAL_HEADROOM,
+            subject._GRAPHQL_REVIEW_BUDGET,
+        )
+
+    def test_graphql_server_budget_accumulates_nested_overflow_across_150_verifiers(self) -> None:
+        """The real reader path stops before the shared server floor is spent."""
+
+        server_remaining = subject._GRAPHQL_REVIEW_BUDGET
+        server_requests = 0
+        violations: list[tuple[int, int]] = []
+        process_phase = {"reviews": 0, "threads": 0}
+
+        def server(*arguments: str) -> object:
+            nonlocal server_remaining, server_requests
+            query = next(argument for argument in arguments if argument.startswith("query="))
+            if "reviews(first: 100" in query:
+                process_phase["reviews"] += 1
+                page = process_phase["reviews"]
+                connection = {
+                    "nodes": [{"id": f"review-{page}"}],
+                    "pageInfo": {
+                        "hasNextPage": page < subject._MAX_REVIEW_CONNECTION_PAGES,
+                        "endCursor": f"reviews-{page}",
+                    },
+                }
+            elif "node(id: $threadId)" in query:
+                connection = {
+                    "nodes": [{"author": {"login": "reviewer"}}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+                payload = rate_limited(
+                    {"data": {"node": {
+                        "__typename": "PullRequestReviewThread",
+                        "comments": connection,
+                    }}},
+                    remaining=server_remaining - 1,
+                )
+                if server_remaining - 1 < subject._GRAPHQL_REMAINING_FLOOR:
+                    violations.append((server_remaining, 1))
+                server_remaining -= 1
+                server_requests += 1
+                return payload
+            else:
+                process_phase["threads"] += 1
+                page = process_phase["threads"]
+                connection = {
+                    "nodes": [
+                        {
+                            "id": "thread-1",
+                            "isResolved": True,
+                            "comments": {
+                                "nodes": [{"author": {"login": "reviewer"}}],
+                                "pageInfo": {
+                                    "hasNextPage": page == 1,
+                                    "endCursor": "comments-1" if page == 1 else None,
+                                },
+                            },
+                        }
+                    ] if page == 1 else [],
+                    "pageInfo": {
+                        "hasNextPage": page < subject._MAX_REVIEW_CONNECTION_PAGES,
+                        "endCursor": f"threads-{page}",
+                    },
+                }
+            if server_remaining - 1 < subject._GRAPHQL_REMAINING_FLOOR:
+                violations.append((server_remaining, 1))
+            server_remaining -= 1
+            server_requests += 1
+            return rate_limited(
+                {"data": {"repository": {"pullRequest": {
+                    "reviews" if "reviews(first: 100" in query else "reviewThreads": connection
+                }}}},
+                remaining=server_remaining,
+            )
+
+        failed_process: int | None = None
+        with patch.object(subject, "_gh_json", side_effect=server):
+            for process in range(1, subject._MAX_ALL_WRITER_TARGETS + 1):
+                process_phase["reviews"] = 0
+                process_phase["threads"] = 0
+                budget = subject._GraphQLBudget()
+                try:
+                    subject._reviews("owner/repo", process, budget=budget)
+                    subject._review_threads("owner/repo", process, budget=budget)
+                except ValueError:
+                    failed_process = process
+                    break
+
+        self.assertIsNotNone(failed_process)
+        self.assertLess(failed_process, subject._MAX_ALL_WRITER_TARGETS)
+        self.assertGreaterEqual(server_remaining, subject._GRAPHQL_REMAINING_FLOOR)
+        self.assertEqual(violations, [])
+        self.assertLessEqual(
+            subject._GRAPHQL_REVIEW_BUDGET - server_remaining,
+            subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR,
+        )
+        self.assertLess(server_requests, subject._MAX_ALL_WRITER_TARGETS * 30)
+
+    def test_paginated_rest_response_rejects_page_and_item_overflow(self) -> None:
+        full_page = [{"id": number} for number in range(subject._MAX_REST_PAGE_ITEMS)]
+        with patch.object(
+            subject,
+            "_gh_json",
+            side_effect=[full_page for _ in range(subject._MAX_REST_PAGES)],
+        ) as request:
+            with self.assertRaisesRegex(ValueError, "page limit"):
+                subject._paginated_api_array("repos/owner/repo/issues/72/comments")
+        self.assertEqual(request.call_count, subject._MAX_REST_PAGES)
+
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[[] for _ in range(subject._MAX_REST_PAGES + 1)],
+        ):
+            with self.assertRaisesRegex(ValueError, "page limit"):
+                subject._paginated_api_array("repos/owner/repo/issues/72/comments")
+
+        oversized_page = [{"id": number} for number in range(subject._MAX_REST_PAGE_ITEMS + 1)]
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[oversized_page],
+        ):
+            with self.assertRaisesRegex(ValueError, "item limit"):
+                subject._paginated_api_array("repos/owner/repo/issues/72/comments")
+        with patch.object(
+            subject,
+            "_gh_json",
+            return_value=[
+                {"id": number} for number in range(subject._MAX_REST_ITEMS + 1)
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "item limit"):
+                subject._paginated_api_array("repos/owner/repo/issues/72/comments")
+
+    def test_paginated_rest_object_response_rejects_page_and_item_overflow(self) -> None:
+        with self.assertRaisesRegex(ValueError, "page limit"):
+            subject._bounded_rest_object_pages(
+                [{} for _ in range(subject._MAX_REST_PAGES + 1)],
+                label="check-runs",
+                item_key="check_runs",
+            )
+
+    def test_production_rest_readers_do_not_use_eager_cli_pagination(self) -> None:
+        source = (Path(__file__).parent / "verify_pr_ready.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('"--paginate"', source)
+        self.assertNotIn('"--slurp"', source)
+        with self.assertRaisesRegex(ValueError, "item limit"):
+            subject._bounded_rest_object_pages(
+                [{"check_runs": [{} for _ in range(subject._MAX_REST_PAGE_ITEMS + 1)]}],
+                label="check-runs",
+                item_key="check_runs",
+            )
+
+    def test_graphql_rate_limit_metadata_is_required_and_strict(self) -> None:
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviews": {
+                            "nodes": [],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(subject, "_gh_json", return_value=payload):
+            with self.assertRaisesRegex(TypeError, "rateLimit"):
+                subject._reviews("owner/repo", 72)
+
+        for field, value, error_type in (
+            ("cost", 0, TypeError),
+            ("cost", subject._GRAPHQL_MAX_QUERY_COST + 1, ValueError),
+            ("remaining", -1, TypeError),
+            ("resetAt", "not-a-timestamp", TypeError),
+        ):
+            with self.subTest(field=field):
+                invalid = rate_limited(deepcopy(payload), remaining=4_500)
+                rate_limit = invalid["data"]["rateLimit"]
+                assert isinstance(rate_limit, dict)
+                rate_limit[field] = value
+                with patch.object(subject, "_gh_json", return_value=invalid):
+                    with self.assertRaisesRegex(error_type, "rateLimit"):
+                        subject._reviews("owner/repo", 72)
+
+        below_floor = rate_limited(deepcopy(payload), remaining=subject._GRAPHQL_REMAINING_FLOOR - 1)
+        with patch.object(subject, "_gh_json", return_value=below_floor):
+            with self.assertRaisesRegex(ValueError, "reserved floor"):
+                subject._reviews("owner/repo", 72)
+
+    def test_graphql_budget_uses_reported_cost_before_follow_up(self) -> None:
+        budget = subject._GraphQLBudget()
+        first = rate_limited({"data": {}}, cost=11, remaining=4_489)
+        second = rate_limited({"data": {}}, cost=97, remaining=4_392)
+        budget.observe(first)
+        budget.before_request()
+        budget.observe(second)
+        self.assertEqual(budget.max_cost, 97)
+        self.assertEqual(budget.remaining, 4_392)
+
+        exhausted = rate_limited(
+            {"data": {}},
+            cost=1,
+            remaining=subject._GRAPHQL_REMAINING_FLOOR,
+        )
+        budget.observe(exhausted)
+        with self.assertRaisesRegex(ValueError, "next query"):
+            budget.before_request()
+
+    def test_graphql_budget_caps_a_high_server_remaining_to_the_local_lease(self) -> None:
+        budget = subject._GraphQLBudget()
+        budget.observe(rate_limited({"data": {}}, remaining=10_000))
+        self.assertEqual(budget.remaining, subject._GRAPHQL_REVIEW_BUDGET)
+        budget.observe(rate_limited({"data": {}}, remaining=9_999))
+        self.assertEqual(budget.remaining, subject._GRAPHQL_REVIEW_BUDGET - 1)
+
+        # server 側の大きな残量を、verifier の有限な local lease へ拡張しない。
+        consumed = 0
+        while True:
+            try:
+                budget.consume()
+            except ValueError:
+                break
+            consumed += 1
+
+        self.assertLessEqual(
+            consumed,
+            subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR,
+        )
+        assert budget.remaining is not None
+        self.assertGreaterEqual(budget.remaining, subject._GRAPHQL_REMAINING_FLOOR)
+
+    def test_shared_graphql_ledger_bounds_150_verifiers_despite_high_server_quota(self) -> None:
+        """Separate verifier processes share one 4,500-point lease, not 150 leases."""
+        maximum = subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR
+        server_remaining = 10_000
+        consumed = 0
+        rejected = 0
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            for verifier in range(subject._MAX_ALL_WRITER_TARGETS):
+                ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+                for reread in range(30):
+                    try:
+                        reservation = ledger.reserve()
+                    except ValueError:
+                        rejected += 1
+                        break
+                    cost = 2 if (verifier + reread) % 2 else 1
+                    ledger.settle(reservation, cost)
+                    consumed += cost
+                    server_remaining -= cost
+                if rejected:
+                    continue
+        self.assertGreater(rejected, 0)
+        self.assertLessEqual(consumed, maximum)
+        self.assertGreaterEqual(server_remaining, 10_000 - maximum)
+
+    def test_shared_graphql_ledger_caps_150_real_verifier_processes_at_3000(self) -> None:
+        """A server quota of 10,000 cannot turn 150 verifier leases into 15,000 points."""
+
+        maximum = subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            start = context.Event()
+            results = context.Queue()
+            workers = [
+                context.Process(
+                    target=_shared_ledger_lease_worker,
+                    args=(str(snapshot), start, results),
+                )
+                for _ in range(subject._MAX_ALL_WRITER_TARGETS)
+            ]
+            for worker in workers:
+                worker.start()
+            start.set()
+            for worker in workers:
+                worker.join(15)
+                self.assertEqual(worker.exitcode, 0)
+            outcomes: list[tuple[object, ...]] = []
+            for _ in workers:
+                try:
+                    outcomes.append(results.get(timeout=5))
+                except queue.Empty as error:
+                    self.fail(f"shared ledger worker did not report: {error}")
+            self.assertFalse(
+                [outcome for outcome in outcomes if outcome[0] == "error"], outcomes
+            )
+            self.assertEqual(
+                sum(outcome[0] == "reserved" for outcome in outcomes),
+                maximum // subject._GRAPHQL_MAX_QUERY_COST,
+            )
+            self.assertEqual(
+                sum(outcome[0] == "exhausted" for outcome in outcomes),
+                subject._MAX_ALL_WRITER_TARGETS - maximum // subject._GRAPHQL_MAX_QUERY_COST,
+            )
+            ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+            self.assertEqual(ledger._update(lambda state: state["spent"]), maximum)
+
+    def test_shared_graphql_ledger_serializes_real_process_creation_and_reservations(self) -> None:
+        """An empty O_EXCL inode is never observable as a malformed ledger by peers."""
+
+        maximum = subject._GRAPHQL_REVIEW_BUDGET - subject._GRAPHQL_REMAINING_FLOOR
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            start = context.Event()
+            results = context.Queue()
+            workers = [
+                context.Process(
+                    target=_shared_ledger_worker,
+                    args=(str(snapshot), start, results, 30),
+                )
+                for _ in range(12)
+            ]
+            for worker in workers:
+                worker.start()
+            start.set()
+            for worker in workers:
+                worker.join(10)
+                self.assertEqual(worker.exitcode, 0)
+            outcomes: list[tuple[object, ...]] = []
+            for _ in workers:
+                try:
+                    outcomes.append(results.get(timeout=5))
+                except queue.Empty as error:
+                    self.fail(f"shared ledger worker did not report: {error}")
+            self.assertTrue(all(outcome[0] == "ok" for outcome in outcomes), outcomes)
+            self.assertLessEqual(sum(int(outcome[1]) for outcome in outcomes), maximum)
+
+    def test_shared_graphql_ledger_waits_for_a_locked_empty_creator_inode(self) -> None:
+        """A peer retries the creation window instead of rejecting the empty inode."""
+
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            initialized = context.Event()
+            blocked = context.Event()
+            release = context.Event()
+            results = context.Queue()
+            creator = context.Process(
+                target=_paused_shared_ledger_creator,
+                args=(str(snapshot), initialized, release, results),
+            )
+            creator.start()
+            self.assertTrue(initialized.wait(5))
+            peer = context.Process(
+                target=_initializing_shared_ledger_peer,
+                args=(str(snapshot), blocked, results),
+            )
+            peer.start()
+            self.assertTrue(blocked.wait(5))
+            release.set()
+            for worker in (creator, peer):
+                worker.join(5)
+                self.assertEqual(worker.exitcode, 0)
+            outcomes = [results.get(timeout=5), results.get(timeout=5)]
+            self.assertCountEqual(outcomes, [("creator", "ok"), ("peer", "ok")])
+
+    def test_shared_graphql_ledger_rejects_malformed_rollback_and_concurrent_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+            reservation = ledger.reserve()
+            with self.assertRaisesRegex(ValueError, "query cost"):
+                ledger.settle(reservation, subject._GRAPHQL_MAX_QUERY_COST + 1)
+            self.assertEqual(ledger._update(lambda state: state["spent"]), 100)
+
+            context = multiprocessing.get_context("fork")
+            acquired = context.Event()
+            release = context.Event()
+            holder = context.Process(
+                target=_hold_shared_ledger_lock,
+                args=(str(ledger.path), acquired, release),
+            )
+            holder.start()
+            try:
+                self.assertTrue(acquired.wait(5))
+                with patch.object(subject._SharedGraphQLLedger, "_LOCK_WAIT_SECONDS", 0.02):
+                    with self.assertRaisesRegex(ValueError, "lock wait elapsed"):
+                        ledger.reserve()
+            finally:
+                release.set()
+                holder.join(5)
+                self.assertEqual(holder.exitcode, 0)
+
+            ledger.path.write_text("{}", encoding="utf-8")
+            os.chmod(ledger.path, 0o600)
+            with self.assertRaisesRegex(ValueError, "malformed|schema"):
+                subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+
+    def test_graphql_preflight_and_reread_settle_the_active_shared_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+            previous_budget = subject._ACTIVE_GRAPHQL_BUDGET
+            previous_ledger = subject._ACTIVE_SHARED_GRAPHQL_LEDGER
+            subject._ACTIVE_GRAPHQL_BUDGET = None
+            subject._ACTIVE_SHARED_GRAPHQL_LEDGER = ledger
+
+            def response(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                if arguments[1:3] == ["api", "graphql"]:
+                    payload = rate_limited({"data": {}}, remaining=10_000)
+                    return subprocess.CompletedProcess(arguments, 0, json.dumps(payload), "")
+                return subprocess.CompletedProcess(arguments, 0, "{}", "")
+
+            try:
+                with patch.object(subject.subprocess, "run", side_effect=response):
+                    subject._gh_json("pr", "view", "72", "--json", "reviews")
+                self.assertEqual(ledger._update(lambda state: state["spent"]), 2)
+            finally:
+                subject._ACTIVE_GRAPHQL_BUDGET = previous_budget
+                subject._ACTIVE_SHARED_GRAPHQL_LEDGER = previous_ledger
+
+    def test_rest_budget_accumulates_primary_cost_across_150_verifiers(self) -> None:
+        server_remaining = subject._REST_BUDGET
+        requests = 0
+        for _process in range(subject._MAX_ALL_WRITER_TARGETS):
+            budget = subject._RestBudget()
+            budget.observe_rate_limit(rest_rate_limited(remaining=server_remaining))
+            for _request in range(20):
+                try:
+                    budget.consume()
+                except ValueError:
+                    break
+                server_remaining -= 1
+                requests += 1
+            if server_remaining <= subject._REST_REMAINING_FLOOR:
+                break
+
+        self.assertEqual(requests, subject._REST_BUDGET - subject._REST_REMAINING_FLOOR)
+        self.assertEqual(server_remaining, subject._REST_REMAINING_FLOOR)
+        self.assertLessEqual(requests, subject._MAX_ALL_WRITER_TARGETS * 20)
+        exhausted = subject._RestBudget()
+        exhausted.observe_rate_limit(rest_rate_limited(remaining=server_remaining))
+        with self.assertRaisesRegex(ValueError, "next request"):
+            exhausted.before_request()
+
+    def test_rest_budget_rejects_malformed_or_low_rate_limit(self) -> None:
+        budget = subject._RestBudget()
+        for payload in (
+            {},
+            {"resources": {}},
+            {"resources": {"core": {"limit": 5_000, "remaining": 4_500}}},
+            rest_rate_limited(remaining=-1),
+            rest_rate_limited(limit=0),
+            rest_rate_limited(reset=0),
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(TypeError):
+                    budget.observe_rate_limit(payload)
+
+        budget.observe_rate_limit(
+            rest_rate_limited(remaining=subject._REST_REMAINING_FLOOR)
+        )
+        with self.assertRaisesRegex(ValueError, "next request"):
+            budget.before_request()
+
+    def test_gh_json_bootstraps_and_charges_rest_budget_but_excludes_rate_limit(self) -> None:
+        subject._ACTIVE_REST_BUDGET = None
+        self.addCleanup(setattr, subject, "_ACTIVE_REST_BUDGET", None)
+        responses = [
+            subprocess.CompletedProcess(
+                ["gh"], 0, json.dumps(rest_rate_limited()), ""
+            ),
+            subprocess.CompletedProcess(["gh"], 0, '{"ok":true}', ""),
+        ]
+        with patch.object(subject.subprocess, "run", side_effect=responses) as run:
+            self.assertEqual(subject._gh_json("api", "repos/owner/repo/issues/72"), {"ok": True})
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["gh", "api", "rate_limit"])
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["gh", "api", "repos/owner/repo/issues/72"],
+        )
+        assert subject._ACTIVE_REST_BUDGET is not None
+        self.assertEqual(
+            subject._ACTIVE_REST_BUDGET.remaining, subject._REST_BUDGET - 1
+        )
+
+    def test_gh_json_preflights_and_charges_graphql_backed_pr_view(self) -> None:
+        subject._ACTIVE_GRAPHQL_BUDGET = None
+        self.addCleanup(setattr, subject, "_ACTIVE_GRAPHQL_BUDGET", None)
+        pull = {"baseRefOid": "c" * 40, "headRefOid": "a" * 40}
+        responses = [
+            subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                json.dumps(rate_limited({"data": {}}, remaining=10_000)),
+                "",
+            ),
+            subprocess.CompletedProcess(["gh"], 0, json.dumps(pull), ""),
+        ]
+        with patch.object(subject.subprocess, "run", side_effect=responses) as run:
+            self.assertEqual(
+                subject._gh_json(
+                    "pr",
+                    "view",
+                    "72",
+                    "--repo",
+                    "owner/repo",
+                    "--json",
+                    "baseRefOid,headRefOid",
+                ),
+                pull,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        preflight_args = run.call_args_list[0].args[0]
+        self.assertEqual(preflight_args[:2], ["gh", "api"])
+        self.assertIn("rateLimit", preflight_args[4])
+        self.assertEqual(run.call_args_list[1].args[0][:3], ["gh", "pr", "view"])
+        assert subject._ACTIVE_GRAPHQL_BUDGET is not None
+        self.assertEqual(subject._ACTIVE_GRAPHQL_BUDGET.remaining, 4_499)
+
+    def test_repo_view_is_also_preflighted_and_charged(self) -> None:
+        subject._ACTIVE_GRAPHQL_BUDGET = None
+        self.addCleanup(setattr, subject, "_ACTIVE_GRAPHQL_BUDGET", None)
+        responses = [
+            subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                json.dumps(rate_limited({"data": {}}, remaining=4_499)),
+                "",
+            ),
+            subprocess.CompletedProcess(
+                ["gh"], 0, '{"nameWithOwner":"owner/repo"}', ""
+            ),
+        ]
+        with patch.object(subject.subprocess, "run", side_effect=responses) as run:
+            self.assertEqual(subject._repository_name(None), "owner/repo")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][2], "graphql")
+        self.assertEqual(run.call_args_list[1].args[0][:3], ["gh", "repo", "view"])
+        assert subject._ACTIVE_GRAPHQL_BUDGET is not None
+        self.assertEqual(subject._ACTIVE_GRAPHQL_BUDGET.remaining, 4_498)
+
+    def test_open_pull_requests_graphql_query_includes_rate_limit_contract(self) -> None:
+        subject._ACTIVE_GRAPHQL_BUDGET = None
+        self.addCleanup(setattr, subject, "_ACTIVE_GRAPHQL_BUDGET", None)
+        open_pulls = {
+            "data": {
+                "repository": {
+                    "defaultBranchRef": {"name": "master"},
+                    "pullRequests": {
+                        "nodes": [],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+        responses = [
+            subprocess.CompletedProcess(
+                ["gh"],
+                0,
+                json.dumps(rate_limited({"data": {}}, remaining=4_499)),
+                "",
+            ),
+            subprocess.CompletedProcess(
+                ["gh"], 0, json.dumps(rate_limited(open_pulls, remaining=4_498)), ""
+            ),
+            subprocess.CompletedProcess(
+                ["gh"], 0, json.dumps(rate_limited(open_pulls, remaining=4_497)), ""
+            ),
+        ]
+        with patch.object(subject.subprocess, "run", side_effect=responses) as run:
+            self.assertEqual(subject._open_pull_requests("owner/repo"), [])
+        self.assertEqual(run.call_count, 3)
+        query = run.call_args_list[1].args[0][4]
+        self.assertIn("rateLimit { cost remaining resetAt }", query)
+
     def test_reads_author_reply_past_first_review_thread_comment_page(self) -> None:
-        initial_page = {
+        initial_page = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2369,8 +3367,8 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        reply_page = {
+        })
+        reply_page = rate_limited({
             "data": {
                 "node": {
                     "__typename": "PullRequestReviewThread",
@@ -2380,7 +3378,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                     },
                 }
             }
-        }
+        })
 
         def gh_json(*arguments: str) -> object:
             query = next(argument for argument in arguments if argument.startswith("query="))
@@ -2403,7 +3401,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
 
     def test_review_thread_comment_cursor_is_distinct_from_threads_cursor(self) -> None:
-        first_threads_page = {
+        first_threads_page = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2417,8 +3415,8 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        second_threads_page = {
+        })
+        second_threads_page = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2441,8 +3439,8 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        comment_page = {
+        })
+        comment_page = rate_limited({
             "data": {
                 "node": {
                     "__typename": "PullRequestReviewThread",
@@ -2452,7 +3450,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                     },
                 }
             }
-        }
+        })
         calls: list[tuple[str, ...]] = []
 
         def gh_json(*arguments: str) -> object:
@@ -2473,7 +3471,7 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         self.assertEqual(threads[0]["id"], "thread-2")
         self.assertEqual(len(threads[0]["comments"]), 1)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 5)
 
     def test_fails_closed_when_review_thread_comment_cursor_is_invalid(self) -> None:
         for name, page_info in (
@@ -2483,20 +3481,20 @@ class VerifyPrReadyTest(unittest.TestCase):
             ("non-boolean", {"hasNextPage": None, "endCursor": None}),
         ):
             with self.subTest(name=name):
-                payload = {
+                payload = rate_limited({
                     "data": {
                         "node": {
                             "__typename": "PullRequestReviewThread",
                             "comments": {"nodes": [], "pageInfo": page_info},
                         }
                     }
-                }
+                })
                 with patch.object(subject, "_gh_json", return_value=payload):
                     with self.assertRaisesRegex(TypeError, "review thread comments"):
                         subject._review_thread_comments("thread-1", "initial-cursor")
 
     def test_fails_closed_when_review_thread_comment_cursor_repeats(self) -> None:
-        payload = {
+        payload = rate_limited({
             "data": {
                 "node": {
                     "__typename": "PullRequestReviewThread",
@@ -2506,7 +3504,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                     },
                 }
             }
-        }
+        })
         with patch.object(subject, "_gh_json", return_value=payload):
             with self.assertRaisesRegex(TypeError, "endCursor"):
                 subject._review_thread_comments("thread-1", "again")
@@ -2516,8 +3514,8 @@ class VerifyPrReadyTest(unittest.TestCase):
 
         def gh_json(*arguments: str) -> object:
             calls.append(arguments)
-            page_number = len(calls)
-            return {
+            page_number = 1 if "commentsCursor=initial-cursor" in arguments else len(calls)
+            return rate_limited({
                 "data": {
                     "node": {
                         "__typename": "PullRequestReviewThread",
@@ -2533,7 +3531,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                         },
                     }
                 }
-            }
+            }, remaining=4_500 - len(calls))
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             comments = subject._review_thread_comments("thread-1", "initial-cursor")
@@ -2542,7 +3540,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             len(comments), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
         )
         self.assertEqual(
-            len(calls), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES
+            len(calls), subject._MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES + 1
         )
 
     def test_rejects_review_thread_comments_beyond_follow_up_limit(self) -> None:
@@ -2551,7 +3549,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         def gh_json(*arguments: str) -> object:
             calls.append(arguments)
             page_number = len(calls)
-            return {
+            return rate_limited({
                 "data": {
                     "node": {
                         "__typename": "PullRequestReviewThread",
@@ -2564,7 +3562,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                         },
                     }
                 }
-            }
+            }, remaining=4_500 - page_number)
 
         with patch.object(subject, "_gh_json", side_effect=gh_json):
             with self.assertRaisesRegex(ValueError, "follow-up page limit"):
@@ -2575,7 +3573,7 @@ class VerifyPrReadyTest(unittest.TestCase):
         )
 
     def test_fails_closed_when_review_thread_comment_request_fails(self) -> None:
-        initial_page = {
+        initial_page = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2598,14 +3596,14 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
+        })
         failure = subprocess.CalledProcessError(1, ["gh", "api", "graphql"])
         with patch.object(subject, "_gh_json", side_effect=[initial_page, failure]):
             with self.assertRaises(subprocess.CalledProcessError):
                 subject._review_threads("owner/repo", 72)
 
     def test_fails_closed_when_review_thread_cursor_repeats(self) -> None:
-        payload = {
+        payload = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2616,13 +3614,13 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
+        })
         with patch.object(subject, "_gh_json", return_value=payload):
             with self.assertRaisesRegex(TypeError, "endCursor"):
                 subject._review_threads("owner/repo", 72)
 
     def test_fails_closed_when_review_cursor_repeats(self) -> None:
-        payload = {
+        payload = rate_limited({
             "data": {
                 "repository": {
                     "pullRequest": {
@@ -2633,7 +3631,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                     }
                 }
             }
-        }
+        })
         with patch.object(subject, "_gh_json", return_value=payload):
             with self.assertRaisesRegex(TypeError, "endCursor"):
                 subject._reviews("owner/repo", 72)
@@ -3913,7 +4911,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
                 endpoint,
                 f"repos/{self.repository}/actions/workflows/"
                 f"pr-governance-review-events.yml/runs?event={event_name}"
-                f"&head_sha={self.head}&per_page=100",
+                f"&head_sha={self.head}&per_page=100&page=1",
             )
 
     def test_governance_check_rejects_mismatched_source_run_identity(self) -> None:

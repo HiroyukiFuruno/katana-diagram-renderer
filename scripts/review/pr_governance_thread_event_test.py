@@ -22,6 +22,58 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         self.assertNotIn("pull_request_review_thread:", self.sensor)
         self.assertNotIn("pull_request_review_thread", self.writer)
 
+    def test_out_of_scope_prs_are_skipped_before_the_polling_job(self) -> None:
+        """The sensor scope must exactly match the dispatcher's local default-base domain."""
+
+        self.assertNotRegex(
+            self.sensor,
+            r"(?ms)^  review-latch:\n.*?^    if:",
+        )
+        reject = re.search(
+            r"(?ms)^      - name: Reject out-of-scope PR\n(?P<body>.*?)(?=^      - name: |\Z)",
+            self.sensor,
+        )
+        self.assertIsNotNone(reject)
+        assert reject is not None
+        reject_condition = re.search(r"(?m)^        if: (?P<value>.+)$", reject.group("body"))
+        self.assertIsNotNone(reject_condition)
+        assert reject_condition is not None
+        for clause in (
+            "github.event.pull_request.draft == false",
+            "github.event.pull_request.base.repo.full_name == github.repository",
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            "github.event.pull_request.base.ref == github.event.repository.default_branch",
+        ):
+            self.assertIn(clause.replace(" == ", " != "), reject_condition.group("value"))
+        self.assertIn("||", reject_condition.group("value"))
+        self.assertIn("exit 1", reject.group("body"))
+        rerun_step = re.search(
+            r"(?ms)^      - name: Reject sensor reruns\n(?P<body>.*?)(?=^      - name: |\Z)",
+            self.sensor,
+        )
+        self.assertIsNotNone(rerun_step)
+        assert rerun_step is not None
+        self.assertRegex(rerun_step.group("body"), r'\[\[ "\$\{RUN_ATTEMPT\}" != 1 \]\]')
+        await_step = re.search(
+            r"(?ms)^      - name: Await matching trusted governance Check Run\n(?P<body>.*?)(?=^      - name: |\Z)",
+            self.sensor,
+        )
+        self.assertIsNotNone(await_step)
+        assert await_step is not None
+        await_condition = re.search(r"(?m)^        if: (?P<value>.+)$", await_step.group("body"))
+        self.assertIsNotNone(await_condition)
+        assert await_condition is not None
+        self.assertIn("github.run_attempt == 1", await_condition.group("value"))
+        for clause in (
+            "github.event.pull_request.draft == false",
+            "github.event.pull_request.base.repo.full_name == github.repository",
+            "github.event.pull_request.head.repo.full_name == github.repository",
+            "github.event.pull_request.base.ref == github.event.repository.default_branch",
+        ):
+            self.assertIn(clause, await_condition.group("value"))
+        self.assertIn("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", self.sensor)
+        self.assertIn("or pr_base_ref != default_branch", self.sensor)
+
     def test_all_supported_review_sensor_events_are_discovered_and_bound(self) -> None:
         for event in ("pull_request", "pull_request_review", "pull_request_review_comment"):
             self.assertIn(f'"{event}"', self.writer)
@@ -51,6 +103,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
                 "PR_NUMBER": "72",
                 "PR_BASE_SHA": "B" * 40,
                 "PR_BASE_REF": "master",
+                "DEFAULT_BRANCH": "master",
                 "SOURCE_RUN_ID": "17",
                 "CHECK_APP_ID": "4766933",
                 "POLL_INTERVAL_SECONDS": "60",
@@ -122,12 +175,18 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         self.assertIn("max_reconciliation_heads = 600", self.sensor)
         self.assertIn("check_write_pace_seconds = 8.1", self.sensor)
         self.assertIn("max_latch_timeout_seconds = 5400", self.sensor)
-        self.assertIn("max_latch_api_reads = 200", self.sensor)
+        self.assertIn("max_latch_api_reads = 300", self.sensor)
         self.assertNotIn('"--paginate"', self.sensor)
-        self.assertIn("def check_run_page(page: int)", self.sensor)
-        self.assertIn("check_run_page(2)", self.sensor)
+        self.assertIn("def check_run_page(", self.sensor)
+        self.assertIn("check_run_page(2, terminal_page=True)", self.sensor)
+        self.assertIn("Trusted governance Check Run response changed during pagination.", self.sensor)
+        self.assertIn("terminal_page: bool = False", self.sensor)
+        self.assertIn("timeout=20", self.sensor)
+        self.assertIn("except subprocess.TimeoutExpired:", self.sensor)
+        self.assertEqual(self.sensor.count("subprocess.run("), 1)
+        self.assertIn('rel="next"', self.sensor)
         self.assertEqual(600 * 8.1, 4860)
-        self.assertLessEqual((1 + (5400 + 60 - 1) // 60) * 2 + 3, 200)
+        self.assertLessEqual((1 + (5400 + 60 - 1) // 60) * 3 + 3, 300)
 
     def test_sensor_revalidation_rejects_wrong_source_head_pr_repo_and_writer_run(self) -> None:
         """A completed Check Run cannot bypass the sensor/writer generation fences."""
@@ -143,6 +202,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
                 "PR_NUMBER": "72",
                 "PR_BASE_SHA": base,
                 "PR_BASE_REF": "master",
+                "DEFAULT_BRANCH": "master",
                 "SOURCE_RUN_ID": "17",
                 "CHECK_APP_ID": "4766933",
                 "POLL_INTERVAL_SECONDS": "60",
@@ -223,6 +283,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
                 "PR_NUMBER": "72",
                 "PR_BASE_SHA": base,
                 "PR_BASE_REF": "master",
+                "DEFAULT_BRANCH": "master",
                 "SOURCE_RUN_ID": "17",
                 "CHECK_APP_ID": "4766933",
                 "POLL_INTERVAL_SECONDS": "60",
@@ -251,24 +312,42 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             total: int,
             *,
             first_ids: list[int] | None = None,
+            anchor_ids: list[int] | None = None,
             second_ids: list[int] | None = None,
             second_total: int | None = None,
             second_failure: bool = False,
+            link_overflow: bool = False,
+            timeout_page: int | None = None,
         ) -> tuple[object, list[list[str]]]:
             first = first_ids if first_ids is not None else list(range(1, min(total, 100) + 1))
+            anchor = anchor_ids if anchor_ids is not None else first
             second = second_ids if second_ids is not None else list(range(101, total + 1))
             calls: list[list[str]] = []
+            page_calls: dict[int, int] = {1: 0, 2: 0}
 
             def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(_kwargs.get("timeout"), 20)
                 calls.append(arguments)
                 endpoint = arguments[-1]
+                page = 1 if endpoint.endswith("page=1") else 2 if endpoint.endswith("page=2") else 0
+                if page == 0:
+                    raise AssertionError(f"Unexpected endpoint: {endpoint}")
+                page_calls[page] += 1
+                if timeout_page == page:
+                    raise subprocess.TimeoutExpired(arguments, 20)
+                def output(payload: object) -> str:
+                    raw = json.dumps(payload)
+                    if "--include" not in arguments:
+                        return raw
+                    link = 'Link: <https://api.github.com/next>; rel="next"\n' if link_overflow else ""
+                    return f"HTTP/2 200\n{link}\n{raw}"
                 if endpoint.endswith("page=1"):
-                    return subprocess.CompletedProcess(arguments, 0, json.dumps({"total_count": total, "check_runs": [{"id": value} for value in first]}), "")
+                    values = first if page_calls[1] == 1 else anchor
+                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total, "check_runs": [{"id": value} for value in values]}), "")
                 if endpoint.endswith("page=2"):
                     if second_failure:
                         return subprocess.CompletedProcess(arguments, 1, "", "denied")
-                    return subprocess.CompletedProcess(arguments, 0, json.dumps({"total_count": total if second_total is None else second_total, "check_runs": [{"id": value} for value in second]}), "")
-                raise AssertionError(f"Unexpected endpoint: {endpoint}")
+                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total if second_total is None else second_total, "check_runs": [{"id": value} for value in second]}), "")
 
             assert callable(reader)
             with patch.object(subprocess, "run", side_effect=fake_run):
@@ -277,13 +356,15 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
                 except SystemExit as error:
                     return error, calls
 
-        for total, expected_calls in ((100, 1), (101, 2), (200, 2)):
+        for total, expected_calls in ((100, 2), (101, 3), (200, 3)):
             with self.subTest(total=total):
                 result, calls = run_case(total)
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), total)
                 self.assertEqual(len(calls), expected_calls)
                 self.assertTrue(all("--paginate" not in arguments for arguments in calls))
+                self.assertTrue(all(arguments[-1].endswith(("page=1", "page=2")) for arguments in calls))
+                self.assertTrue(all(arguments.count("--include") <= 1 for arguments in calls))
 
         result, calls = run_case(201)
         self.assertIsInstance(result, SystemExit)
@@ -302,6 +383,22 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
         result, calls = run_case(101, second_ids=[100])
+        self.assertIsInstance(result, SystemExit)
+        self.assertEqual(len(calls), 2)
+
+        result, calls = run_case(101, anchor_ids=list(range(1, 100)))
+        self.assertIsInstance(result, SystemExit)
+        self.assertEqual(len(calls), 3)
+
+        result, calls = run_case(101, anchor_ids=list(range(2, 102)))
+        self.assertIsInstance(result, SystemExit)
+        self.assertEqual(len(calls), 3)
+
+        result, calls = run_case(101, link_overflow=True)
+        self.assertIsInstance(result, SystemExit)
+        self.assertEqual(len(calls), 2)
+
+        result, calls = run_case(101, timeout_page=2)
         self.assertIsInstance(result, SystemExit)
         self.assertEqual(len(calls), 2)
 

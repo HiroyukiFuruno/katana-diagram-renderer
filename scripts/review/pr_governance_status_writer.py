@@ -13,10 +13,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,9 +37,23 @@ CHECK_NAME = "KRR / PR governance (trusted check)"
 CHECK_EXTERNAL_PREFIX = "krr-governance/v1/"
 CHECK_WRITE_INTERVAL_SECONDS = 8.1
 # Four continuation writers share the App installation rate limit with their
-# registration and terminal polling.  21.5 seconds keeps the combined rolling
+# registration and terminal polling.  20.5 seconds keeps each 150-write
+# continuation inside the terminal window after bounded registration,
+# bootstrap, and initial-evidence work.
 # hour below the 4,500-request operational ceiling.
-ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS = 21.5
+ALL_TERMINAL_CHECK_WRITE_INTERVAL_SECONDS = 20.5
+# Every ``gh api`` child is bounded independently.  Initial evidence also uses
+# a shared monotonic deadline so a sequence of individually successful slow
+# reads cannot consume the terminal writer's await reserve.
+GITHUB_API_TIMEOUT_SECONDS = 20.0
+INITIAL_EVIDENCE_DEADLINE_SECONDS = 180.0
+# The dispatched workflow has two default-token bootstrap/rebind phases,
+# checkout, and two App-token creations before this script starts.  Reserve
+# their realistic 120s upper bound separately from initial evidence, with a
+# final 30s scheduler margin: 120 + 180 + 30 <= 330 seconds.  The first
+# paced PATCH is already included in the 150-write interval below.
+TERMINAL_WRITER_STARTUP_RESERVE_SECONDS = 120.0
+TERMINAL_AWAIT_STARTUP_AND_EVIDENCE_RESERVE_SECONDS = 330.0
 DISPATCHER_NAME = "PR governance dispatcher"
 DISPATCHER_PATH = ".github/workflows/pr-governance.yml"
 WRITER_WORKFLOW_PATH = ".github/workflows/pr-governance-status-writer.yml"
@@ -56,10 +72,25 @@ DISPATCHER_TERMINAL_CONCLUSIONS = frozenset({
 })
 MAX_DISPATCHER_FENCE_RUNS = 100
 # A terminal continuation handles at most 150 PRs.  Every sensor/CI listing is
-# restricted by the immutable current PR head and must fit in one response,
+# restricted by the immutable current PR head and a small bounded page chain,
 # rather than paging arbitrary retained workflow history with the App token.
 MAX_EVIDENCE_TARGETS = 150
-MAX_EVIDENCE_RUNS_PER_QUERY = 100
+# GitHub returns at most 100 workflow runs per REST page.  Keep a separate
+# aggregate bound so an exact-head query can safely consume a small number of
+# pages without turning retained run history into an unbounded read loop or
+# installation-rate exhaustion denial of service.
+MAX_EVIDENCE_RUNS_PER_PAGE = 100
+MAX_EVIDENCE_RUNS_PER_QUERY = 300
+# Open-pull and Check Run pagination is bounded independently of evidence
+# pagination.  Six 100-item pages cover the repository's 600-item contract;
+# a full sixth page fails closed instead of issuing an unbounded seventh read.
+MAX_SHARED_SNAPSHOT_PAGES = 6
+# The repository workflow token is limited to 1,000 REST reads/hour.  A
+# 150-head slice spends 903 of them on CI pages/fences, workflow IDs, and the
+# sensor's page-1 anchor.  Move page 2 for only this bounded prefix (never
+# data-dependent selection) to retain 47 reads of headroom while lowering the
+# shared App bucket's worst rolling window.
+MAX_DEFAULT_INITIAL_SENSOR_PAGE_2_HEADS = 50
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 BODY_SHA256 = re.compile(r"[0-9a-f]{64}")
 NUMBER = re.compile(r"[1-9][0-9]*")
@@ -71,6 +102,66 @@ _bound_check_ids_by_number: dict[int, int] = {}
 # or otherwise untrusted observations never enter this cache.
 _nonreconciling_dispatcher_generations: dict[int, DispatcherGeneration] = {}
 _INVALID_REPOSITORY_IDENTITY = object()
+_active_initial_evidence_deadline: float | None = None
+_terminal_deadline_monotonic: float | None = None
+
+
+def _cleanup_snapshot_ledger(snapshot_path: str) -> None:
+    """Remove only the ledger belonging to an unchanged private snapshot."""
+    snapshot = Path(snapshot_path)
+    try:
+        snapshot_stat = snapshot.stat()
+        parent_stat = snapshot.parent.stat()
+        if (
+            snapshot.is_symlink() or not stat.S_ISREG(snapshot_stat.st_mode)
+            or snapshot_stat.st_uid != os.getuid() or snapshot_stat.st_nlink != 1
+            or stat.S_IMODE(snapshot_stat.st_mode) != 0o600
+            or parent_stat.st_uid != os.getuid()
+            or stat.S_IMODE(parent_stat.st_mode) & 0o077
+        ):
+            raise GovernanceError("Snapshot cleanup boundary is invalid.")
+        snapshot_sha = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+        ledger = Path(str(snapshot) + ".krr-graphql-ledger-v1")
+        try:
+            ledger_stat = ledger.lstat()
+        except FileNotFoundError:
+            return
+        if (
+            stat.S_ISLNK(ledger_stat.st_mode) or not stat.S_ISREG(ledger_stat.st_mode)
+            or ledger_stat.st_uid != os.getuid() or ledger_stat.st_nlink != 1
+            or stat.S_IMODE(ledger_stat.st_mode) != 0o600
+        ):
+            raise GovernanceError("Snapshot ledger cleanup identity is invalid.")
+        try:
+            state = json.loads(ledger.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise GovernanceError("Snapshot ledger cleanup state is malformed.") from error
+        if not isinstance(state, dict) or state.get("snapshot_sha256") != snapshot_sha:
+            raise GovernanceError("Snapshot ledger cleanup identity is invalid.")
+        current_snapshot = snapshot.stat()
+        current_ledger = ledger.lstat()
+        if (
+            (current_snapshot.st_dev, current_snapshot.st_ino, current_snapshot.st_mtime_ns)
+            != (snapshot_stat.st_dev, snapshot_stat.st_ino, snapshot_stat.st_mtime_ns)
+            or (current_ledger.st_dev, current_ledger.st_ino, current_ledger.st_mtime_ns)
+            != (ledger_stat.st_dev, ledger_stat.st_ino, ledger_stat.st_mtime_ns)
+        ):
+            raise GovernanceError("Snapshot cleanup path was replaced.")
+        ledger.unlink()
+    except OSError as error:
+        raise GovernanceError("Snapshot ledger cleanup failed.") from error
+
+
+@contextmanager
+def _snapshot_file() -> Any:
+    with tempfile.TemporaryDirectory() as directory:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".json", dir=directory
+        ) as source:
+            try:
+                yield source
+            finally:
+                _cleanup_snapshot_ledger(source.name)
 
 
 class GovernanceError(RuntimeError):
@@ -108,7 +199,11 @@ def read_environment(*, default_token: bool = False) -> dict[str, str]:
     return {"GH_TOKEN": token, "PATH": os.environ["PATH"]}
 
 
-def command(arguments: list[str], *, check_write: bool = False, default_token: bool = False) -> str:
+def command(
+    arguments: list[str], *, check_write: bool = False, default_token: bool = False,
+    deadline: float | None = None,
+) -> str:
+    """Run one bounded GitHub API request without allowing a stalled child."""
     environment = os.environ.copy()
     if check_write:
         token = environment.get("CHECK_WRITE_TOKEN", "")
@@ -118,10 +213,23 @@ def command(arguments: list[str], *, check_write: bool = False, default_token: b
         environment = {"GH_TOKEN": token, "PATH": environment["PATH"]}
     else:
         environment = read_environment(default_token=default_token)
-    result = subprocess.run(
-        ["gh", "api", *arguments], capture_output=True, text=True,
-        check=False, env=environment,
-    )
+    deadlines = [value for value in (deadline, _active_initial_evidence_deadline, _terminal_deadline_monotonic) if value is not None]
+    effective_deadline = min(deadlines) if deadlines else None
+    timeout = GITHUB_API_TIMEOUT_SECONDS
+    if effective_deadline is not None:
+        remaining = effective_deadline - time.monotonic()
+        if remaining <= 0:
+            raise GovernanceError("Governance terminal deadline exceeded.")
+        timeout = min(timeout, remaining)
+    try:
+        result = subprocess.run(
+            ["gh", "api", *arguments], capture_output=True, text=True,
+            check=False, env=environment, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GovernanceError("GitHub API request timed out.") from error
+    if effective_deadline is not None and time.monotonic() > effective_deadline:
+        raise GovernanceError("Governance terminal deadline exceeded.")
     if result.returncode != 0:
         raise GovernanceError("GitHub API request failed.")
     return result.stdout
@@ -134,26 +242,71 @@ def api_json(endpoint: str, *, default_token: bool = False) -> Any:
         raise GovernanceError("GitHub API response is not JSON.") from error
 
 
-def pages(endpoint: str, *, default_token: bool = False) -> list[list[dict[str, Any]]]:
+def _page_endpoint(endpoint: str, page: int) -> str:
+    if not isinstance(endpoint, str) or not endpoint or "page" in parse_qs(urlparse(endpoint).query) or page < 1:
+        raise GovernanceError("GitHub pagination endpoint is invalid.")
+    return f"{endpoint}{'&' if '?' in endpoint else '?'}page={page}"
+
+
+def _included_page(endpoint: str, *, default_token: bool) -> tuple[Any, bool]:
+    """Read page six with headers, so a hidden seventh page is rejected."""
+    raw = command(["--include", endpoint], default_token=default_token)
+    normalized = raw.replace("\r\n", "\n")
+    headers, separator, body = normalized.partition("\n\n")
+    if not separator or not headers.startswith("HTTP/"):
+        raise GovernanceError("GitHub pagination headers are invalid.")
     try:
-        value = json.loads(command(["--paginate", "--slurp", endpoint], default_token=default_token))
+        value = json.loads(body)
     except json.JSONDecodeError as error:
         raise GovernanceError("GitHub pagination response is not JSON.") from error
-    if not isinstance(value, list) or not all(isinstance(page, list) for page in value):
-        raise GovernanceError("GitHub pagination response is invalid.")
-    if not all(all(isinstance(item, dict) for item in page) for page in value):
-        raise GovernanceError("GitHub pagination item is invalid.")
-    return value
+    return value, re.search(r"(?im)^link:.*rel=\"next\"", headers) is not None
+
+
+def pages(endpoint: str, *, default_token: bool = False) -> list[list[dict[str, Any]]]:
+    """Read at most six list pages and fence the complete first-page value."""
+    values: list[list[dict[str, Any]]] = []
+    for page_number in range(1, MAX_SHARED_SNAPSHOT_PAGES + 1):
+        page_endpoint = _page_endpoint(endpoint, page_number)
+        if page_number == MAX_SHARED_SNAPSHOT_PAGES:
+            value, has_next = _included_page(page_endpoint, default_token=default_token)
+            if has_next:
+                raise GovernanceError("GitHub pagination exceeds the fixed page window.")
+        else:
+            value = api_json(page_endpoint, default_token=default_token)
+        if not isinstance(value, list) or len(value) > MAX_EVIDENCE_RUNS_PER_PAGE or not all(isinstance(item, dict) for item in value):
+            raise GovernanceError("GitHub pagination response is invalid.")
+        values.append(value)
+        if len(value) < MAX_EVIDENCE_RUNS_PER_PAGE or page_number == MAX_SHARED_SNAPSHOT_PAGES:
+            break
+    else:
+        raise GovernanceError("GitHub pagination exceeds the fixed page window.")
+    if api_json(_page_endpoint(endpoint, 1), default_token=default_token) != values[0]:
+        raise GovernanceError("GitHub pagination first page changed.")
+    return values
 
 
 def object_pages(endpoint: str, *, default_token: bool = False) -> list[dict[str, Any]]:
-    try:
-        value = json.loads(command(["--paginate", "--slurp", endpoint], default_token=default_token))
-    except json.JSONDecodeError as error:
-        raise GovernanceError("GitHub pagination response is not JSON.") from error
-    if not isinstance(value, list) or not all(isinstance(page, dict) for page in value):
-        raise GovernanceError("GitHub pagination response is invalid.")
-    return value
+    """Read bounded Check Run object pages and fence their first page exactly."""
+    values: list[dict[str, Any]] = []
+    for page_number in range(1, MAX_SHARED_SNAPSHOT_PAGES + 1):
+        page_endpoint = _page_endpoint(endpoint, page_number)
+        if page_number == MAX_SHARED_SNAPSHOT_PAGES:
+            value, has_next = _included_page(page_endpoint, default_token=default_token)
+            if has_next:
+                raise GovernanceError("GitHub pagination exceeds the fixed page window.")
+        else:
+            value = api_json(page_endpoint, default_token=default_token)
+        runs = value.get("check_runs") if isinstance(value, dict) else None
+        if not isinstance(runs, list) or len(runs) > MAX_EVIDENCE_RUNS_PER_PAGE or not all(isinstance(item, dict) for item in runs):
+            raise GovernanceError("GitHub pagination response is invalid.")
+        values.append(value)
+        if len(runs) < MAX_EVIDENCE_RUNS_PER_PAGE or page_number == MAX_SHARED_SNAPSHOT_PAGES:
+            break
+    else:
+        raise GovernanceError("GitHub pagination exceeds the fixed page window.")
+    if api_json(_page_endpoint(endpoint, 1), default_token=default_token) != values[0]:
+        raise GovernanceError("GitHub pagination first page changed.")
+    return values
 
 
 def object_page(endpoint: str, *, default_token: bool = False) -> dict[str, Any]:
@@ -1243,23 +1396,84 @@ class PendingDecision:
     body_sha256: str
 
 
-def bounded_head_runs(endpoint: str, head: str, response_name: str) -> tuple[dict[str, Any], ...]:
-    """Read one server-filtered workflow-run page for one immutable PR head."""
-    if SHA.fullmatch(head) is None:
-        raise GovernanceError("Evidence PR head is invalid.")
-    page = object_page(endpoint)
-    runs = page.get("workflow_runs")
-    total_count = page.get("total_count")
+def _page_endpoint(endpoint: str, page: int) -> str:
+    parsed = urlparse(endpoint)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query["page"] = [str(page)]
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+
+def bounded_head_runs(
+    endpoint: str, head: str, response_name: str, *, max_runs: int = MAX_EVIDENCE_RUNS_PER_QUERY,
+    default_token: bool = False, anchor_default_token: bool = False,
+    additional_default_pages: frozenset[int] = frozenset(),
+) -> tuple[dict[str, Any], ...]:
+    """Read a bounded exact-head snapshot and fence its first page against races."""
     if (
-        not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
-        or type(total_count) is not int or total_count != len(runs)
-        or total_count > MAX_EVIDENCE_RUNS_PER_QUERY
-        or any(run.get("head_sha") != head for run in runs)
+        SHA.fullmatch(head) is None or type(max_runs) is not int or max_runs < 1
+        or not isinstance(additional_default_pages, frozenset)
+        or any(type(page) is not int or page < 1 for page in additional_default_pages)
     ):
-        # A missing filter, page cursor, or capacity overflow could hide a
-        # later rerun.  Do not select a terminal generation from it.
-        raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
-    return tuple(runs)
+        raise GovernanceError("Evidence PR head is invalid.")
+    values: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    expected_total: int | None = None
+    page_number = 1
+    while True:
+        current_endpoint = endpoint if page_number == 1 else _page_endpoint(endpoint, page_number)
+        use_default_token = (
+            default_token or (anchor_default_token and page_number == 1)
+            or page_number in additional_default_pages
+        )
+        page = object_page(current_endpoint, default_token=True) if use_default_token else object_page(current_endpoint)
+        runs = page.get("workflow_runs")
+        total_count = page.get("total_count")
+        if (
+            not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
+            or type(total_count) is not int or total_count < 0
+            or total_count > max_runs
+            or len(runs) > MAX_EVIDENCE_RUNS_PER_PAGE
+        ):
+            raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
+        if expected_total is None:
+            expected_total = total_count
+        elif total_count != expected_total:
+            # A run appearing/disappearing while following the page cursor
+            # makes the generation ordering ambiguous; retry on a later pass.
+            raise GovernanceError(f"{response_name} exact-head evidence changed during pagination.")
+        for run in runs:
+            run_id = run.get("id")
+            if (
+                run.get("head_sha") != head
+                or type(run_id) is not int or run_id < 1
+                or run_id in seen_ids
+            ):
+                raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
+            seen_ids.add(run_id)
+        values.extend(runs)
+        if len(values) > expected_total:
+            raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
+        if len(values) == expected_total:
+            # ``total_count`` alone cannot detect a same-count insertion and
+            # deletion (or page-order shift) while we follow the cursor.  A
+            # second immutable page-1 read proves the cursor's anchor has not
+            # changed; otherwise selecting a latest run is unsafe.
+            first = object_page(endpoint, default_token=True) if (default_token or anchor_default_token) else object_page(endpoint)
+            first_runs = first.get("workflow_runs") if isinstance(first, dict) else None
+            if (
+                first.get("total_count") != expected_total
+                or not isinstance(first_runs, list)
+                or len(first_runs) != min(expected_total, MAX_EVIDENCE_RUNS_PER_PAGE)
+                or any(not isinstance(run, dict) or run.get("head_sha") != head for run in first_runs)
+                or [run.get("id") for run in first_runs] != [run.get("id") for run in values[:len(first_runs)]]
+            ):
+                raise GovernanceError(f"{response_name} exact-head evidence changed during pagination.")
+            return tuple(values)
+        # Any non-final short page proves that the response did not provide a
+        # complete cursor chain for the advertised total.
+        if len(runs) != MAX_EVIDENCE_RUNS_PER_PAGE:
+            raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
+        page_number += 1
 
 
 def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -> EvidenceSnapshot:
@@ -1271,6 +1485,18 @@ def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -
         or any(type(number) is not int or number < 1 for number in target_numbers)
     ):
         raise GovernanceError("Evidence target slice is invalid.")
+    global _active_initial_evidence_deadline
+    if _active_initial_evidence_deadline is not None:
+        raise GovernanceError("Initial evidence deadline is already active.")
+    _active_initial_evidence_deadline = time.monotonic() + INITIAL_EVIDENCE_DEADLINE_SECONDS
+    try:
+        return _evidence_snapshot_with_deadline(snapshot, target_numbers)
+    finally:
+        _active_initial_evidence_deadline = None
+
+
+def _evidence_snapshot_with_deadline(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -> EvidenceSnapshot:
+    """Build initial evidence while ``command`` enforces the active deadline."""
     heads: dict[int, str] = {}
     for pull_request in snapshot.pull_requests:
         number = pull_request.get("number")
@@ -1285,24 +1511,34 @@ def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -
     # every number-to-head binding above, but read each exact head only once.
     unique_heads = tuple(dict.fromkeys(heads.values()))
 
-    # One exact-head request covers the sensor's three PR-only event kinds.
-    # Repeating a separate event query triples a terminal slice's front-loaded
-    # App reads and breaches the rolling installation budget at 150 PRs.
-    sensor_values: list[dict[str, Any]] = []
-    for head in unique_heads:
+    # The review sensor can legitimately retain three exact-head pages, while
+    # each CI generation is deliberately limited to one.  Do not coalesce
+    # these endpoints: doing so would permit a CI history larger than the
+    # initial-read contract and make its generation selection ambiguous.
+    sensor_values: dict[str, tuple[dict[str, Any], ...]] = {}
+    for index, head in enumerate(unique_heads):
         query = urlencode({"head_sha": head, "per_page": 100})
-        sensor_values.extend(bounded_head_runs(
+        sensor_values[head] = bounded_head_runs(
             f"repos/{REPOSITORY}/actions/workflows/pr-governance-review-events.yml/runs?{query}",
-            head, "Review sensor",
-        ))
+            head,
+            "Initial review sensor",
+            anchor_default_token=True,
+            additional_default_pages=(frozenset({2}) if index < MAX_DEFAULT_INITIAL_SENSOR_PAGE_2_HEADS else frozenset()),
+        )
     sensor_runs = {
-        event: tuple(run for run in sensor_values if run.get("event") == event)
+        event: tuple(
+            run for values in sensor_values.values() for run in values
+            if run.get("event") == event
+            and workflow_path_matches(run.get("path"), ".github/workflows/pr-governance-review-events.yml")
+        )
         for event in ("pull_request", "pull_request_review", "pull_request_review_comment")
     }
     workflow_ids: dict[str, int] = {}
     workflow_runs: dict[str, tuple[dict[str, Any], ...]] = {}
     for path in (".github/workflows/test-and-build.yml", ".github/workflows/release-preflight.yml"):
-        workflow = api_json(f"repos/{REPOSITORY}/actions/workflows/{path.rsplit('/', 1)[-1]}")
+        workflow = api_json(
+            f"repos/{REPOSITORY}/actions/workflows/{path.rsplit('/', 1)[-1]}", default_token=True,
+        )
         workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
         if type(workflow_id) is not int or workflow_id < 1:
             raise GovernanceError("Default-branch CI workflow ID is invalid.")
@@ -1310,7 +1546,11 @@ def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -
         for head in unique_heads:
             query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
             values.extend(bounded_head_runs(
-                f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?{query}", head, "CI generation",
+                f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?{query}",
+                head,
+                "Initial CI generation",
+                max_runs=MAX_EVIDENCE_RUNS_PER_PAGE,
+                default_token=True,
             ))
         workflow_ids[path] = workflow_id
         workflow_runs[path] = tuple(values)
@@ -1318,24 +1558,14 @@ def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -
 
 
 def final_evidence_for_pr(head: str, initial: EvidenceSnapshot) -> EvidenceSnapshot:
-    """Read every relevant current-head run through one bounded repository page."""
+    """Read every relevant current-head run through bounded repository pages."""
     if SHA.fullmatch(head) is None:
         raise GovernanceError("Final evidence head is invalid.")
-    page = object_page(
-        f"repos/{REPOSITORY}/actions/runs?" + urlencode({"head_sha": head, "per_page": 100})
+    runs = bounded_head_runs(
+        f"repos/{REPOSITORY}/actions/runs?" + urlencode({"head_sha": head, "per_page": 100}),
+        head,
+        "Final workflow-run",
     )
-    runs = page.get("workflow_runs")
-    total_count = page.get("total_count")
-    if (
-        not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
-        # APIの件数と一致する100件pageは完全とみなし、多ければ次pageが必要、
-        # 少なければ不正な証跡として拒否する。
-        or type(total_count) is not int
-        or total_count < len(runs)
-        or total_count > len(runs)
-        or any(run.get("head_sha") != head for run in runs)
-    ):
-        raise GovernanceError("Final workflow-run evidence is incomplete or mismatched.")
     sensor_runs = {
         event: tuple(
             run for run in runs
@@ -1365,6 +1595,7 @@ def generation(number: int, base: str, head: str, name: str, path: str, evidence
         query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
         run_pages = [{"workflow_runs": list(bounded_head_runs(
             f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?{query}", head, "CI generation",
+            max_runs=MAX_EVIDENCE_RUNS_PER_PAGE,
         ))}]
     else:
         workflow_id = evidence.workflow_ids.get(path)
@@ -1415,16 +1646,31 @@ def verdict(value: Generation) -> str:
 
 
 def contract(number: int, base: str, head: str, branch: str, draft: bool, snapshot_path: str) -> str:
-    issue = subprocess.run(
+    timeout = GITHUB_API_TIMEOUT_SECONDS
+    if _terminal_deadline_monotonic is not None:
+        timeout = min(timeout, _terminal_deadline_monotonic - time.monotonic())
+        if timeout <= 0:
+            raise GovernanceError("Governance terminal deadline exceeded.")
+    try:
+        issue = subprocess.run(
         [sys.executable, "scripts/hooks/verify_push_issue.py", "--pr-number", str(number),
          "--pr-base-sha", base, "--pr-head-sha", head, "--pr-branch", branch,
-         "--repository", REPOSITORY, "--trusted-default-sha", os.environ.get("GITHUB_SHA", "")], check=False, env=read_environment(),
-    )
+         "--repository", REPOSITORY, "--trusted-default-sha", os.environ.get("GITHUB_SHA", "")], check=False, env=read_environment(), timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GovernanceError("Governance contract verifier timed out.") from error
+    if _terminal_deadline_monotonic is not None and time.monotonic() > _terminal_deadline_monotonic:
+        raise GovernanceError("Governance terminal deadline exceeded.")
     if issue.returncode != 0:
         return "failure"
     if draft:
         return "pending"
-    ready = subprocess.run(
+    if _terminal_deadline_monotonic is not None:
+        timeout = min(GITHUB_API_TIMEOUT_SECONDS, _terminal_deadline_monotonic - time.monotonic())
+        if timeout <= 0:
+            raise GovernanceError("Governance terminal deadline exceeded.")
+    try:
+        ready = subprocess.run(
         [sys.executable, "scripts/review/verify_pr_ready.py", "--pr", str(number),
          "--expected-base-sha", base, "--expected-head-sha", head, "--allow-ready",
          # This writer is producing the trusted Check Run itself.  The
@@ -1432,8 +1678,12 @@ def contract(number: int, base: str, head: str, branch: str, draft: bool, snapsh
          # review evidence, but must not require this output to already be
          # completed/success while it is deliberately in_progress.
          "--exclude-trusted-governance-check", "--open-pull-snapshot", snapshot_path], check=False,
-        env=read_environment(),
-    )
+        env=read_environment(), timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GovernanceError("Governance contract verifier timed out.") from error
+    if _terminal_deadline_monotonic is not None and time.monotonic() > _terminal_deadline_monotonic:
+        raise GovernanceError("Governance terminal deadline exceeded.")
     return "success" if ready.returncode == 0 else "failure"
 
 
@@ -1562,7 +1812,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
         if defer_terminal:
             return PendingDecision(number, head, base, pending, state, description, sensor_id, current_generations, issue, body_sha256)
         terminal_count = 0
-        if state == "success":
+        if state == "success" and not defer_terminal:
             terminal_count = sensor_terminal_check_count(head, sensor_id)
             if terminal_count >= 2:
                 raise NoPostGovernanceError("Review latch already has multiple terminal statuses.")
@@ -1571,7 +1821,7 @@ def process(number: int, claimants: dict[str, frozenset[int]], snapshot_path: st
             # unambiguous.
         if check_changed_since(head, pending):
             return
-        if state == "success" and not final_closer_is_unique(number, issue, base, head, body_sha256, claimants):
+        if state == "success" and not defer_terminal and not final_closer_is_unique(number, issue, base, head, body_sha256, claimants):
             state, description = "failure", "Pull request body changed during governance revalidation."
         if os.environ.get("GITHUB_ACTIONS") == "true":
             rebind_trusted_default_writer()
@@ -1726,6 +1976,7 @@ def governance_order(snapshot: OpenSnapshot, carry: frozenset[int], priority: tu
 
 
 def main() -> int:
+    global _terminal_deadline_monotonic
     if not REPOSITORY or not SERVER_URL or not NUMBER.fullmatch(WRITER_RUN_ID):
         print("Writer runtime identity is invalid.", file=sys.stderr)
         return 1
@@ -1739,12 +1990,23 @@ def main() -> int:
     raw_terminal_batch = os.environ.get("GOVERNANCE_TERMINAL_BATCH_NUMBERS", "")
     raw_continuation_index = os.environ.get("GOVERNANCE_CONTINUATION_INDEX", "")
     raw_completed_writer_run_ids = os.environ.get("GOVERNANCE_COMPLETED_WRITER_RUN_IDS", "")
+    raw_terminal_deadline = os.environ.get("GOVERNANCE_TERMINAL_DEADLINE_EPOCH", "0")
+    _terminal_deadline_monotonic = None
     _bound_check_runs.clear()
     _bound_check_ids_by_number.clear()
     _nonreconciling_dispatcher_generations.clear()
     if not NUMBER.fullmatch(dispatcher_run_id) or scope not in {"early", "all"} or re.fullmatch(r"0|[1-9][0-9]*", preserved_writer_run_id) is None:
         print("Writer dispatch boundary is invalid.", file=sys.stderr)
         return 1
+    if scope == "all" and os.environ.get("GOVERNANCE_TERMINAL_DEADLINE_REQUIRED") == "true":
+        if re.fullmatch(r"[1-9][0-9]*", raw_terminal_deadline) is None:
+            print("Writer terminal deadline is invalid.", file=sys.stderr)
+            return 1
+        remaining = int(raw_terminal_deadline) - time.time()
+        if remaining <= 0:
+            print("Writer terminal deadline elapsed.", file=sys.stderr)
+            return 1
+        _terminal_deadline_monotonic = time.monotonic() + remaining
     try:
         decoded_targets = json.loads(raw_targets)
         decoded_preserved = json.loads(raw_preserved)
@@ -1880,14 +2142,14 @@ def main() -> int:
         return 1
     failures = 0
     # Do not make one malformed/changed PR leave other open PRs stale.
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json") as source:
+    with _snapshot_file() as source:
         json.dump(list(snapshot.pull_requests), source)
         source.flush()
         # Complete each PR before starting the next one.  Retaining every
         # decision and finalizing only after all contracts ran created an
         # avoidable window for Issue/review/CI state to become stale.
         # dispatcherは全headのpending Check Runを先に作るため、all segmentは
-        # 最大150 PATCHで完結する。all terminalの21.5秒paceは共有rolling上限を守る。
+        # 最大150 PATCHで完結する。all terminalの20.5秒paceは共有rolling上限を守る。
         # manifest欠落などで追加mutationが必要ならsegmentを成功扱いにしない。
         terminal_write_budget = 150 if scope == "all" and os.environ.get("GITHUB_ACTIONS") == "true" else (
             400 if dispatcher_source.event == "schedule" else 100

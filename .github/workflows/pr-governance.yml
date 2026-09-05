@@ -31,6 +31,9 @@ jobs:
     # lock, so such an event cannot cancel a local generation.
     if: ${{ github.run_attempt == 1 && (github.event_name != 'workflow_run' || ((github.event.workflow_run.name == 'PR governance review sensor' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review' || github.event.workflow_run.event == 'pull_request_review_comment')) || ((github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'release-preflight') && github.event.workflow_run.event == 'pull_request'))) }}
     runs-on: ubuntu-latest
+    # The serialized phases have a total 350 minute wall-clock ceiling. A
+    # timeout leaves the resolver barrier in place, so it is fail-closed.
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
@@ -41,6 +44,7 @@ jobs:
       priority: ${{ steps.scope.outputs.priority }}
       pull_request_target_noop: ${{ steps.scope.outputs.pull_request_target_noop }}
       issue_event_noop: ${{ steps.scope.outputs.issue_event_noop }}
+      root_deadline_epoch: ${{ steps.scope.outputs.root_deadline_epoch }}
     steps:
       - name: Exclude unavailable fork sources before dispatcher lock
         id: scope
@@ -64,6 +68,7 @@ jobs:
           import os
           import re
           import subprocess
+          import time
 
           repository = os.environ["GITHUB_REPOSITORY"]
           repository_valid = re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
@@ -71,6 +76,9 @@ jobs:
           repository_url = f"https://api.github.com/repos/{repository}"
           event_name = os.environ.get("EVENT_NAME", "")
           event_action = os.environ.get("EVENT_ACTION", "")
+          # Keep the complete serialized dispatcher below GitHub's six-hour
+          # job ceiling, with ten minutes reserved for terminal start margin.
+          root_deadline_epoch = int(time.time()) + 21_000
           reconcile = True
           valid = True
           pull_request_target_noop = False
@@ -84,6 +92,7 @@ jobs:
               result = subprocess.run(
                   ["gh", "api", "--hostname", "github.com", path],
                   capture_output=True, text=True, check=False,
+                  timeout=20,
               )
               if result.returncode != 0:
                   return None
@@ -94,17 +103,40 @@ jobs:
               return value if isinstance(value, dict) else None
 
           def request_pages(path):
-              result = subprocess.run(
-                  ["gh", "api", "--paginate", "--slurp", path],
-                  capture_output=True, text=True, check=False,
-              )
-              if result.returncode != 0:
+              if not isinstance(path, str) or "?" not in path:
+                  return None
+              pages = []
+              for page_number in range(1, 7):
+                  arguments = ["gh", "api", "--hostname", "github.com", f"{path}&page={page_number}"]
+                  if page_number == 6:
+                      arguments.insert(4, "--include")
+                  try:
+                      result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+                  except subprocess.TimeoutExpired:
+                      return None
+                  if result.returncode != 0:
+                      return None
+                  raw = result.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers):
+                          return None
+                  try:
+                      value = json.loads(raw)
+                  except json.JSONDecodeError:
+                      return None
+                  if not isinstance(value, list) or len(value) > 100 or not all(isinstance(item, dict) for item in value):
+                      return None
+                  pages.append(value)
+                  if len(value) < 100 or page_number == 6:
+                      break
+              anchor = subprocess.run(["gh", "api", "--hostname", "github.com", f"{path}&page=1"], capture_output=True, text=True, check=False, timeout=20)
+              if anchor.returncode != 0:
                   return None
               try:
-                  value = json.loads(result.stdout)
+                  return pages if json.loads(anchor.stdout) == pages[0] else None
               except json.JSONDecodeError:
                   return None
-              return value if isinstance(value, list) and all(isinstance(page, list) for page in value) else None
 
           def workflow_path_matches(value, expected):
               if value == expected:
@@ -660,6 +692,7 @@ jobs:
               output.write("priority=" + ("true" if priority else "false") + "\n")
               output.write("pull_request_target_noop=" + ("true" if pull_request_target_noop else "false") + "\n")
               output.write("issue_event_noop=" + ("true" if issue_event_noop else "false") + "\n")
+              output.write(f"root_deadline_epoch={root_deadline_epoch}\n")
           PY
 
       - name: Record verified pull_request_target preflight no-op
@@ -681,6 +714,7 @@ jobs:
     if: ${{ needs.preflight-workflow-run-source.outputs.reconcile == 'true' && github.run_attempt == 1 && (github.event_name != 'workflow_run' || ((github.event.workflow_run.name == 'PR governance review sensor' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_review' || github.event.workflow_run.event == 'pull_request_review_comment')) || ((github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'release-preflight') && github.event.workflow_run.event == 'pull_request'))) }}
     environment: pr-governance
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # A fully validated local CI/release signal joins the serialized lane
     # without canceling a paced scan. Other signals still preempt before
     # creating marker credentials, so contract mutations remain fail-closed.
@@ -694,6 +728,7 @@ jobs:
       default_head: ${{ steps.source.outputs.default_head }}
       reconcile: ${{ needs.preflight-workflow-run-source.outputs.reconcile }}
       priority: ${{ needs.preflight-workflow-run-source.outputs.priority }}
+      root_deadline_epoch: ${{ needs.preflight-workflow-run-source.outputs.root_deadline_epoch }}
     steps:
       - name: Bind resolver-failure barrier to trusted default workflow source
         id: source
@@ -727,8 +762,8 @@ jobs:
           source_env={"GH_TOKEN":os.environ.get("GH_TOKEN", ""),"PATH":os.environ["PATH"]}
           if not source_env["GH_TOKEN"]:
               raise SystemExit("Resolver-failure barrier source token is invalid.")
-          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env)
-          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env)
+          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
+          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
           if repository_result.returncode!=0 or reference_result.returncode!=0:
               raise SystemExit("Unable to bind resolver-failure barrier default branch source.")
           try:
@@ -737,7 +772,7 @@ jobs:
               raise SystemExit("Resolver-failure barrier default branch source is not JSON.") from error
           if current_branch!=branch or not isinstance(current_head,str) or current_head.lower()!=workflow_sha.lower():
               raise SystemExit("Resolver-failure barrier default branch source changed.")
-          blob_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={workflow_sha}"],capture_output=True,text=True,check=False,env=source_env)
+          blob_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={workflow_sha}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
           if blob_result.returncode!=0:
               raise SystemExit("Unable to bind resolver-failure barrier workflow blob.")
           try:
@@ -795,7 +830,7 @@ jobs:
           # invalidator/writer. Pace the marker Check Run as part of that
           # single App write budget rather than creating an uncounted burst.
           time.sleep(8.1)
-          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env, timeout=20)
           if created.returncode!=0:
               raise SystemExit("Unable to publish resolver-failure barrier marker.")
           try:
@@ -804,7 +839,7 @@ jobs:
               raise SystemExit("Resolver-failure barrier marker is not JSON.") from error
           if type(identifier) is not int or identifier<1 or posted.get("name")!=context or posted.get("head_sha")!=head or posted.get("external_id")!=external or posted.get("status")!="completed" or posted.get("conclusion")!="success" or posted.get("details_url")!=details or not isinstance(posted.get("app"),dict) or posted["app"].get("id")!=app_id:
               raise SystemExit("Resolver-failure barrier marker is invalid.")
-          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
           if reread.returncode!=0:
               raise SystemExit("Unable to re-read resolver-failure barrier marker.")
           try:
@@ -843,7 +878,7 @@ jobs:
               raise SystemExit("Resolver-failure barrier token is invalid.")
           admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments):
-              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0:
                   raise SystemExit("Resolver-failure barrier API request failed.")
               try:
@@ -867,7 +902,7 @@ jobs:
           def mutate(method):
               if method!="PATCH": raise SystemExit("Resolver-failure barrier activation method is invalid.")
               body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
-              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0:
                   return None
               try:
@@ -907,6 +942,7 @@ jobs:
     needs: establish-resolver-failure-barrier
     if: needs.establish-resolver-failure-barrier.outputs.reconcile == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Keep target resolution in the same generation as its barrier. A
     # non-priority CI/release source remains serialized without canceling a
     # paced reconciliation; priority sources retain preemption.
@@ -921,6 +957,7 @@ jobs:
       reconcile: ${{ steps.targets.outputs.reconcile }}
       event_targets: ${{ steps.targets.outputs.event_targets }}
       priority_targets: ${{ steps.targets.outputs.priority_targets }}
+      root_deadline_epoch: ${{ needs.establish-resolver-failure-barrier.outputs.root_deadline_epoch }}
     steps:
       - name: Resolve current open pull requests from the trusted default branch
         id: targets
@@ -977,7 +1014,7 @@ jobs:
               )
 
           def default_tip(branch):
-              response = subprocess.run(["gh", "api", f"repos/{repository}/git/ref/heads/{branch}"], capture_output=True, text=True, check=False)
+              response = subprocess.run(["gh", "api", f"repos/{repository}/git/ref/heads/{branch}"], capture_output=True, text=True, check=False, timeout=20)
               if response.returncode != 0:
                   return None
               try:
@@ -988,7 +1025,7 @@ jobs:
               return candidate if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate) else None
 
           def workflow_blob(path, ref):
-              response = subprocess.run(["gh", "api", f"repos/{repository}/contents/{path}?ref={ref}"], capture_output=True, text=True, check=False)
+              response = subprocess.run(["gh", "api", f"repos/{repository}/contents/{path}?ref={ref}"], capture_output=True, text=True, check=False, timeout=20)
               if response.returncode != 0:
                   return None
               try:
@@ -999,7 +1036,7 @@ jobs:
               return candidate if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{40}", candidate) else None
 
           def base_reaches_tip(base, tip):
-              response = subprocess.run(["gh", "api", f"repos/{repository}/compare/{base}...{tip}"], capture_output=True, text=True, check=False)
+              response = subprocess.run(["gh", "api", f"repos/{repository}/compare/{base}...{tip}"], capture_output=True, text=True, check=False, timeout=20)
               if response.returncode != 0:
                   return False
               try:
@@ -1023,6 +1060,7 @@ jobs:
               result = subprocess.run(
                   ["gh", "api", f"repos/{repository}/actions/runs/{run_id}"],
                   capture_output=True, text=True, check=False,
+                  timeout=20,
               )
               if result.returncode != 0:
                   raise SystemExit("Unable to load trusted workflow_run.")
@@ -1064,7 +1102,7 @@ jobs:
                   or source_head_repo is missing
               ):
                   raise SystemExit("workflow_run is not a trusted governance source.")
-              current = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{number}"], capture_output=True, text=True, check=False)
+              current = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{number}"], capture_output=True, text=True, check=False, timeout=20)
               if current.returncode != 0:
                   raise SystemExit("Unable to bind workflow_run current pull request.")
               try:
@@ -1111,7 +1149,7 @@ jobs:
                   head_digest = workflow_blob(expected[name][0], head["sha"])
                   tip_digest = workflow_blob(expected[name][0], tip) if tip is not None else None
                   ancestry_valid = base_reaches_tip(base["sha"], tip) if tip is not None else False
-                  final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
+                  final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False, timeout=20)
                   final_tip = default_tip(default_branch)
                   try:
                       final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
@@ -1126,18 +1164,35 @@ jobs:
                       or final_tip != tip
                   ):
                       raise SystemExit("workflow_run current default source drifted.")
-          result = subprocess.run(
-              ["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"],
-              capture_output=True, text=True, check=False,
-          )
-          if result.returncode != 0:
-              raise SystemExit("Unable to enumerate open pull requests.")
-          try:
-              pages = json.loads(result.stdout)
-          except json.JSONDecodeError as error:
-              raise SystemExit("Open pull request response is not JSON.") from error
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("Open pull request response is invalid.")
+          def pull_page(page_number):
+              arguments = ["gh", "api", f"repos/{repository}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number == 6:
+                  arguments.insert(2, "--include")
+              try:
+                  result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit("Open pull request response timed out.") from error
+              if result.returncode != 0:
+                  raise SystemExit("Unable to enumerate open pull requests.")
+              try:
+                  raw = result.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers):
+                          raise SystemExit("Open pull request response exceeds the fixed page window.")
+                  page = json.loads(raw)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Open pull request response is not JSON.") from error
+              if not isinstance(page, list) or len(page) > 100 or not all(isinstance(pull, dict) for pull in page):
+                  raise SystemExit("Open pull request response is invalid.")
+              return page
+          pages = [pull_page(1)]
+          for page_number in range(2, 7):
+              if len(pages[-1]) < 100:
+                  break
+              pages.append(pull_page(page_number))
+          if pull_page(1) != pages[0]:
+              raise SystemExit("Open pull request response first page changed.")
           # Validate all API records before narrowing to local/default-base
           # governance targets.  Foreign PRs cannot claim local Issues, but a
           # duplicate foreign record is still an invalid paginated response.
@@ -1223,7 +1278,7 @@ jobs:
               if re.fullmatch(r"[1-9][0-9]*", source_number) is None or re.fullmatch(r"[0-9a-fA-F]{40}", source_head) is None or re.fullmatch(r"[0-9a-fA-F]{40}", source_base) is None:
                   raise SystemExit("pull_request_target source is invalid.")
               source_number_value = int(source_number)
-              source_payload = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
+              source_payload = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False, timeout=20)
               if source_payload.returncode != 0:
                   raise SystemExit("Unable to bind pull_request_target source.")
               try: current_source = json.loads(source_payload.stdout)
@@ -1287,8 +1342,8 @@ jobs:
                       head_blob = workflow_blob(".github/workflows/pr-governance.yml", source_head)
                       tip_blob = workflow_blob(".github/workflows/pr-governance.yml", tip) if tip is not None else None
                       ancestry_valid = base_reaches_tip(source_base, tip) if tip is not None else False
-                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
-                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
+                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False, timeout=20)
+                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False, timeout=20)
                       final_tip = default_tip(default_branch)
                       try:
                           final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
@@ -1318,8 +1373,8 @@ jobs:
                       if current_foreign_head is None:
                           raise SystemExit("pull_request_target source head is not an explicit fork.")
                       tip = default_tip(default_branch)
-                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
-                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False)
+                      final_repository = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False, timeout=20)
+                      final_source = subprocess.run(["gh", "api", f"repos/{repository}/pulls/{source_number_value}"], capture_output=True, text=True, check=False, timeout=20)
                       final_tip = default_tip(default_branch)
                       try:
                           final_repo = json.loads(final_repository.stdout) if final_repository.returncode == 0 else None
@@ -1431,6 +1486,7 @@ jobs:
     if: needs.resolve_event.outputs.reconcile == 'true' && github.run_attempt == 1
     environment: pr-governance
     runs-on: ubuntu-latest
+    timeout-minutes: 290
     # 通常の全件走査は直列化する。一方、PR / Issue contract mutation と
     # review-sensor workflow_run はこの走査を中断して先に fail-closed
     # barrier を作る。CI / release workflow_run は通常走査のままにする。
@@ -1467,7 +1523,7 @@ jobs:
               raise SystemExit("Event target boundary is invalid.")
           if not isinstance(event_priority_targets, list) or any(type(number) is not int or number < 1 for number in event_priority_targets) or len(set(event_priority_targets)) != len(event_priority_targets) or any(number not in event_targets for number in event_priority_targets):
               raise SystemExit("Event priority target boundary is invalid.")
-          repo_result = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False)
+          repo_result = subprocess.run(["gh", "api", f"repos/{repository}"], capture_output=True, text=True, check=False, timeout=20)
           if repo_result.returncode != 0:
               raise SystemExit("Unable to load repository default branch.")
           try:
@@ -1477,7 +1533,7 @@ jobs:
               raise SystemExit("Repository response is not JSON.") from error
           if not isinstance(branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is None:
               raise SystemExit("Repository default branch is invalid.")
-          head_result = subprocess.run(["gh", "api", f"repos/{repository}/git/ref/heads/{branch}"], capture_output=True, text=True, check=False)
+          head_result = subprocess.run(["gh", "api", f"repos/{repository}/git/ref/heads/{branch}"], capture_output=True, text=True, check=False, timeout=20)
           if head_result.returncode != 0:
               raise SystemExit("Unable to load repository default head.")
           try:
@@ -1486,15 +1542,35 @@ jobs:
               raise SystemExit("Repository default head is not JSON.") from error
           if not isinstance(writer_head, str) or re.fullmatch(r"[0-9a-fA-F]{40}", writer_head) is None:
               raise SystemExit("Repository default head is invalid.")
-          result = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"], capture_output=True, text=True, check=False)
-          if result.returncode != 0:
-              raise SystemExit("Unable to enumerate current open pull requests.")
-          try:
-              pages = json.loads(result.stdout)
-          except json.JSONDecodeError as error:
-              raise SystemExit("Current open pull request response is not JSON.") from error
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("Current open pull request response is invalid.")
+          def pull_page(page_number):
+              arguments = ["gh", "api", f"repos/{repository}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number == 6:
+                  arguments.insert(2, "--include")
+              try:
+                  result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit("Current open pull request response timed out.") from error
+              if result.returncode != 0:
+                  raise SystemExit("Unable to enumerate current open pull requests.")
+              try:
+                  raw = result.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers):
+                          raise SystemExit("Current open pull request response exceeds the fixed page window.")
+                  page = json.loads(raw)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Current open pull request response is not JSON.") from error
+              if not isinstance(page, list) or len(page) > 100 or not all(isinstance(pull, dict) for pull in page):
+                  raise SystemExit("Current open pull request response is invalid.")
+              return page
+          pages = [pull_page(1)]
+          for page_number in range(2, 7):
+              if len(pages[-1]) < 100:
+                  break
+              pages.append(pull_page(page_number))
+          if pull_page(1) != pages[0]:
+              raise SystemExit("Current open pull request response first page changed.")
           seen: set[int] = set()
           targets: list[int] = []
           target_snapshots: dict[int, tuple[str, bool]] = {}
@@ -1663,13 +1739,13 @@ jobs:
           repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("DEFAULT_HEAD", ""); workflow_ref=os.environ.get("WORKFLOW_REF", ""); workflow_sha=os.environ.get("WORKFLOW_SHA", "")
           if not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or workflow_ref!=f"{repository}/.github/workflows/pr-governance.yml@refs/heads/{branch}" or workflow_sha.lower()!=head.lower(): raise SystemExit("Governance barrier workflow source is not the trusted default branch.")
           source_env={"GH_TOKEN":os.environ["GH_TOKEN"],"PATH":os.environ["PATH"]}
-          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env)
-          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env)
+          repository_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
+          reference_result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/git/ref/heads/{branch}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
           if repository_result.returncode!=0 or reference_result.returncode!=0: raise SystemExit("Unable to bind governance barrier default branch source.")
           try: current_branch=json.loads(repository_result.stdout).get("default_branch"); current_head=json.loads(reference_result.stdout).get("object",{}).get("sha")
           except json.JSONDecodeError as error: raise SystemExit("Governance barrier default branch source is not JSON.") from error
           if current_branch!=branch or not isinstance(current_head,str) or current_head.lower()!=head.lower(): raise SystemExit("Governance barrier default branch source changed.")
-          result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={head}"],capture_output=True,text=True,check=False,env=source_env)
+          result=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/contents/.github/workflows/pr-governance.yml?ref={head}"],capture_output=True,text=True,check=False,env=source_env, timeout=20)
           if result.returncode!=0: raise SystemExit("Unable to bind governance barrier workflow blob.")
           try: payload=json.loads(result.stdout); blob=payload.get("sha") if isinstance(payload,dict) else None
           except json.JSONDecodeError as error: raise SystemExit("Governance barrier workflow blob is not JSON.") from error
@@ -1724,12 +1800,12 @@ jobs:
           # dispatcher generation, so it uses the same rate budget as every
           # synchronous invalidation and terminal writer mutation.
           time.sleep(8.1)
-          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+          created=subprocess.run(["gh","api","--hostname","github.com","--method","POST",f"repos/{repository}/check-runs","-f",f"name={context}","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=completed","-f","conclusion=success","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env, timeout=20)
           if created.returncode!=0: raise SystemExit("Unable to publish affected-head barrier marker.")
           try: posted=json.loads(created.stdout); identifier=posted.get("id") if isinstance(posted,dict) else None
           except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier marker is not JSON.") from error
           if type(identifier) is not int or identifier<1 or posted.get("name")!=context or posted.get("head_sha")!=head or posted.get("external_id")!=external or posted.get("status")!="completed" or posted.get("conclusion")!="success" or posted.get("details_url")!=details or not isinstance(posted.get("app"),dict) or posted["app"].get("id")!=app_id: raise SystemExit("Affected-head barrier marker is invalid.")
-          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+          reread=subprocess.run(["gh","api","--hostname","github.com",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
           if reread.returncode!=0: raise SystemExit("Unable to re-read affected-head barrier marker.")
           try: marker=json.loads(reread.stdout)
           except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier marker re-read is not JSON.") from error
@@ -1773,7 +1849,7 @@ jobs:
           if not token: raise SystemExit("Affected-head barrier token is invalid.")
           admin_env={"GH_TOKEN":token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments):
-              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0: raise SystemExit("Affected-head barrier API request failed.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier API response is not JSON.") from error
@@ -1790,7 +1866,7 @@ jobs:
           def mutate(method):
               if method!="PATCH": raise SystemExit("Affected-head barrier activation method is invalid.")
               body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
-              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0: return None
               try: value=json.loads(result.stdout)
               except json.JSONDecodeError: return None
@@ -1872,14 +1948,14 @@ jobs:
               if delay>0: time.sleep(delay)
               write_clock[0]=time.monotonic()+8.1
               write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}
-              result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+              result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env, timeout=20)
               if result.returncode!=0: failures.extend(heads[head]); continue
               try: check=json.loads(result.stdout)
               except json.JSONDecodeError:
                   failures.extend(heads[head]); continue
               identifier=check.get("id") if isinstance(check,dict) else None
               if type(identifier) is not int or identifier<1 or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: failures.extend(heads[head]); continue
-              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if reread.returncode!=0: failures.extend(heads[head]); continue
               try: current=json.loads(reread.stdout)
               except json.JSONDecodeError:
@@ -1887,7 +1963,7 @@ jobs:
               if not isinstance(current,dict) or current.get("id")!=identifier or current.get("name")!="KRR / PR governance (trusted check)" or current.get("head_sha")!=head or current.get("external_id")!=external or current.get("status")!="in_progress" or current.get("conclusion") is not None or current.get("details_url")!=details or not isinstance(current.get("app"),dict) or str(current["app"].get("id"))!=app_id: failures.extend(heads[head]); continue
               posted[head]=identifier
           for entry,number in zip(snapshots,targets,strict=True):
-              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env)
+              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if result.returncode!=0: failures.append(number); continue
               try: pull=json.loads(result.stdout)
               except json.JSONDecodeError: failures.append(number); continue
@@ -1964,19 +2040,19 @@ jobs:
               delay=write_clock[0]-time.monotonic()
               if delay>0: time.sleep(delay)
               write_clock[0]=time.monotonic()+8.1
-              response=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+              response=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env, timeout=20)
               if response.returncode!=0: failures.extend(members); continue
               try: check=json.loads(response.stdout); identifier=check.get("id") if isinstance(check,dict) else None
               except json.JSONDecodeError: failures.extend(members); continue
               if type(identifier) is not int or identifier<1 or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: failures.extend(members); continue
-              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if reread.returncode!=0: failures.extend(members); continue
               try: current=json.loads(reread.stdout)
               except json.JSONDecodeError: failures.extend(members); continue
               if not isinstance(current,dict) or current.get("id")!=identifier or current.get("name")!="KRR / PR governance (trusted check)" or current.get("head_sha")!=head or current.get("external_id")!=external or current.get("status")!="in_progress" or current.get("conclusion") is not None or current.get("details_url")!=details or not isinstance(current.get("app"),dict) or str(current["app"].get("id"))!=app_id: failures.extend(members); continue
               posted[head]=identifier
           for entry,number in zip(snapshots,targets,strict=True):
-              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env)
+              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if result.returncode!=0: failures.append(number); continue
               try: pull=json.loads(result.stdout)
               except json.JSONDecodeError: failures.append(number); continue
@@ -2077,7 +2153,7 @@ jobs:
           active = {"requested", "queued", "pending", "waiting", "in_progress"}
 
           def request(arguments):
-              result = subprocess.run(["gh", "api", *arguments], capture_output=True, text=True, check=False)
+              result = subprocess.run(["gh", "api", *arguments], capture_output=True, text=True, check=False, timeout=20)
               if result.returncode != 0:
                   raise SystemExit("Unable to drain a prior governance writer.")
               return result.stdout
@@ -2108,9 +2184,43 @@ jobs:
           workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
           if type(workflow_id) is not int or workflow_id < 1:
               raise SystemExit("Governance writer workflow ID is invalid.")
-          listed = payload(["--paginate", "--slurp", f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100"])
-          if not isinstance(listed, list) or not all(isinstance(page, dict) and isinstance(page.get("workflow_runs"), list) for page in listed):
-              raise SystemExit("Governance writer run list is invalid.")
+          def writer_runs_page(page_number):
+              arguments = ["gh", "api", f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100&page={page_number}"]
+              if page_number == 6:
+                  arguments.insert(2, "--include")
+              try:
+                  result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit("Governance writer run list timed out.") from error
+              if result.returncode != 0:
+                  raise SystemExit("Unable to enumerate governance writer runs.")
+              try:
+                  raw = result.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers):
+                          raise SystemExit("Governance writer run list exceeds the fixed page window.")
+                  page = json.loads(raw)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("Governance writer run list is not JSON.") from error
+              entries = page.get("workflow_runs") if isinstance(page, dict) else None
+              total = page.get("total_count") if isinstance(page, dict) else None
+              if not isinstance(page, dict) or not isinstance(entries, list) or len(entries) > 100 or not all(isinstance(run, dict) for run in entries) or type(total) is not int or total < 0:
+                  raise SystemExit("Governance writer run list is invalid.")
+              return page
+          listed = [writer_runs_page(1)]
+          total_count = listed[0]["total_count"]
+          for page_number in range(2, 7):
+              if len(listed[-1]["workflow_runs"]) < 100:
+                  break
+              page = writer_runs_page(page_number)
+              if page["total_count"] != total_count:
+                  raise SystemExit("Governance writer run list count changed.")
+              listed.append(page)
+          if writer_runs_page(1) != listed[0]:
+              raise SystemExit("Governance writer run list first page changed.")
+          if sum(len(page["workflow_runs"]) for page in listed) != total_count:
+              raise SystemExit("Governance writer run list count is incomplete.")
 
           def validate(run):
               run_repository = run.get("repository") if isinstance(run, dict) else None
@@ -2138,7 +2248,7 @@ jobs:
           if len(set(targets)) != len(targets):
               raise SystemExit("Governance writer run list is duplicated.")
           for identifier in targets:
-              cancel = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/runs/{identifier}/cancel"], capture_output=True, text=True, check=False)
+              cancel = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/runs/{identifier}/cancel"], capture_output=True, text=True, check=False, timeout=20)
               if cancel.returncode == 0:
                   continue
               # 一覧取得からcancelの間に完了した競合は、再読でterminalを
@@ -2187,15 +2297,35 @@ jobs:
               if not isinstance(value,str) or not value.startswith(workflow_path+"@"): return False
               ref=value[len(workflow_path)+1:]
               return re.fullmatch(r"[A-Za-z0-9._/-]+",ref) is not None and ref not in {".",".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"",".",".."} for part in ref.split("/"))
-          def runs():
-              result=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100"],capture_output=True,text=True,check=False)
+          def runs_page(page_number):
+              arguments=["gh","api",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100&page={page_number}"]
+              if page_number == 6: arguments.insert(2,"--include")
+              try: result=subprocess.run(arguments,capture_output=True,text=True,check=False,timeout=20)
+              except subprocess.TimeoutExpired as error: raise SystemExit("Governance writer runs timed out.") from error
               if result.returncode != 0: raise SystemExit("Unable to enumerate governance writer runs.")
-              try: pages=json.loads(result.stdout)
+              try:
+                  raw=result.stdout
+                  if page_number == 6:
+                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("Governance writer runs exceed the fixed page window.")
+                  page=json.loads(raw)
               except json.JSONDecodeError as error: raise SystemExit("Governance writer runs are not JSON.") from error
-              if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in pages): raise SystemExit("Governance writer runs are invalid.")
-              return [run for page in pages for run in page["workflow_runs"] if isinstance(run,dict)]
+              entries=page.get("workflow_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
+              if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(run,dict) for run in entries) or type(total) is not int or total<0: raise SystemExit("Governance writer runs are invalid.")
+              return page
+          def runs():
+              pages=[runs_page(1)]; total_count=pages[0]["total_count"]
+              for page_number in range(2,7):
+                  if len(pages[-1]["workflow_runs"])<100: break
+                  page=runs_page(page_number)
+                  if page["total_count"]!=total_count: raise SystemExit("Governance writer run count changed.")
+                  pages.append(page)
+              if runs_page(1)!=pages[0]: raise SystemExit("Governance writer runs first page changed.")
+              flattened=[run for page in pages for run in page["workflow_runs"]]
+              if len(flattened)!=total_count: raise SystemExit("Governance writer run count is incomplete.")
+              return flattened
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
-          result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=early","-f",f"inputs[target_numbers]={json.dumps(targets,separators=(',', ':'))}","-f","inputs[preserved_target_numbers]=[]","-f","inputs[preserved_writer_run_id]=0","-f","inputs[check_manifest]=[]","-f","inputs[terminal_batch_numbers]=[]","-f","inputs[continuation_index]=0","-f","inputs[terminal_order_numbers]=[]","-f","inputs[completed_writer_run_ids]=[]"],capture_output=True,text=True,check=False)
+          result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=early","-f",f"inputs[target_numbers]={json.dumps(targets,separators=(',', ':'))}","-f","inputs[preserved_target_numbers]=[]","-f","inputs[preserved_writer_run_id]=0","-f","inputs[check_manifest]=[]","-f","inputs[terminal_batch_numbers]=[]","-f","inputs[continuation_index]=0","-f","inputs[terminal_order_numbers]=[]","-f","inputs[completed_writer_run_ids]=[]"],capture_output=True,text=True,check=False, timeout=20)
           if result.returncode != 0: raise SystemExit("Unable to dispatch early governance writer.")
           # Registration is asynchronous; 5s polling avoids needless
           # installation REST pressure while retaining a five-minute bound.
@@ -2244,6 +2374,7 @@ jobs:
           from urllib.parse import urlparse
           repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", "")
           if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or not re.fullmatch(r"[0-9a-fA-F]{40}",head) or not re.fullmatch(r"[1-9][0-9]*",source): raise SystemExit("Early governance writer ID is invalid.")
+          deadline=time.time()+900
           workflow_path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=early segment=0"
           def path_matches(value):
               if value == workflow_path: return True
@@ -2253,7 +2384,11 @@ jobs:
           # The early writer has at most 40 mutations.  Polling every 30s
           # bounds this wait at 15m without consuming 450 installation reads.
           for _ in range(30):
-              result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              try: result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False,timeout=min(20,remaining))
+              except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal writer read timed out.") from error
+              if time.time()>deadline: raise SystemExit("Governance terminal writer deadline elapsed.")
               if result.returncode != 0: raise SystemExit("Unable to read early governance writer.")
               try: run=json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Early governance writer is not JSON.") from error
@@ -2270,21 +2405,41 @@ jobs:
                   if not isinstance(targets,list) or not targets or any(type(number) is not int or number<1 for number in targets) or len(set(targets)) != len(targets): raise SystemExit("Early governance targets are invalid.")
                   manifest=[]
                   for number in targets:
-                      pull=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env={"GH_TOKEN":check_token,"PATH":os.environ["PATH"]})
+                      pull=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env={"GH_TOKEN":check_token,"PATH":os.environ["PATH"]}, timeout=20)
                       if pull.returncode!=0: raise SystemExit("Unable to load early governance target.")
                       try: pull_json=json.loads(pull.stdout)
                       except json.JSONDecodeError as error: raise SystemExit("Early governance target is not JSON.") from error
                       target_head=pull_json.get("head",{}).get("sha") if isinstance(pull_json,dict) and isinstance(pull_json.get("head"),dict) else None
                       if not isinstance(target_head,str) or re.fullmatch(r"[0-9a-fA-F]{40}",target_head) is None: raise SystemExit("Early governance target head is invalid.")
                       query=f"check_name=KRR%20%2F%20PR%20governance%20(trusted%20check)&app_id={app_id}&filter=all&per_page=100"
-                      checks=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/commits/{target_head}/check-runs?{query}"],capture_output=True,text=True,check=False,env={"GH_TOKEN":check_token,"PATH":os.environ["PATH"]})
-                      if checks.returncode!=0: raise SystemExit("Unable to load early governance Check Run.")
-                      try: pages=json.loads(checks.stdout)
-                      except json.JSONDecodeError as error: raise SystemExit("Early governance Check Run is not JSON.") from error
+                      def check_page(page_number):
+                          arguments=["gh","api",f"repos/{repository}/commits/{target_head}/check-runs?{query}&page={page_number}"]
+                          if page_number == 6: arguments.insert(2,"--include")
+                          try: checks=subprocess.run(arguments,capture_output=True,text=True,check=False,env={"GH_TOKEN":check_token,"PATH":os.environ["PATH"]},timeout=20)
+                          except subprocess.TimeoutExpired as error: raise SystemExit("Early governance Check Run timed out.") from error
+                          if checks.returncode!=0: raise SystemExit("Unable to load early governance Check Run.")
+                          try:
+                              raw=checks.stdout
+                              if page_number == 6:
+                                  headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                                  if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("Early governance Check Run exceeds the fixed page window.")
+                              page=json.loads(raw)
+                          except json.JSONDecodeError as error: raise SystemExit("Early governance Check Run is not JSON.") from error
+                          entries=page.get("check_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
+                          if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0: raise SystemExit("Early governance Check Run is invalid.")
+                          return page
+                      pages=[check_page(1)]; total_count=pages[0]["total_count"]
+                      for page_number in range(2,7):
+                          if len(pages[-1]["check_runs"])<100: break
+                          page=check_page(page_number)
+                          if page["total_count"]!=total_count: raise SystemExit("Early governance Check Run count changed.")
+                          pages.append(page)
+                      if check_page(1)!=pages[0]: raise SystemExit("Early governance Check Run first page changed.")
+                      check_runs=[check for page in pages for check in page["check_runs"]]
+                      if len(check_runs)!=total_count: raise SystemExit("Early governance Check Run count is incomplete.")
                       external=f"krr-governance/v1/{target_head.lower()}/writer-{identifier}"; matches=[]
-                      for page in pages if isinstance(pages,list) else []:
-                          for check in page.get("check_runs",[]) if isinstance(page,dict) and isinstance(page.get("check_runs"),list) else []:
-                              if isinstance(check,dict) and check.get("name")=="KRR / PR governance (trusted check)" and check.get("head_sha")==target_head and check.get("external_id")==external and isinstance(check.get("app"),dict) and str(check["app"].get("id"))==app_id and type(check.get("id")) is int and check["id"]>0 and check.get("status")=="completed" and check.get("conclusion")=="success": matches.append(check)
+                      for check in check_runs:
+                          if check.get("name")=="KRR / PR governance (trusted check)" and check.get("head_sha")==target_head and check.get("external_id")==external and isinstance(check.get("app"),dict) and str(check["app"].get("id"))==app_id and type(check.get("id")) is int and check["id"]>0 and check.get("status")=="completed" and check.get("conclusion")=="success": matches.append(check)
                       if len(matches)!=1: raise SystemExit("Early governance Check Run is ambiguous.")
                       details=matches[0].get("details_url")
                       expected=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{identifier}"
@@ -2374,12 +2529,12 @@ jobs:
               delay=write_clock[0]-time.monotonic()
               if delay>0: time.sleep(delay)
               write_clock[0]=time.monotonic()+8.1
-              result=subprocess.run(command,capture_output=True,text=True,check=False,env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]})
+              result=subprocess.run(command,capture_output=True,text=True,check=False,env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}, timeout=20)
               if result.returncode!=0: return None
               try: response=json.loads(result.stdout); identifier=response.get("id") if isinstance(response,dict) else None; posted=response.get("app",{}).get("id") if isinstance(response,dict) and isinstance(response.get("app"),dict) else None
               except json.JSONDecodeError: return None
               if type(identifier) is not int or identifier<1 or str(posted)!=app_id or response.get("name")!="KRR / PR governance (trusted check)" or response.get("head_sha")!=head or response.get("external_id")!=external_id or response.get("status")!="in_progress" or response.get("conclusion") is not None or response.get("details_url")!=details: return None
-              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if reread.returncode!=0: return None
               try: check=json.loads(reread.stdout)
               except json.JSONDecodeError: return None
@@ -2387,11 +2542,26 @@ jobs:
               return identifier
           def prior_carry_pending(head):
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
-              listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/commits/{head}/check-runs?{query}"],capture_output=True,text=True,check=False,env=read_env)
-              if listed.returncode!=0: return None
               try:
-                  pages=json.loads(listed.stdout)
-                  if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("check_runs"),list) for page in pages): raise ValueError
+                  def check_page(page_number):
+                      arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
+                      if page_number == 6: arguments.insert(2,"--include")
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+                      if listed.returncode!=0: raise ValueError
+                      raw=listed.stdout
+                      if page_number == 6:
+                          headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                          if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise ValueError
+                      page=json.loads(raw); entries=page.get("check_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
+                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0: raise ValueError
+                      return page
+                  pages=[check_page(1)]; total_count=pages[0]["total_count"]
+                  for page_number in range(2,7):
+                      if len(pages[-1]["check_runs"])<100: break
+                      page=check_page(page_number)
+                      if page["total_count"]!=total_count: raise ValueError
+                      pages.append(page)
+                  if check_page(1)!=pages[0] or sum(len(page["check_runs"]) for page in pages)!=total_count: raise ValueError
                   generations=[]; external_ids=set(); pattern=re.compile(rf"krr-governance/v1/{re.escape(head.lower())}/(?:dispatcher|writer)-[1-9][0-9]*$")
                   for page in pages:
                       for candidate in page["check_runs"]:
@@ -2403,7 +2573,7 @@ jobs:
                           datetime.fromisoformat(created.replace("Z","+00:00"))
                           external_ids.add(candidate_external); generations.append(candidate)
                   latest=max(generations,key=lambda item:(datetime.fromisoformat(item["created_at"].replace("Z","+00:00")),item["id"])) if generations else None
-              except (json.JSONDecodeError,ValueError,TypeError): return None
+              except (subprocess.TimeoutExpired,json.JSONDecodeError,ValueError,TypeError): return None
               base_parts=urlparse(base)
               def is_prior_dispatcher_invalidation(details):
                   if not isinstance(details,str): return False
@@ -2436,7 +2606,7 @@ jobs:
           # snapshot did not move while those immutable generations were made.
           for number in numbers:
               expected_head,expected_draft=known[number]
-              current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env)
+              current=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if current.returncode!=0:
                   failures.append(number); continue
               try:
@@ -2518,11 +2688,26 @@ jobs:
           base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}"; read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}; posted={}; failures=[]; carry_targets=[]; write_clock=[time.monotonic()+8.1]
           def prior_carry_pending(head):
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
-              listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repository}/commits/{head}/check-runs?{query}"],capture_output=True,text=True,check=False,env=read_env)
-              if listed.returncode!=0: return None
               try:
-                  pages=json.loads(listed.stdout)
-                  if not isinstance(pages,list) or not all(isinstance(page,dict) and isinstance(page.get("check_runs"),list) for page in pages): raise ValueError
+                  def check_page(page_number):
+                      arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
+                      if page_number == 6: arguments.insert(2,"--include")
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+                      if listed.returncode!=0: raise ValueError
+                      raw=listed.stdout
+                      if page_number == 6:
+                          headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                          if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise ValueError
+                      page=json.loads(raw); entries=page.get("check_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
+                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0: raise ValueError
+                      return page
+                  pages=[check_page(1)]; total_count=pages[0]["total_count"]
+                  for page_number in range(2,7):
+                      if len(pages[-1]["check_runs"])<100: break
+                      page=check_page(page_number)
+                      if page["total_count"]!=total_count: raise ValueError
+                      pages.append(page)
+                  if check_page(1)!=pages[0] or sum(len(page["check_runs"]) for page in pages)!=total_count: raise ValueError
                   pattern=re.compile(rf"krr-governance/v1/{re.escape(head.lower())}/(?:dispatcher|writer)-[1-9][0-9]*$"); generations=[]; external_ids=set()
                   for page in pages:
                       for candidate in page["check_runs"]:
@@ -2533,7 +2718,7 @@ jobs:
                           if type(identifier) is not int or identifier<1 or candidate.get("head_sha")!=head or not isinstance(external,str) or pattern.fullmatch(external) is None or not isinstance(created,str) or external in external_ids: raise ValueError
                           datetime.fromisoformat(created.replace("Z","+00:00")); external_ids.add(external); generations.append(candidate)
                   latest=max(generations,key=lambda item:(datetime.fromisoformat(item["created_at"].replace("Z","+00:00")),item["id"])) if generations else None
-              except (json.JSONDecodeError,ValueError,TypeError): return None
+              except (subprocess.TimeoutExpired,json.JSONDecodeError,ValueError,TypeError): return None
               base_parts=urlparse(base)
               if not isinstance(latest,dict) or latest.get("status")!="in_progress" or latest.get("conclusion") is not None or not isinstance(latest.get("details_url"),str): return 0
               parts=urlparse(latest["details_url"]); query_values=parse_qs(parts.query,keep_blank_values=True); run_id=parts.path.removeprefix(base_parts.path)
@@ -2546,12 +2731,12 @@ jobs:
               delay=write_clock[0]-time.monotonic()
               if delay>0: time.sleep(delay)
               write_clock[0]=time.monotonic()+8.1
-              response=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env)
+              response=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/check-runs","-f","name=KRR / PR governance (trusted check)","-f",f"head_sha={head}","-f",f"external_id={external}","-f","status=in_progress","-f",f"details_url={details}"],capture_output=True,text=True,check=False,env=write_env, timeout=20)
               if response.returncode!=0: failures.extend(members); continue
               try: check=json.loads(response.stdout); identifier=check.get("id") if isinstance(check,dict) else None
               except json.JSONDecodeError: failures.extend(members); continue
               if type(identifier) is not int or identifier<1 or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: failures.extend(members); continue
-              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env)
+              reread=subprocess.run(["gh","api",f"repos/{repository}/check-runs/{identifier}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if reread.returncode!=0: failures.extend(members); continue
               try: current=json.loads(reread.stdout)
               except json.JSONDecodeError: failures.extend(members); continue
@@ -2559,7 +2744,7 @@ jobs:
               posted[head]=identifier
               if carry_pending: carry_targets.extend(number for number in members if number not in event_target_set)
           for number,(head,draft) in known.items():
-              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env)
+              result=subprocess.run(["gh","api",f"repos/{repository}/pulls/{number}"],capture_output=True,text=True,check=False,env=read_env, timeout=20)
               if result.returncode!=0: failures.append(number); continue
               try: pull=json.loads(result.stdout); current_head=pull.get("head",{}).get("sha") if isinstance(pull,dict) and isinstance(pull.get("head"),dict) else None; current_draft=pull.get("draft") if isinstance(pull,dict) else None
               except json.JSONDecodeError: current_head=current_draft=None
@@ -2627,7 +2812,7 @@ jobs:
           if not read_token or not admin_token or read_token==admin_token: raise SystemExit("Affected-head barrier release token boundary is invalid.")
           read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; admin_env={"GH_TOKEN":admin_token,"PATH":os.environ["PATH"]}; protection_endpoint=f"repos/{repository}/branches/{branch}/protection"; status_checks_endpoint=protection_endpoint+"/required_status_checks"; contexts_endpoint=protection_endpoint+"/required_status_checks/contexts"; status_checks_url=f"https://api.github.com/{status_checks_endpoint}"; contexts_url=status_checks_url+"/contexts"
           def request(arguments, *, env, body=None):
-              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],input=body,capture_output=True,text=True,check=False,env=env)
+              result=subprocess.run(["gh","api","--hostname","github.com",*arguments],input=body,capture_output=True,text=True,check=False,env=env, timeout=20)
               if result.returncode!=0: raise SystemExit("Affected-head barrier release API request failed.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier release API response is not JSON.") from error
@@ -2643,14 +2828,14 @@ jobs:
               if len(set(result))!=len(result) or len({name for name,_ in result})!=len(result) or [name for name,_ in result]!=contexts: raise SystemExit("Affected-head barrier branch protection is invalid.")
               return required,result
           def mutate(method):
-              result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com","--method",method,contexts_endpoint,"--input","-"],input=json.dumps({"contexts":[context]},separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0: return None
               try: value=json.loads(result.stdout)
               except json.JSONDecodeError: return None
               return value if isinstance(value,list) and all(isinstance(name,str) and name for name in value) and len(set(value))==len(value) else None
           def restore(expected_required):
               body={"strict":expected_required["strict"],"checks":expected_required["checks"]}
-              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env)
+              result=subprocess.run(["gh","api","--hostname","github.com","--method","PATCH",status_checks_endpoint,"--input","-"],input=json.dumps(body,separators=(",",":")),capture_output=True,text=True,check=False,env=admin_env, timeout=20)
               if result.returncode!=0: return None
               try: value=json.loads(result.stdout)
               except json.JSONDecodeError: return None
@@ -2683,8 +2868,26 @@ jobs:
           ref_head=reference.get("object",{}).get("sha") if isinstance(reference,dict) and isinstance(reference.get("object"),dict) else None
           blob_sha=blob.get("sha") if isinstance(blob,dict) else None
           if not isinstance(repo,dict) or repo.get("default_branch")!=branch or not isinstance(ref_head,str) or ref_head.lower()!=head.lower() or not isinstance(blob_sha,str) or re.fullmatch(r"[0-9a-fA-F]{40}",blob_sha) is None: raise SystemExit("Affected-head barrier source changed before release.")
-          pages=request(["--paginate","--slurp",f"repos/{repository}/pulls?state=open&per_page=100"],env=read_env)
-          if not isinstance(pages,list) or not all(isinstance(page,list) for page in pages): raise SystemExit("Affected-head barrier current pull request response is invalid.")
+          def pull_page(page_number):
+              arguments=["gh","api","--hostname","github.com",f"repos/{repository}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number == 6: arguments.insert(4,"--include")
+              try: response=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+              except subprocess.TimeoutExpired as error: raise SystemExit("Affected-head barrier current pull request response timed out.") from error
+              if response.returncode!=0: raise SystemExit("Affected-head barrier current pull request response is unavailable.")
+              try:
+                  raw=response.stdout
+                  if page_number == 6:
+                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("Affected-head barrier current pull request response exceeds the fixed page window.")
+                  page=json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier current pull request response is not JSON.") from error
+              if not isinstance(page,list) or len(page)>100 or not all(isinstance(pull,dict) for pull in page): raise SystemExit("Affected-head barrier current pull request response is invalid.")
+              return page
+          pages=[pull_page(1)]
+          for page_number in range(2,7):
+              if len(pages[-1])<100: break
+              pages.append(pull_page(page_number))
+          if pull_page(1)!=pages[0]: raise SystemExit("Affected-head barrier current pull request response first page changed.")
           fresh={}; governed_heads={}
           for page in pages:
               for pull in page:
@@ -2698,8 +2901,30 @@ jobs:
                   fresh[number]=(pull_sha.lower(),draft); governed_heads.setdefault(pull_sha.lower(),[]).append(number)
           fresh_duplicates=sorted(name for name,members in governed_heads.items() if len(members)>1)
           if fresh!=expected_snapshots or fresh_duplicates!=duplicates: raise SystemExit("Affected-head barrier current pull request snapshot changed before release.")
-          source=request([f"repos/{repository}/actions/runs/{dispatcher}"],env=read_env); listed=request(["--paginate","--slurp",f"repos/{repository}/actions/workflows/pr-governance.yml/runs?per_page=100"],env=read_env)
-          if not isinstance(listed,list) or not all(isinstance(page,dict) and isinstance(page.get("workflow_runs"),list) for page in listed): raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+          source=request([f"repos/{repository}/actions/runs/{dispatcher}"],env=read_env)
+          def dispatcher_runs_page(page_number):
+              arguments=["gh","api","--hostname","github.com",f"repos/{repository}/actions/workflows/pr-governance.yml/runs?per_page=100&page={page_number}"]
+              if page_number == 6: arguments.insert(4,"--include")
+              try: response=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+              except subprocess.TimeoutExpired as error: raise SystemExit("Affected-head barrier dispatcher generation timed out.") from error
+              if response.returncode!=0: raise SystemExit("Affected-head barrier dispatcher generation is unavailable.")
+              try:
+                  raw=response.stdout
+                  if page_number == 6:
+                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("Affected-head barrier dispatcher generation exceeds the fixed page window.")
+                  page=json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("Affected-head barrier dispatcher generation is not JSON.") from error
+              entries=page.get("workflow_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
+              if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(run,dict) for run in entries) or type(total) is not int or total<0: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              return page
+          listed=[dispatcher_runs_page(1)]; total_count=listed[0]["total_count"]
+          for page_number in range(2,7):
+              if len(listed[-1]["workflow_runs"])<100: break
+              page=dispatcher_runs_page(page_number)
+              if page["total_count"]!=total_count: raise SystemExit("Affected-head barrier dispatcher generation count changed.")
+              listed.append(page)
+          if dispatcher_runs_page(1)!=listed[0] or sum(len(page["workflow_runs"]) for page in listed)!=total_count: raise SystemExit("Affected-head barrier dispatcher generation is incomplete.")
           def generation(run, *, current=False):
               run_repo=run.get("repository") if isinstance(run,dict) else None
               if not isinstance(run,dict) or type(run.get("id")) is not int or run["id"]<1 or run.get("name")!="PR governance dispatcher" or not path_matches(run.get("path")) or run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or not isinstance(run_repo,dict) or run_repo.get("full_name")!=repository or run.get("head_branch")!=branch or not isinstance(run.get("head_sha"),str) or run["head_sha"].lower()!=head.lower() or type(run.get("run_attempt")) is not int or run["run_attempt"]<1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
@@ -2784,6 +3009,27 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
 
+      - name: Record first terminal segment dispatch start
+        if: steps.current-targets.outputs.has_targets == 'true' && steps.current-targets.outputs.has_duplicate_governed_heads != 'true'
+        id: terminal-window-1
+        env:
+          ROOT_DEADLINE_EPOCH: ${{ needs.resolve_event.outputs.root_deadline_epoch }}
+        run: |
+          python3 - <<'PY'
+          import math, os, re, time
+          # Ceiling the real dispatch instant makes the next start conservative
+          # by up to one second, never earlier than the 3610s contract.
+          started_at = math.ceil(time.time())
+          root_deadline = os.environ.get("ROOT_DEADLINE_EPOCH", "")
+          terminal_segment_seconds = 3_750
+          if type(started_at) is not int or started_at < 1 or re.fullmatch(r"[1-9][0-9]*", root_deadline) is None:
+              raise SystemExit("Terminal dispatch start timestamp is invalid.")
+          if started_at + terminal_segment_seconds > int(root_deadline):
+              raise SystemExit("Terminal dispatch cannot complete before the root deadline.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"started_at={started_at}\n")
+          PY
+
       - name: Dispatch one repository-wide governance arbiter segment
         if: steps.current-targets.outputs.has_targets == 'true' && steps.current-targets.outputs.has_duplicate_governed_heads != 'true'
         id: dispatch-all-1
@@ -2806,12 +3052,14 @@ jobs:
           WRITER_TAIL_CHECK_MANIFEST_1: ${{ steps.invalidate-all-1.outputs.check_manifest || '[]' }}
           WRITER_TAIL_CHECK_MANIFEST_2: ${{ steps.invalidate-all-2.outputs.check_manifest || '[]' }}
           WRITER_PRESERVED_CHECK_MANIFEST: ${{ steps.await-early.outputs.preserved_check_manifest || '[]' }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-1.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json
           import os
           import re
           import subprocess
+          import time
           from urllib.parse import urlencode
 
           repository = os.environ["GITHUB_REPOSITORY"]
@@ -2820,6 +3068,26 @@ jobs:
           dispatcher_run_id = os.environ.get("DISPATCHER_RUN_ID", "")
           if not isinstance(branch, str) or re.fullmatch(r"[A-Za-z0-9._/-]+", branch) is None or re.fullmatch(r"[0-9a-fA-F]{40}", writer_head) is None or re.fullmatch(r"[1-9][0-9]*", dispatcher_run_id) is None:
               raise SystemExit("Governance dispatch inputs are invalid.")
+          started = os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline = int(started) + 3750
+          raw_run = subprocess.run
+          def bounded_run(arguments, *args, **kwargs):
+              if isinstance(arguments, list) and arguments[:2] == ["gh", "api"]:
+                  remaining = deadline - time.time()
+                  if remaining <= 0:
+                      raise SystemExit("Governance terminal registration deadline elapsed.")
+                  kwargs["timeout"] = min(20, remaining)
+                  try:
+                      result = raw_run(arguments, *args, **kwargs)
+                  except subprocess.TimeoutExpired as error:
+                      raise SystemExit("Governance terminal registration read timed out.") from error
+                  if time.time() > deadline:
+                      raise SystemExit("Governance terminal registration deadline elapsed.")
+                  return result
+              return raw_run(arguments, *args, **kwargs)
+          subprocess.run = bounded_run
           workflow_path = ".github/workflows/pr-governance-status-writer.yml"
           scope = os.environ.get("WRITER_SCOPE", "")
           raw_targets = os.environ.get("WRITER_TARGETS", "")
@@ -2931,7 +3199,7 @@ jobs:
               # snapshot, so no all-scope writer may receive an empty slice.
               raise SystemExit(0)
           def get(endpoint):
-              response = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False)
+              response = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False, timeout=20)
               if response.returncode != 0:
                   raise SystemExit("Unable to rebind the governance dispatcher before terminal dispatch.")
               try:
@@ -2950,15 +3218,33 @@ jobs:
           source_created_at = source_run.get("created_at") if isinstance(source_run, dict) else None
           if not isinstance(source_run, dict) or source_run.get("id") != int(dispatcher_run_id) or source_run.get("name") != "PR governance dispatcher" or source_run.get("event") not in {"pull_request_target", "issue_comment", "issues", "schedule", "workflow_dispatch", "workflow_run"} or source_run.get("head_branch") != branch or source_run.get("head_sha") != writer_head or not isinstance(source_repository, dict) or source_repository.get("full_name") != repository or type(source_run.get("run_number")) is not int or source_run["run_number"] < 1 or type(source_run.get("run_attempt")) is not int or source_run["run_attempt"] != 1 or source_run.get("status") not in {"requested", "queued", "in_progress"} or not isinstance(source_created_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", source_created_at) is None:
               raise SystemExit("Governance dispatcher source identity changed before terminal dispatch.")
-          listed = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"], capture_output=True, text=True, check=False)
-          if listed.returncode != 0:
-              raise SystemExit("Unable to revalidate the all-open governance snapshot.")
-          try:
-              pages = json.loads(listed.stdout)
-          except json.JSONDecodeError as error:
-              raise SystemExit("All-open governance snapshot is not JSON.") from error
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-              raise SystemExit("All-open governance snapshot is invalid.")
+          def pull_page(page_number):
+              arguments = ["gh", "api", f"repos/{repository}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number == 6: arguments.insert(2, "--include")
+              listed = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+              if listed.returncode != 0:
+                  raise SystemExit("Unable to revalidate the all-open governance snapshot.")
+              try:
+                  raw = listed.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers): raise SystemExit("All-open governance snapshot exceeds the fixed page window.")
+                  page = json.loads(raw)
+              except json.JSONDecodeError as error:
+                  raise SystemExit("All-open governance snapshot is not JSON.") from error
+              if not isinstance(page, list) or len(page) > 100 or not all(isinstance(pull, dict) for pull in page):
+                  raise SystemExit("All-open governance snapshot is invalid.")
+              return page
+          pages = [pull_page(1)]
+          for page_number in range(2, 7):
+              if len(pages[-1]) < 100:
+                  break
+              pages.append(pull_page(page_number))
+          else:
+              # page six was read with Link-header fencing; no seventh read is allowed.
+              pass
+          if pull_page(1) != pages[0]:
+              raise SystemExit("All-open governance snapshot first page changed.")
           current_snapshots = {}
           for page in pages:
               for pull in page:
@@ -2992,7 +3278,7 @@ jobs:
               return re.fullmatch(r"[A-Za-z0-9._/-]+", ref) is not None and ref not in {".", ".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"", ".", ".."} for part in ref.split("/"))
           writer_runs_query = urlencode({"event": "workflow_dispatch", "branch": branch, "head_sha": writer_head, "created": f">={source_created_at}", "per_page": "100"})
           def runs():
-              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False)
+              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False, timeout=20)
               if listed.returncode != 0:
                   raise SystemExit("Unable to enumerate governance writer runs.")
               try:
@@ -3010,10 +3296,17 @@ jobs:
           before_ids = {run.get("id") for run in before if type(run.get("id")) is int}
           if len(before_ids) != len(before):
               raise SystemExit("Governance writer run identity is invalid.")
-          result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={dispatcher_run_id}", "-f", f"inputs[scope]={scope}", "-f", f"inputs[target_numbers]={raw_targets}", "-f", f"inputs[preserved_target_numbers]={raw_preserved}", "-f", f"inputs[preserved_writer_run_id]={preserved_writer_run_id}", "-f", f"inputs[check_manifest]={raw_manifest}", "-f", f"inputs[terminal_batch_numbers]={json.dumps(batches[0],separators=(',', ':'))}", "-f", "inputs[continuation_index]=1", "-f", f"inputs[terminal_order_numbers]={json.dumps(terminal_order,separators=(',', ':'))}", "-f", "inputs[completed_writer_run_ids]=[]"], capture_output=True, text=True, check=False)
+          result = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={dispatcher_run_id}", "-f", f"inputs[scope]={scope}", "-f", f"inputs[target_numbers]={raw_targets}", "-f", f"inputs[preserved_target_numbers]={raw_preserved}", "-f", f"inputs[preserved_writer_run_id]={preserved_writer_run_id}", "-f", f"inputs[check_manifest]={raw_manifest}", "-f", f"inputs[terminal_batch_numbers]={json.dumps(batches[0],separators=(',', ':'))}", "-f", "inputs[continuation_index]=1", "-f", f"inputs[terminal_order_numbers]={json.dumps(terminal_order,separators=(',', ':'))}", "-f", "inputs[completed_writer_run_ids]=[]", "-f", f"inputs[terminal_deadline_epoch]={int(os.environ['TERMINAL_SEGMENT_STARTED_AT']) + 3750}"], capture_output=True, text=True, check=False, timeout=20)
           if result.returncode != 0:
               raise SystemExit("Unable to dispatch governance arbiter.")
+          started = os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline = int(started) + 3750
+          registered = False
           for _ in range(60):
+              if time.time() >= deadline:
+                  break
               candidates = []
               for run in runs():
                   identifier = run.get("id")
@@ -3040,11 +3333,15 @@ jobs:
               if len(candidates) == 1:
                   with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                       output.write(f"writer_run_id={candidates[0]}\n")
+                  registered = True
                   break
               if len(candidates) > 1:
                   raise SystemExit("Governance writer registration is ambiguous.")
-              subprocess.run(["sleep", "5"], check=False)
-          else:
+              remaining = deadline - time.time()
+              if remaining <= 0:
+                  break
+              subprocess.run(["sleep", str(min(5, remaining))], check=False)
+          if not registered:
               raise SystemExit("Governance writer registration timed out.")
           PY
 
@@ -3073,6 +3370,7 @@ jobs:
           DISPATCHER_RUN_ID: ${{ github.run_id }}
           CONTINUATION_INDEX: '1'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-1.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
@@ -3082,8 +3380,10 @@ jobs:
           head = os.environ.get("WRITER_HEAD", "")
           source = os.environ.get("DISPATCHER_RUN_ID", "")
           index = os.environ.get("CONTINUATION_INDEX", "")
-          if not re.fullmatch(r"[1-9][0-9]*", identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None or not re.fullmatch(r"[1-9][0-9]*", source) or index != "1":
+          started = os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if not re.fullmatch(r"[1-9][0-9]*", identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or re.fullmatch(r"[0-9a-fA-F]{40}", head) is None or not re.fullmatch(r"[1-9][0-9]*", source) or index != "1" or re.fullmatch(r"[1-9][0-9]*", started) is None:
               raise SystemExit("Governance terminal writer identity is invalid.")
+          deadline = int(started) + 3750
           expected_title = f"source={source} scope=all segment={index}"
           workflow_path = ".github/workflows/pr-governance-status-writer.yml"
           def path_matches(value):
@@ -3093,11 +3393,20 @@ jobs:
                   return False
               ref = value[len(workflow_path) + 1:]
               return re.fullmatch(r"[A-Za-z0-9._/-]+", ref) is not None and ref not in {".", ".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"", ".", ".."} for part in ref.split("/"))
-          # 114 * 30s = 57m stays below the one-hour token TTL while avoiding
-          # high-frequency shared-installation reads.  The writer's own pace
-          # remains the authority for the combined REST budget.
-          for _ in range(114):
-              result = subprocess.run(["gh", "api", f"repos/{repository}/actions/runs/{identifier}"], capture_output=True, text=True, check=False)
+          # This is one absolute window from terminal-window-1, shared with
+          # dispatch registration.  It cannot be extended by a late writer ID.
+          for _ in range(125):
+              if time.time() >= deadline:
+                  break
+              remaining = deadline - time.time()
+              if remaining <= 0:
+                  break
+              try:
+                  result = subprocess.run(["gh", "api", f"repos/{repository}/actions/runs/{identifier}"], capture_output=True, text=True, check=False, timeout=min(20, remaining))
+              except subprocess.TimeoutExpired as error:
+                  raise SystemExit("Governance terminal writer read timed out.") from error
+              if time.time() > deadline:
+                  raise SystemExit("Governance terminal writer deadline elapsed.")
               if result.returncode != 0:
                   raise SystemExit("Unable to read governance terminal writer.")
               try:
@@ -3116,8 +3425,48 @@ jobs:
                   with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                       output.write("success=true\n")
                   raise SystemExit(0)
-              time.sleep(30)
+              remaining = deadline - time.time()
+              if remaining <= 0:
+                  break
+              time.sleep(min(30, remaining))
           raise SystemExit("Governance terminal writer did not reach a terminal state.")
+          PY
+
+      - name: Preserve terminal App REST rate window before second segment
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_2 == 'true' && steps.await-all-1.outcome == 'success' && steps.await-all-1.outputs.success == 'true'
+        env:
+          PREVIOUS_SEGMENT_STARTED_AT: ${{ steps.terminal-window-1.outputs.started_at }}
+        run: |
+          python3 - <<'PY'
+          import os, re, time
+          previous = os.environ.get("PREVIOUS_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", previous) is None:
+              raise SystemExit("Previous terminal dispatch start is invalid.")
+          not_before = int(previous) + 3610
+          delay = not_before - time.time()
+          if delay > 0:
+              time.sleep(delay)
+          if time.time() < not_before:
+              raise SystemExit("Terminal App REST rate-window barrier did not elapse.")
+          PY
+
+      - name: Record second terminal segment dispatch start
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_2 == 'true' && steps.await-all-1.outcome == 'success' && steps.await-all-1.outputs.success == 'true'
+        id: terminal-window-2
+        env:
+          ROOT_DEADLINE_EPOCH: ${{ needs.resolve_event.outputs.root_deadline_epoch }}
+        run: |
+          python3 - <<'PY'
+          import math, os, re, time
+          started_at = math.ceil(time.time())
+          root_deadline = os.environ.get("ROOT_DEADLINE_EPOCH", "")
+          terminal_segment_seconds = 3_750
+          if type(started_at) is not int or started_at < 1 or re.fullmatch(r"[1-9][0-9]*", root_deadline) is None:
+              raise SystemExit("Terminal dispatch start timestamp is invalid.")
+          if started_at + terminal_segment_seconds > int(root_deadline):
+              raise SystemExit("Terminal dispatch cannot complete before the root deadline.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"started_at={started_at}\n")
           PY
 
       - name: Create second terminal segment dispatcher token
@@ -3151,6 +3500,7 @@ jobs:
           TERMINAL_BATCH: ${{ steps.dispatch-all-1.outputs.terminal_batch_2 }}
           CONTINUATION_INDEX: '2'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-2.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
@@ -3181,8 +3531,28 @@ jobs:
               expected_snapshots[item[0]] = (item[1].lower(), item[2])
           if set(expected_snapshots) != {item[0] for item in manifest} or not set(batch).issubset(set(expected_snapshots) - set(preserved)):
               raise SystemExit("Governance terminal segment boundary is invalid.")
+          started = os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline = int(started) + 3750
+          raw_run = subprocess.run
+          def bounded_run(arguments, *args, **kwargs):
+              if isinstance(arguments, list) and arguments[:2] == ["gh", "api"]:
+                  remaining = deadline - time.time()
+                  if remaining <= 0:
+                      raise SystemExit("Governance terminal registration deadline elapsed.")
+                  kwargs["timeout"] = min(20, remaining)
+                  try:
+                      result = raw_run(arguments, *args, **kwargs)
+                  except subprocess.TimeoutExpired as error:
+                      raise SystemExit("Governance terminal registration read timed out.") from error
+                  if time.time() > deadline:
+                      raise SystemExit("Governance terminal registration deadline elapsed.")
+                  return result
+              return raw_run(arguments, *args, **kwargs)
+          subprocess.run = bounded_run
           def get(endpoint):
-              result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False)
+              result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, check=False, timeout=20)
               if result.returncode != 0:
                   raise SystemExit("Unable to revalidate governance terminal segment.")
               try:
@@ -3210,12 +3580,26 @@ jobs:
               valid_path = path_value == writer_path or (isinstance(path_value, str) and path_value.startswith(writer_path + "@") and re.fullmatch(r"[A-Za-z0-9._/-]+", path_value[len(writer_path) + 1:]) is not None)
               if not isinstance(previous, dict) or previous.get("id") != previous_id or previous.get("name") != "PR governance status writer" or previous.get("display_title") != f"source={source} scope=all segment={segment}" or not valid_path or previous.get("event") != "workflow_dispatch" or not isinstance(previous_repo, dict) or previous_repo.get("full_name") != repository or previous.get("head_branch") != branch or previous.get("head_sha") != writer_head or previous.get("status") != "completed" or previous.get("conclusion") != "success" or type(previous.get("run_attempt")) is not int or previous["run_attempt"] != 1 or not isinstance(actor, dict) or actor.get("login") != bot_login or actor.get("type") != "Bot" or not isinstance(triggering_actor, dict) or triggering_actor.get("login") != bot_login or triggering_actor.get("type") != "Bot":
                   raise SystemExit("Completed governance terminal writer identity is invalid.")
-          pulls = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/pulls?state=open&per_page=100"], capture_output=True, text=True, check=False)
-          if pulls.returncode != 0:
-              raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
-          try: pages = json.loads(pulls.stdout)
-          except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
-          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages): raise SystemExit("All-open terminal segment snapshot is invalid.")
+          def pull_page(page_number):
+              arguments = ["gh", "api", f"repos/{repository}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number == 6: arguments.insert(2, "--include")
+              pulls = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
+              if pulls.returncode != 0: raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
+              try:
+                  raw = pulls.stdout
+                  if page_number == 6:
+                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers): raise SystemExit("All-open terminal segment snapshot exceeds the fixed page window.")
+                  page = json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
+              if not isinstance(page, list) or len(page) > 100 or not all(isinstance(pull, dict) for pull in page): raise SystemExit("All-open terminal segment snapshot is invalid.")
+              return page
+          pages = [pull_page(1)]
+          for page_number in range(2, 7):
+              if len(pages[-1]) < 100: break
+              pages.append(pull_page(page_number))
+          else: pass  # page six Link-header fencing rejects an undiscovered seventh page.
+          if pull_page(1) != pages[0]: raise SystemExit("All-open terminal segment snapshot first page changed.")
           current = {}
           for page in pages:
               for pull in page:
@@ -3232,7 +3616,7 @@ jobs:
               return value == workflow_path or (isinstance(value, str) and value.startswith(workflow_path + "@") and re.fullmatch(r"[A-Za-z0-9._/-]+", value[len(workflow_path) + 1:]) is not None)
           writer_runs_query = urlencode({"event": "workflow_dispatch", "branch": branch, "head_sha": writer_head, "created": f">={source_created_at}", "per_page": "100"})
           def runs():
-              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False)
+              listed = subprocess.run(["gh", "api", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"], capture_output=True, text=True, check=False, timeout=20)
               if listed.returncode != 0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
               try: response = json.loads(listed.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
@@ -3241,9 +3625,14 @@ jobs:
               return runs
           before = {run.get("id") for run in runs() if type(run.get("id")) is int}
           if len(before) == 0 and False: raise SystemExit("unreachable")
-          dispatched = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={source}", "-f", "inputs[scope]=all", "-f", f"inputs[target_numbers]={raw_targets}", "-f", f"inputs[preserved_target_numbers]={raw_preserved}", "-f", f"inputs[preserved_writer_run_id]={preserved_writer}", "-f", f"inputs[check_manifest]={raw_manifest}", "-f", f"inputs[terminal_batch_numbers]={raw_batch}", "-f", "inputs[continuation_index]=2", "-f", f"inputs[terminal_order_numbers]={raw_order}", "-f", f"inputs[completed_writer_run_ids]={raw_completed}"], capture_output=True, text=True, check=False)
+          dispatched = subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches", "-f", f"ref={branch}", "-f", f"inputs[dispatcher_run_id]={source}", "-f", "inputs[scope]=all", "-f", f"inputs[target_numbers]={raw_targets}", "-f", f"inputs[preserved_target_numbers]={raw_preserved}", "-f", f"inputs[preserved_writer_run_id]={preserved_writer}", "-f", f"inputs[check_manifest]={raw_manifest}", "-f", f"inputs[terminal_batch_numbers]={raw_batch}", "-f", "inputs[continuation_index]=2", "-f", f"inputs[terminal_order_numbers]={raw_order}", "-f", f"inputs[completed_writer_run_ids]={raw_completed}", "-f", f"inputs[terminal_deadline_epoch]={int(os.environ['TERMINAL_SEGMENT_STARTED_AT']) + 3750}"], capture_output=True, text=True, check=False, timeout=20)
           if dispatched.returncode != 0: raise SystemExit("Unable to dispatch governance terminal segment.")
+          started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*",started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline=int(started)+3750
           for _ in range(60):
+              if time.time()>=deadline: break
               candidates = [run for run in runs() if type(run.get("id")) is int and run["id"] not in before and run.get("display_title") == title]
               if len(candidates) == 1:
                   run = candidates[0]; run_repo = run.get("repository")
@@ -3251,7 +3640,9 @@ jobs:
                   with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output: output.write(f"writer_run_id={run['id']}\n")
                   raise SystemExit(0)
               if len(candidates) > 1: raise SystemExit("Governance terminal writer registration is ambiguous.")
-              time.sleep(5)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(5,remaining))
           raise SystemExit("Governance terminal writer registration timed out.")
           PY
 
@@ -3279,16 +3670,24 @@ jobs:
           DISPATCHER_RUN_ID: ${{ github.run_id }}
           CONTINUATION_INDEX: '2'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-2.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
-          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", "")
-          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index != "2": raise SystemExit("Governance terminal writer identity is invalid.")
+          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", ""); started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index != "2" or re.fullmatch(r"[1-9][0-9]*",started) is None: raise SystemExit("Governance terminal writer identity is invalid.")
+          deadline=int(started)+3750
           expected=f"source={source} scope=all segment={index}"; path=".github/workflows/pr-governance-status-writer.yml"
           def matches(value):
               return value == path or (isinstance(value,str) and value.startswith(path+"@") and re.fullmatch(r"[A-Za-z0-9._/-]+",value[len(path)+1:]) is not None)
-          for _ in range(114):
-              result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False)
+          for _ in range(125):
+              if time.time() >= deadline:
+                  break
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              try: result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False,timeout=min(20,remaining))
+              except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal writer read timed out.") from error
+              if time.time()>deadline: raise SystemExit("Governance terminal writer deadline elapsed.")
               if result.returncode != 0: raise SystemExit("Unable to read governance terminal writer.")
               try: run=json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer is not JSON.") from error
@@ -3298,8 +3697,47 @@ jobs:
                   if run.get("conclusion") != "success": raise SystemExit("Governance terminal writer failed closed.")
                   with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("success=true\n")
                   raise SystemExit(0)
-              time.sleep(30)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(30,remaining))
           raise SystemExit("Governance terminal writer did not reach a terminal state.")
+          PY
+
+      - name: Preserve terminal App REST rate window before third segment
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_3 == 'true' && steps.await-all-2.outcome == 'success' && steps.await-all-2.outputs.success == 'true'
+        env:
+          PREVIOUS_SEGMENT_STARTED_AT: ${{ steps.terminal-window-2.outputs.started_at }}
+        run: |
+          python3 - <<'PY'
+          import os, re, time
+          previous = os.environ.get("PREVIOUS_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", previous) is None:
+              raise SystemExit("Previous terminal dispatch start is invalid.")
+          not_before = int(previous) + 3610
+          delay = not_before - time.time()
+          if delay > 0:
+              time.sleep(delay)
+          if time.time() < not_before:
+              raise SystemExit("Terminal App REST rate-window barrier did not elapse.")
+          PY
+
+      - name: Record third terminal segment dispatch start
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_3 == 'true' && steps.await-all-2.outcome == 'success' && steps.await-all-2.outputs.success == 'true'
+        id: terminal-window-3
+        env:
+          ROOT_DEADLINE_EPOCH: ${{ needs.resolve_event.outputs.root_deadline_epoch }}
+        run: |
+          python3 - <<'PY'
+          import math, os, re, time
+          started_at = math.ceil(time.time())
+          root_deadline = os.environ.get("ROOT_DEADLINE_EPOCH", "")
+          terminal_segment_seconds = 3_750
+          if type(started_at) is not int or started_at < 1 or re.fullmatch(r"[1-9][0-9]*", root_deadline) is None:
+              raise SystemExit("Terminal dispatch start timestamp is invalid.")
+          if started_at + terminal_segment_seconds > int(root_deadline):
+              raise SystemExit("Terminal dispatch cannot complete before the root deadline.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"started_at={started_at}\n")
           PY
 
       - name: Create third terminal segment dispatcher token
@@ -3333,6 +3771,7 @@ jobs:
           TERMINAL_BATCH: ${{ steps.dispatch-all-1.outputs.terminal_batch_3 }}
           CONTINUATION_INDEX: '3'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-3.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
@@ -3346,8 +3785,23 @@ jobs:
               if not isinstance(entry,list) or len(entry)!=3 or type(entry[0]) is not int or entry[0]<1 or not isinstance(entry[1],str) or re.fullmatch(r"[0-9a-fA-F]{40}",entry[1]) is None or type(entry[2]) is not bool or entry[0] in expected: raise SystemExit("Governance terminal segment boundary is invalid.")
               expected[entry[0]]=(entry[1].lower(),entry[2])
           if set(expected)!={entry[0] for entry in manifest} or not set(batch).issubset(set(expected)-set(preserved)): raise SystemExit("Governance terminal segment boundary is invalid.")
+          started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*",started) is None: raise SystemExit("Terminal segment start is invalid.")
+          deadline=int(started)+3750
+          raw_run=subprocess.run
+          def bounded_run(arguments,*args,**kwargs):
+              if isinstance(arguments,list) and arguments[:2]==["gh","api"]:
+                  remaining=deadline-time.time()
+                  if remaining<=0: raise SystemExit("Governance terminal registration deadline elapsed.")
+                  kwargs["timeout"]=min(20,remaining)
+                  try: result=raw_run(arguments,*args,**kwargs)
+                  except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal registration read timed out.") from error
+                  if time.time()>deadline: raise SystemExit("Governance terminal registration deadline elapsed.")
+                  return result
+              return raw_run(arguments,*args,**kwargs)
+          subprocess.run=bounded_run
           def get(endpoint):
-              result=subprocess.run(["gh","api",endpoint],capture_output=True,text=True,check=False)
+              result=subprocess.run(["gh","api",endpoint],capture_output=True,text=True,check=False, timeout=20)
               if result.returncode!=0: raise SystemExit("Unable to revalidate governance terminal segment.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
@@ -3359,11 +3813,26 @@ jobs:
               previous=get(f"repos/{repo}/actions/runs/{previous_id}"); previous_repo=previous.get("repository") if isinstance(previous,dict) else None; actor=previous.get("actor") if isinstance(previous,dict) else None; triggering_actor=previous.get("triggering_actor") if isinstance(previous,dict) else None; path_value=previous.get("path") if isinstance(previous,dict) else None
               valid_path=path_value==writer_path or (isinstance(path_value,str) and path_value.startswith(writer_path+"@") and re.fullmatch(r"[A-Za-z0-9._/-]+",path_value[len(writer_path)+1:]) is not None)
               if not isinstance(previous,dict) or previous.get("id")!=previous_id or previous.get("name")!="PR governance status writer" or previous.get("display_title")!=f"source={source} scope=all segment={segment}" or not valid_path or previous.get("event")!="workflow_dispatch" or not isinstance(previous_repo,dict) or previous_repo.get("full_name")!=repo or previous.get("head_branch")!=branch or previous.get("head_sha")!=head or previous.get("status")!="completed" or previous.get("conclusion")!="success" or type(previous.get("run_attempt")) is not int or previous["run_attempt"]!=1 or not isinstance(actor,dict) or actor.get("login")!=bot or actor.get("type")!="Bot" or not isinstance(triggering_actor,dict) or triggering_actor.get("login")!=bot or triggering_actor.get("type")!="Bot": raise SystemExit("Completed governance terminal writer identity is invalid.")
-          listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repo}/pulls?state=open&per_page=100"],capture_output=True,text=True,check=False)
-          if listed.returncode!=0: raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
-          try: pages=json.loads(listed.stdout)
-          except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
-          if not isinstance(pages,list) or not all(isinstance(page,list) for page in pages): raise SystemExit("All-open terminal segment snapshot is invalid.")
+          def pull_page(page_number):
+              arguments=["gh","api",f"repos/{repo}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number==6: arguments.insert(2,"--include")
+              listed=subprocess.run(arguments,capture_output=True,text=True,check=False, timeout=20)
+              if listed.returncode!=0: raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
+              try:
+                  raw=listed.stdout
+                  if page_number==6:
+                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("All-open terminal segment snapshot exceeds the fixed page window.")
+                  page=json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
+              if not isinstance(page,list) or len(page)>100 or not all(isinstance(pull,dict) for pull in page): raise SystemExit("All-open terminal segment snapshot is invalid.")
+              return page
+          pages=[pull_page(1)]
+          for page_number in range(2,7):
+              if len(pages[-1])<100: break
+              pages.append(pull_page(page_number))
+          else: pass  # page six Link-header fencing rejects an undiscovered seventh page.
+          if pull_page(1)!=pages[0]: raise SystemExit("All-open terminal segment snapshot first page changed.")
           current={}
           for page in pages:
               for pull in page:
@@ -3378,7 +3847,7 @@ jobs:
           path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=all segment={index}"
           writer_runs_query=urlencode({"event":"workflow_dispatch","branch":branch,"head_sha":head,"created":f">={source_created_at}","per_page":"100"})
           def runs():
-              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False)
+              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False, timeout=20)
               if response.returncode!=0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
               try: listed=json.loads(response.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
@@ -3386,9 +3855,14 @@ jobs:
               if type(total) is not int or total<0 or total>100 or not isinstance(runs,list) or len(runs)!=total or not all(isinstance(run,dict) for run in runs): raise SystemExit("Governance terminal writer runs are invalid.")
               return runs
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
-          posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=3","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}"],capture_output=True,text=True,check=False)
+          posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=3","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}","-f",f"inputs[terminal_deadline_epoch]={int(os.environ['TERMINAL_SEGMENT_STARTED_AT'])+3750}"],capture_output=True,text=True,check=False, timeout=20)
           if posted.returncode!=0: raise SystemExit("Unable to dispatch governance terminal segment.")
+          started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*",started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline=int(started)+3750
           for _ in range(60):
+              if time.time()>=deadline: break
               matches=[run for run in runs() if type(run.get("id")) is int and run["id"] not in before and run.get("display_title")==title]
               if len(matches)==1:
                   run=matches[0]; run_repo=run.get("repository"); path_value=run.get("path")
@@ -3396,7 +3870,9 @@ jobs:
                   with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write(f"writer_run_id={run['id']}\n")
                   raise SystemExit(0)
               if len(matches)>1: raise SystemExit("Governance terminal writer registration is ambiguous.")
-              time.sleep(5)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(5,remaining))
           raise SystemExit("Governance terminal writer registration timed out.")
           PY
 
@@ -3424,14 +3900,22 @@ jobs:
           DISPATCHER_RUN_ID: ${{ github.run_id }}
           CONTINUATION_INDEX: '3'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-3.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
-          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", "")
-          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index!="3": raise SystemExit("Governance terminal writer identity is invalid.")
+          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", ""); started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index!="3" or re.fullmatch(r"[1-9][0-9]*",started) is None: raise SystemExit("Governance terminal writer identity is invalid.")
+          deadline=int(started)+3750
           expected=f"source={source} scope=all segment={index}"; path=".github/workflows/pr-governance-status-writer.yml"
-          for _ in range(114):
-              result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False)
+          for _ in range(125):
+              if time.time() >= deadline:
+                  break
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              try: result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False,timeout=min(20,remaining))
+              except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal writer read timed out.") from error
+              if time.time()>deadline: raise SystemExit("Governance terminal writer deadline elapsed.")
               if result.returncode!=0: raise SystemExit("Unable to read governance terminal writer.")
               try: run=json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer is not JSON.") from error
@@ -3441,8 +3925,47 @@ jobs:
                   if run.get("conclusion") != "success": raise SystemExit("Governance terminal writer failed closed.")
                   with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("success=true\n")
                   raise SystemExit(0)
-              time.sleep(30)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(30,remaining))
           raise SystemExit("Governance terminal writer did not reach a terminal state.")
+          PY
+
+      - name: Preserve terminal App REST rate window before fourth segment
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_4 == 'true' && steps.await-all-3.outcome == 'success' && steps.await-all-3.outputs.success == 'true'
+        env:
+          PREVIOUS_SEGMENT_STARTED_AT: ${{ steps.terminal-window-3.outputs.started_at }}
+        run: |
+          python3 - <<'PY'
+          import os, re, time
+          previous = os.environ.get("PREVIOUS_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*", previous) is None:
+              raise SystemExit("Previous terminal dispatch start is invalid.")
+          not_before = int(previous) + 3610
+          delay = not_before - time.time()
+          if delay > 0:
+              time.sleep(delay)
+          if time.time() < not_before:
+              raise SystemExit("Terminal App REST rate-window barrier did not elapse.")
+          PY
+
+      - name: Record fourth terminal segment dispatch start
+        if: steps.dispatch-all-1.outputs.has_terminal_batch_4 == 'true' && steps.await-all-3.outcome == 'success' && steps.await-all-3.outputs.success == 'true'
+        id: terminal-window-4
+        env:
+          ROOT_DEADLINE_EPOCH: ${{ needs.resolve_event.outputs.root_deadline_epoch }}
+        run: |
+          python3 - <<'PY'
+          import math, os, re, time
+          started_at = math.ceil(time.time())
+          root_deadline = os.environ.get("ROOT_DEADLINE_EPOCH", "")
+          terminal_segment_seconds = 3_750
+          if type(started_at) is not int or started_at < 1 or re.fullmatch(r"[1-9][0-9]*", root_deadline) is None:
+              raise SystemExit("Terminal dispatch start timestamp is invalid.")
+          if started_at + terminal_segment_seconds > int(root_deadline):
+              raise SystemExit("Terminal dispatch cannot complete before the root deadline.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"started_at={started_at}\n")
           PY
 
       - name: Create fourth terminal segment dispatcher token
@@ -3476,6 +3999,7 @@ jobs:
           TERMINAL_BATCH: ${{ steps.dispatch-all-1.outputs.terminal_batch_4 }}
           CONTINUATION_INDEX: '4'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-4.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
@@ -3489,8 +4013,23 @@ jobs:
               if not isinstance(entry,list) or len(entry)!=3 or type(entry[0]) is not int or entry[0]<1 or not isinstance(entry[1],str) or re.fullmatch(r"[0-9a-fA-F]{40}",entry[1]) is None or type(entry[2]) is not bool or entry[0] in expected: raise SystemExit("Governance terminal segment boundary is invalid.")
               expected[entry[0]]=(entry[1].lower(),entry[2])
           if set(expected)!={entry[0] for entry in manifest} or not set(batch).issubset(set(expected)-set(preserved)): raise SystemExit("Governance terminal segment boundary is invalid.")
+          started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*",started) is None: raise SystemExit("Terminal segment start is invalid.")
+          deadline=int(started)+3750
+          raw_run=subprocess.run
+          def bounded_run(arguments,*args,**kwargs):
+              if isinstance(arguments,list) and arguments[:2]==["gh","api"]:
+                  remaining=deadline-time.time()
+                  if remaining<=0: raise SystemExit("Governance terminal registration deadline elapsed.")
+                  kwargs["timeout"]=min(20,remaining)
+                  try: result=raw_run(arguments,*args,**kwargs)
+                  except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal registration read timed out.") from error
+                  if time.time()>deadline: raise SystemExit("Governance terminal registration deadline elapsed.")
+                  return result
+              return raw_run(arguments,*args,**kwargs)
+          subprocess.run=bounded_run
           def get(endpoint):
-              result=subprocess.run(["gh","api",endpoint],capture_output=True,text=True,check=False)
+              result=subprocess.run(["gh","api",endpoint],capture_output=True,text=True,check=False, timeout=20)
               if result.returncode!=0: raise SystemExit("Unable to revalidate governance terminal segment.")
               try: return json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal segment response is not JSON.") from error
@@ -3502,11 +4041,26 @@ jobs:
               previous=get(f"repos/{repo}/actions/runs/{previous_id}"); previous_repo=previous.get("repository") if isinstance(previous,dict) else None; actor=previous.get("actor") if isinstance(previous,dict) else None; triggering_actor=previous.get("triggering_actor") if isinstance(previous,dict) else None; path_value=previous.get("path") if isinstance(previous,dict) else None
               valid_path=path_value==writer_path or (isinstance(path_value,str) and path_value.startswith(writer_path+"@") and re.fullmatch(r"[A-Za-z0-9._/-]+",path_value[len(writer_path)+1:]) is not None)
               if not isinstance(previous,dict) or previous.get("id")!=previous_id or previous.get("name")!="PR governance status writer" or previous.get("display_title")!=f"source={source} scope=all segment={segment}" or not valid_path or previous.get("event")!="workflow_dispatch" or not isinstance(previous_repo,dict) or previous_repo.get("full_name")!=repo or previous.get("head_branch")!=branch or previous.get("head_sha")!=head or previous.get("status")!="completed" or previous.get("conclusion")!="success" or type(previous.get("run_attempt")) is not int or previous["run_attempt"]!=1 or not isinstance(actor,dict) or actor.get("login")!=bot or actor.get("type")!="Bot" or not isinstance(triggering_actor,dict) or triggering_actor.get("login")!=bot or triggering_actor.get("type")!="Bot": raise SystemExit("Completed governance terminal writer identity is invalid.")
-          listed=subprocess.run(["gh","api","--paginate","--slurp",f"repos/{repo}/pulls?state=open&per_page=100"],capture_output=True,text=True,check=False)
-          if listed.returncode!=0: raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
-          try: pages=json.loads(listed.stdout)
-          except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
-          if not isinstance(pages,list) or not all(isinstance(page,list) for page in pages): raise SystemExit("All-open terminal segment snapshot is invalid.")
+          def pull_page(page_number):
+              arguments=["gh","api",f"repos/{repo}/pulls?state=open&per_page=100&page={page_number}"]
+              if page_number==6: arguments.insert(2,"--include")
+              listed=subprocess.run(arguments,capture_output=True,text=True,check=False, timeout=20)
+              if listed.returncode!=0: raise SystemExit("Unable to revalidate all-open terminal segment snapshot.")
+              try:
+                  raw=listed.stdout
+                  if page_number==6:
+                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
+                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("All-open terminal segment snapshot exceeds the fixed page window.")
+                  page=json.loads(raw)
+              except json.JSONDecodeError as error: raise SystemExit("All-open terminal segment snapshot is not JSON.") from error
+              if not isinstance(page,list) or len(page)>100 or not all(isinstance(pull,dict) for pull in page): raise SystemExit("All-open terminal segment snapshot is invalid.")
+              return page
+          pages=[pull_page(1)]
+          for page_number in range(2,7):
+              if len(pages[-1])<100: break
+              pages.append(pull_page(page_number))
+          else: pass  # page six Link-header fencing rejects an undiscovered seventh page.
+          if pull_page(1)!=pages[0]: raise SystemExit("All-open terminal segment snapshot first page changed.")
           current={}
           for page in pages:
               for pull in page:
@@ -3521,7 +4075,7 @@ jobs:
           path=".github/workflows/pr-governance-status-writer.yml"; title=f"source={source} scope=all segment={index}"
           writer_runs_query=urlencode({"event":"workflow_dispatch","branch":branch,"head_sha":head,"created":f">={source_created_at}","per_page":"100"})
           def runs():
-              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False)
+              response=subprocess.run(["gh","api",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/runs?{writer_runs_query}"],capture_output=True,text=True,check=False, timeout=20)
               if response.returncode!=0: raise SystemExit("Unable to enumerate governance terminal writer runs.")
               try: listed=json.loads(response.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer runs are not JSON.") from error
@@ -3529,9 +4083,14 @@ jobs:
               if type(total) is not int or total<0 or total>100 or not isinstance(runs,list) or len(runs)!=total or not all(isinstance(run,dict) for run in runs): raise SystemExit("Governance terminal writer runs are invalid.")
               return runs
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
-          posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=4","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}"],capture_output=True,text=True,check=False)
+          posted=subprocess.run(["gh","api","--method","POST",f"repos/{repo}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=all","-f",f"inputs[target_numbers]={raw_targets}","-f",f"inputs[preserved_target_numbers]={raw_preserved}","-f",f"inputs[preserved_writer_run_id]={preserved_writer}","-f",f"inputs[check_manifest]={raw_manifest}","-f",f"inputs[terminal_batch_numbers]={raw_batch}","-f","inputs[continuation_index]=4","-f",f"inputs[terminal_order_numbers]={raw_order}","-f",f"inputs[completed_writer_run_ids]={raw_completed}","-f",f"inputs[terminal_deadline_epoch]={int(os.environ['TERMINAL_SEGMENT_STARTED_AT'])+3750}"],capture_output=True,text=True,check=False, timeout=20)
           if posted.returncode!=0: raise SystemExit("Unable to dispatch governance terminal segment.")
+          started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if re.fullmatch(r"[1-9][0-9]*",started) is None:
+              raise SystemExit("Terminal segment start is invalid.")
+          deadline=int(started)+3750
           for _ in range(60):
+              if time.time()>=deadline: break
               matches=[run for run in runs() if type(run.get("id")) is int and run["id"] not in before and run.get("display_title")==title]
               if len(matches)==1:
                   run=matches[0]; run_repo=run.get("repository"); path_value=run.get("path")
@@ -3539,7 +4098,9 @@ jobs:
                   with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write(f"writer_run_id={run['id']}\n")
                   raise SystemExit(0)
               if len(matches)>1: raise SystemExit("Governance terminal writer registration is ambiguous.")
-              time.sleep(5)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(5,remaining))
           raise SystemExit("Governance terminal writer registration timed out.")
           PY
 
@@ -3567,14 +4128,22 @@ jobs:
           DISPATCHER_RUN_ID: ${{ github.run_id }}
           CONTINUATION_INDEX: '4'
           APP_BOT_LOGIN: ${{ vars.KRR_GOVERNANCE_APP_BOT_LOGIN }}
+          TERMINAL_SEGMENT_STARTED_AT: ${{ steps.terminal-window-4.outputs.started_at }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, time
-          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", "")
-          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index!="4": raise SystemExit("Governance terminal writer identity is invalid.")
+          repository=os.environ["GITHUB_REPOSITORY"]; identifier=os.environ.get("WRITER_RUN_ID", ""); branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("WRITER_HEAD", ""); source=os.environ.get("DISPATCHER_RUN_ID", ""); index=os.environ.get("CONTINUATION_INDEX", ""); started=os.environ.get("TERMINAL_SEGMENT_STARTED_AT", "")
+          if not re.fullmatch(r"[1-9][0-9]*",identifier) or not re.fullmatch(r"[A-Za-z0-9._/-]+",branch) or re.fullmatch(r"[0-9a-fA-F]{40}",head) is None or not re.fullmatch(r"[1-9][0-9]*",source) or index!="4" or re.fullmatch(r"[1-9][0-9]*",started) is None: raise SystemExit("Governance terminal writer identity is invalid.")
+          deadline=int(started)+3750
           expected=f"source={source} scope=all segment={index}"; path=".github/workflows/pr-governance-status-writer.yml"
-          for _ in range(114):
-              result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False)
+          for _ in range(125):
+              if time.time() >= deadline:
+                  break
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              try: result=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{identifier}"],capture_output=True,text=True,check=False,timeout=min(20,remaining))
+              except subprocess.TimeoutExpired as error: raise SystemExit("Governance terminal writer read timed out.") from error
+              if time.time()>deadline: raise SystemExit("Governance terminal writer deadline elapsed.")
               if result.returncode!=0: raise SystemExit("Unable to read governance terminal writer.")
               try: run=json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance terminal writer is not JSON.") from error
@@ -3584,6 +4153,8 @@ jobs:
                   if run.get("conclusion") != "success": raise SystemExit("Governance terminal writer failed closed.")
                   with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as output: output.write("success=true\n")
                   raise SystemExit(0)
-              time.sleep(30)
+              remaining=deadline-time.time()
+              if remaining<=0: break
+              time.sleep(min(30,remaining))
           raise SystemExit("Governance terminal writer did not reach a terminal state.")
           PY

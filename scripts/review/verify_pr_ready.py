@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
 import sys
+import time
 from urllib.parse import parse_qs, quote, urlparse
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -49,6 +53,35 @@ _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
 _LATCH_CHECK = "KRR / PR governance review latch"
 # The initial thread query returns the first 100 comments; continuation is bounded.
 _MAX_REVIEW_THREAD_COMMENT_FOLLOW_UP_PAGES = 10
+# Keep the two outer review connections complete up to a bounded, explicit
+# boundary.  A page that advertises another cursor at the boundary is rejected
+# before that cursor is requested, so evidence is never silently truncated.
+_MAX_REVIEW_CONNECTION_PAGES = 10
+# The all-open writer can process at most 150 PRs in one terminal segment.  The
+# review/reviewThreads connections therefore consume at most 3,000 GraphQL
+# points when every page costs one point.  Keep the other GraphQL work and a
+# small operational margin reserved in the shared installation bucket.
+_MAX_ALL_WRITER_TARGETS = 150
+_GRAPHQL_OTHER_WORK_RESERVE = 1_200
+_GRAPHQL_OPERATIONAL_HEADROOM = 300
+_GRAPHQL_REVIEW_BUDGET = 4_500
+_GRAPHQL_REMAINING_FLOOR = (
+    _GRAPHQL_OTHER_WORK_RESERVE + _GRAPHQL_OPERATIONAL_HEADROOM
+)
+# A GraphQL response reports cost only after the request.  Reserve the
+# largest cost accepted by this verifier before issuing the next request, so a
+# stale/slow server response cannot spend into the operational floor.
+_GRAPHQL_MAX_QUERY_COST = 100
+# GitHub CLI eager pagination executes all pages before returning.  Keep the
+# response contract bounded even when a server advertises an unbounded cursor;
+# callers fail closed before processing an over-cap result.
+_MAX_REST_PAGES = 10
+_MAX_REST_PAGE_ITEMS = 100
+_MAX_REST_ITEMS = 1_000
+_REST_BUDGET = 4_500
+_REST_OTHER_WORK_RESERVE = 1_200
+_REST_OPERATIONAL_HEADROOM = 300
+_REST_REMAINING_FLOOR = _REST_OTHER_WORK_RESERVE + _REST_OPERATIONAL_HEADROOM
 _ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
@@ -57,6 +90,353 @@ _ReviewMarkerIdentity = tuple[int, str, str, str, str, str, str, str]
 _RequiredStatusChecks = tuple[tuple[str, ...], tuple[tuple[str, int | None], ...]]
 _RepositoryRestIdentity = tuple[int, str, str]
 _INVALID_REPOSITORY_IDENTITY = object()
+_ACTIVE_REST_BUDGET: _RestBudget | None = None
+_ACTIVE_GRAPHQL_BUDGET: _GraphQLBudget | None = None
+_ACTIVE_SHARED_GRAPHQL_LEDGER: _SharedGraphQLLedger | None = None
+_GRAPHQL_PREFLIGHT_QUERY = "query { rateLimit { cost remaining resetAt } }"
+
+
+class _RestBudget:
+    """Track primary REST requests against one live installation bucket."""
+
+    def __init__(self) -> None:
+        self.remaining: int | None = None
+        self.limit: int | None = None
+        self.reset: int | None = None
+
+    def observe_rate_limit(self, payload: object) -> None:
+        if not isinstance(payload, Mapping):
+            raise TypeError("REST rate_limit response must be an object")
+        resources = payload.get("resources")
+        if not isinstance(resources, Mapping):
+            raise TypeError("REST rate_limit resources must be an object")
+        core = resources.get("core")
+        if not isinstance(core, Mapping):
+            raise TypeError("REST rate_limit core must be an object")
+        limit = core.get("limit")
+        remaining = core.get("remaining")
+        reset = core.get("reset")
+        if type(limit) is not int or limit < 1:
+            raise TypeError("REST rate_limit core limit must be a positive integer")
+        if type(remaining) is not int or remaining < 0:
+            raise TypeError(
+                "REST rate_limit core remaining must be a non-negative integer"
+            )
+        if type(reset) is not int or reset < 1:
+            raise TypeError("REST rate_limit core reset must be a positive integer")
+        self.limit = limit
+        self.remaining = min(remaining, _REST_BUDGET)
+        self.reset = reset
+
+    def before_request(self) -> None:
+        if self.remaining is None:
+            raise ValueError("REST budget was not initialized from rate_limit")
+        if self.remaining <= _REST_REMAINING_FLOOR:
+            raise ValueError("REST remaining budget is too low for the next request")
+
+    def consume(self) -> None:
+        self.before_request()
+        assert self.remaining is not None
+        self.remaining -= 1
+
+
+class _GraphQLBudget:
+    """Validate the shared installation budget with a bounded query-cost lease."""
+
+    def __init__(self) -> None:
+        self.remaining: int | None = None
+        self._server_remaining: int | None = None
+        self.max_cost = 0
+
+    def before_request(self) -> None:
+        if self.remaining is not None and self.remaining < (
+            max(self.max_cost, _GRAPHQL_MAX_QUERY_COST)
+            + _GRAPHQL_REMAINING_FLOOR
+        ):
+            raise ValueError("GraphQL remaining budget is too low for the next query")
+
+    def observe(self, payload: object) -> None:
+        if not isinstance(payload, Mapping):
+            raise TypeError("GraphQL response must be an object")
+        if "errors" in payload and payload.get("errors") != []:
+            raise TypeError("GraphQL response contains errors")
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise TypeError("GraphQL data must be an object")
+        rate_limit = data.get("rateLimit")
+        if not isinstance(rate_limit, Mapping):
+            raise TypeError("GraphQL rateLimit must be an object")
+        cost = rate_limit.get("cost")
+        remaining = rate_limit.get("remaining")
+        reset_at = rate_limit.get("resetAt")
+        if type(cost) is not int or cost < 1:
+            raise TypeError("GraphQL rateLimit cost must be a positive integer")
+        if type(remaining) is not int or remaining < 0:
+            raise TypeError("GraphQL rateLimit remaining must be a non-negative integer")
+        try:
+            reset_time = _timestamp(reset_at, "GraphQL rateLimit resetAt")
+        except (TypeError, ValueError) as error:
+            raise TypeError("GraphQL rateLimit resetAt must be an ISO-8601 timestamp") from error
+        if reset_time is None or reset_time.tzinfo is None:
+            raise TypeError("GraphQL rateLimit resetAt must be an ISO-8601 timestamp")
+        if remaining < _GRAPHQL_REMAINING_FLOOR:
+            raise ValueError("GraphQL remaining budget is below the reserved floor")
+        if cost > _GRAPHQL_MAX_QUERY_COST:
+            raise ValueError("GraphQL rateLimit cost exceeds the query budget")
+        self.max_cost = max(self.max_cost, cost)
+        if self._server_remaining is None:
+            self.remaining = min(remaining, _GRAPHQL_REVIEW_BUDGET)
+        else:
+            server_delta = self._server_remaining - remaining
+            if server_delta < 0:
+                raise ValueError("GraphQL rateLimit remaining increased unexpectedly")
+            assert self.remaining is not None
+            next_remaining = self.remaining - server_delta
+            if next_remaining < _GRAPHQL_REMAINING_FLOOR:
+                raise ValueError("GraphQL remaining budget is below the reserved floor")
+            self.remaining = next_remaining
+        self._server_remaining = remaining
+
+    def consume(self, cost: int = 1) -> None:
+        """Charge a GraphQL-backed read that cannot return rateLimit metadata."""
+
+        if type(cost) is not int or cost < 1 or cost > _GRAPHQL_MAX_QUERY_COST:
+            raise ValueError("GraphQL request cost is outside the query budget")
+        self.before_request()
+        if self.remaining is not None:
+            self.remaining -= cost
+        if self._server_remaining is not None:
+            self._server_remaining -= cost
+
+
+class _SharedGraphQLLedger:
+    """Atomically lease the all-writer GraphQL budget across verifier processes."""
+
+    _SCHEMA = 1
+    _LEASE = _GRAPHQL_MAX_QUERY_COST
+    _LOCK_WAIT_SECONDS = 2.0
+    _LOCK_RETRY_SECONDS = 0.01
+
+    def __init__(self, path: Path, snapshot_sha256: str) -> None:
+        self.path = path
+        self.snapshot_sha256 = snapshot_sha256
+
+    @classmethod
+    def from_open_pull_snapshot(cls, snapshot_path: str) -> _SharedGraphQLLedger:
+        source = Path(snapshot_path)
+        if source.is_symlink():
+            raise ValueError("shared GraphQL ledger snapshot must not be a symlink")
+        try:
+            source_stat = source.stat()
+            snapshot = source.read_bytes()
+        except OSError as error:
+            raise ValueError("shared GraphQL ledger snapshot is unavailable") from error
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or source_stat.st_uid != os.getuid()
+            or source_stat.st_nlink != 1
+            or stat.S_IMODE(source_stat.st_mode) != 0o600
+        ):
+            raise ValueError("shared GraphQL ledger snapshot permissions are invalid")
+        ledger = Path(str(source) + ".krr-graphql-ledger-v1")
+        instance = cls(ledger, hashlib.sha256(snapshot).hexdigest())
+        instance._initialize()
+        return instance
+
+    def _state(self, descriptor: int) -> dict[str, object]:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        raw = os.read(descriptor, 16_384)
+        if len(raw) == 16_384:
+            raise ValueError("shared GraphQL ledger exceeds its bounded size")
+        try:
+            state = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("shared GraphQL ledger is malformed") from error
+        if not isinstance(state, dict) or set(state) != {
+            "reservations", "schema", "snapshot_sha256", "spent"
+        }:
+            raise ValueError("shared GraphQL ledger schema is invalid")
+        reservations = state.get("reservations")
+        spent = state.get("spent")
+        if (
+            state.get("schema") != self._SCHEMA
+            or state.get("snapshot_sha256") != self.snapshot_sha256
+            or type(spent) is not int
+            or spent < 0
+            or spent > _GRAPHQL_REVIEW_BUDGET - _GRAPHQL_REMAINING_FLOOR
+            or not isinstance(reservations, dict)
+            or any(
+                not isinstance(token, str)
+                or re.fullmatch(r"[0-9a-f]{64}", token) is None
+                or lease != self._LEASE
+                for token, lease in reservations.items()
+            )
+        ):
+            raise ValueError("shared GraphQL ledger state is invalid")
+        if sum(reservations.values()) > spent:
+            raise ValueError("shared GraphQL ledger reservations are invalid")
+        return state
+
+    @staticmethod
+    def _encode(state: dict[str, object]) -> bytes:
+        return json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _write(self, descriptor: int, state: dict[str, object]) -> None:
+        payload = self._encode(state)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        written = 0
+        while written < len(payload):
+            written += os.write(descriptor, payload[written:])
+        os.fsync(descriptor)
+
+    @staticmethod
+    def _validate_descriptor(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("shared GraphQL ledger permissions are invalid")
+
+    def _acquire_lock(self, descriptor: int, deadline: float | None = None) -> None:
+        limit = deadline if deadline is not None else time.monotonic() + self._LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError as error:
+                if time.monotonic() >= limit:
+                    raise ValueError("shared GraphQL ledger lock wait elapsed") from error
+                time.sleep(min(self._LOCK_RETRY_SECONDS, max(0.0, limit - time.monotonic())))
+            except OSError as error:
+                raise ValueError("shared GraphQL ledger lock cannot be acquired") from error
+
+    @staticmethod
+    def _is_empty(descriptor: int) -> bool:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return os.read(descriptor, 1) == b""
+
+    def _wait_for_initialization(self) -> None:
+        """Wait briefly for an O_EXCL creator to fsync its identity-bound state."""
+
+        deadline = time.monotonic() + self._LOCK_WAIT_SECONDS
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        while True:
+            try:
+                descriptor = os.open(self.path, flags)
+            except OSError as error:
+                raise ValueError("shared GraphQL ledger is unavailable") from error
+            locked = False
+            try:
+                self._validate_descriptor(descriptor)
+                self._acquire_lock(descriptor, deadline)
+                locked = True
+                try:
+                    self._state(descriptor)
+                    return
+                except ValueError:
+                    if not self._is_empty(descriptor):
+                        raise
+            finally:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+            if time.monotonic() >= deadline:
+                raise ValueError("shared GraphQL ledger initialization wait elapsed")
+            time.sleep(min(self._LOCK_RETRY_SECONDS, max(0.0, deadline - time.monotonic())))
+
+    def _initialize(self) -> None:
+        initial = {
+            "reservations": {},
+            "schema": self._SCHEMA,
+            "snapshot_sha256": self.snapshot_sha256,
+            "spent": 0,
+        }
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except FileExistsError:
+            self._wait_for_initialization()
+            return
+        except OSError as error:
+            raise ValueError("shared GraphQL ledger cannot be created") from error
+        locked = False
+        try:
+            self._validate_descriptor(descriptor)
+            self._acquire_lock(descriptor)
+            locked = True
+            self._write(descriptor, initial)
+        finally:
+            if locked:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _update(self, mutate: Any) -> Any:
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except OSError as error:
+            raise ValueError("shared GraphQL ledger is unavailable") from error
+        locked = False
+        try:
+            self._validate_descriptor(descriptor)
+            self._acquire_lock(descriptor)
+            locked = True
+            state = self._state(descriptor)
+            result = mutate(state)
+            self._write(descriptor, state)
+            return result
+        finally:
+            if locked:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def reserve(self) -> str:
+        def mutate(state: dict[str, object]) -> str:
+            spent = state["spent"]
+            reservations = state["reservations"]
+            assert isinstance(spent, int) and isinstance(reservations, dict)
+            if spent + self._LEASE > _GRAPHQL_REVIEW_BUDGET - _GRAPHQL_REMAINING_FLOOR:
+                raise ValueError("shared GraphQL ledger budget is exhausted")
+            token = secrets.token_hex(32)
+            while token in reservations:
+                token = secrets.token_hex(32)
+            reservations[token] = self._LEASE
+            state["spent"] = spent + self._LEASE
+            return token
+
+        return self._update(mutate)
+
+    def settle(self, token: str, cost: int) -> None:
+        if type(cost) is not int or cost < 1 or cost > self._LEASE:
+            raise ValueError("shared GraphQL ledger query cost is invalid")
+
+        def mutate(state: dict[str, object]) -> None:
+            spent = state["spent"]
+            reservations = state["reservations"]
+            assert isinstance(spent, int) and isinstance(reservations, dict)
+            lease = reservations.pop(token, None)
+            if lease != self._LEASE or spent < lease - cost:
+                raise ValueError("shared GraphQL ledger reservation is invalid")
+            state["spent"] = spent - lease + cost
+
+        self._update(mutate)
+
+
+def _stable_graphql_payload(payload: object) -> object:
+    """Remove only live rate-limit counters before comparing a race fence."""
+
+    if not isinstance(payload, Mapping):
+        return payload
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return payload
+    stable_data = dict(data)
+    stable_data.pop("rateLimit", None)
+    return {**payload, "data": stable_data}
 
 
 def _safe_branch_name(value: object) -> bool:
@@ -429,6 +809,9 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
     snapshot_default_branch: str | None = None
     seen_cursors: set[str] = set()
     cursor: str | None = None
+    page_count = 0
+    first_payload: object | None = None
+    first_arguments: list[str] | None = None
     while True:
         arguments = [
             "api",
@@ -436,6 +819,7 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             "-f",
             "query="
             "query($owner: String!, $name: String!, $cursor: String) {\n"
+            "  rateLimit { cost remaining resetAt }\n"
             "  repository(owner: $owner, name: $name) {\n"
             "    defaultBranchRef { name }\n"
             "    pullRequests(first: 100, states: OPEN, after: $cursor) {\n"
@@ -452,6 +836,9 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
         if cursor is not None:
             arguments.extend(("-F", f"cursor={cursor}"))
         payload = _gh_json(*arguments)
+        if page_count == 0:
+            first_payload = payload
+            first_arguments = list(arguments)
         if not isinstance(payload, Mapping):
             raise TypeError("open pull requests response must be an object")
         data = payload.get("data")
@@ -474,6 +861,17 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
         nodes = connection.get("nodes")
         if not isinstance(nodes, list):
             raise TypeError("open pull requests nodes must be an array")
+        if len(nodes) > _MAX_REST_PAGE_ITEMS:
+            raise ValueError(
+                "open pull requests page exceeds the item limit "
+                f"({_MAX_REST_PAGE_ITEMS})"
+            )
+        page_count += 1
+        if page_count > _MAX_REST_PAGES:
+            raise ValueError(
+                "open pull requests exceed the page limit "
+                f"({_MAX_REST_PAGES})"
+            )
         for node in nodes:
             if not isinstance(node, Mapping):
                 raise TypeError("open pull request must be an object")
@@ -526,6 +924,11 @@ def _open_pull_requests(repository: str) -> list[dict[str, object]]:
             raise TypeError("open pull requests pageInfo must be an object")
         has_next_page = page_info.get("hasNextPage")
         if has_next_page is False:
+            if first_payload is None or first_arguments is None:
+                raise TypeError("open pull requests initial page is missing")
+            reread = _gh_json(*first_arguments)
+            if _stable_graphql_payload(reread) != _stable_graphql_payload(first_payload):
+                raise ValueError("open pull requests changed during pagination")
             return pull_requests
         if has_next_page is not True:
             raise TypeError("open pull requests hasNextPage must be a boolean")
@@ -1038,15 +1441,11 @@ def _required_check_run_producer_errors(
             continue
         try:
             rollup_id, rollup_url = _rollup_check_run_identity(matches[0])
-            pages = _gh_json(
-                "api",
-                "--paginate",
-                "--slurp",
+            pages = _rest_pages(
                 f"repos/{repository}/commits/{head}/check-runs?"
                 f"check_name={quote(context, safe='')}&app_id={app_id}&filter=all&per_page=100",
+                item_key="check_runs",
             )
-            if not isinstance(pages, list) or not all(isinstance(page, Mapping) for page in pages):
-                raise TypeError("required Check Run pagination response must contain page objects")
             candidates: list[Mapping[str, object]] = []
             for page in pages:
                 page_runs = page.get("check_runs")
@@ -1272,14 +1671,75 @@ def readiness_errors(
     return errors
 
 
+def _graphql_reported_cost(payload: object) -> int:
+    if not isinstance(payload, Mapping):
+        raise TypeError("GraphQL response must be an object")
+    data = payload.get("data")
+    rate_limit = data.get("rateLimit") if isinstance(data, Mapping) else None
+    cost = rate_limit.get("cost") if isinstance(rate_limit, Mapping) else None
+    if type(cost) is not int or cost < 1 or cost > _GRAPHQL_MAX_QUERY_COST:
+        raise ValueError("GraphQL rateLimit cost is outside the query budget")
+    return cost
+
+
 def _gh_json(*arguments: str) -> Any:
+    global _ACTIVE_REST_BUDGET, _ACTIVE_GRAPHQL_BUDGET, _ACTIVE_SHARED_GRAPHQL_LEDGER
+    rest_get = len(arguments) >= 2 and arguments[0] == "api" and arguments[1] not in {
+        "graphql",
+        "rate_limit",
+    }
+    if rest_get and _ACTIVE_REST_BUDGET is None:
+        budget = _RestBudget()
+        _ACTIVE_REST_BUDGET = budget
+        budget.observe_rate_limit(_gh_json("api", "rate_limit"))
+    if rest_get and _ACTIVE_REST_BUDGET is not None:
+        _ACTIVE_REST_BUDGET.consume()
+    graphql_entry = len(arguments) >= 2 and (
+        arguments[:2] == ("pr", "view")
+        or arguments[:2] == ("repo", "view")
+        or arguments[:2] == ("api", "graphql")
+    )
+    is_preflight = f"query={_GRAPHQL_PREFLIGHT_QUERY}" in arguments
+    if graphql_entry and _ACTIVE_GRAPHQL_BUDGET is None:
+        budget = _GraphQLBudget()
+        _ACTIVE_GRAPHQL_BUDGET = budget
+        if not is_preflight:
+            preflight = _gh_json(
+                "api",
+                "graphql",
+                "-f",
+                f"query={_GRAPHQL_PREFLIGHT_QUERY}",
+            )
+            budget.observe(preflight)
+    if graphql_entry and _ACTIVE_GRAPHQL_BUDGET is not None:
+        _ACTIVE_GRAPHQL_BUDGET.before_request()
+    shared_reservation = (
+        _ACTIVE_SHARED_GRAPHQL_LEDGER.reserve()
+        if graphql_entry and _ACTIVE_SHARED_GRAPHQL_LEDGER is not None
+        else None
+    )
     completed = subprocess.run(
         ["gh", *arguments],
         check=True,
         capture_output=True,
         text=True,
+        timeout=20,
     )
-    return json.loads(completed.stdout)
+    payload = json.loads(completed.stdout)
+    if arguments[:2] == ("api", "graphql") and _ACTIVE_GRAPHQL_BUDGET is not None:
+        _ACTIVE_GRAPHQL_BUDGET.observe(payload)
+        if shared_reservation is not None and _ACTIVE_SHARED_GRAPHQL_LEDGER is not None:
+            _ACTIVE_SHARED_GRAPHQL_LEDGER.settle(
+                shared_reservation, _graphql_reported_cost(payload)
+            )
+    elif arguments[:2] in {("pr", "view"), ("repo", "view")} and _ACTIVE_GRAPHQL_BUDGET is not None:
+        # These ``gh`` projections are GraphQL-backed reads but do not expose
+        # rateLimit metadata in its JSON projection; charge its conservative
+        # one-point primary query cost after the preflight reservation.
+        _ACTIVE_GRAPHQL_BUDGET.consume()
+        if shared_reservation is not None and _ACTIVE_SHARED_GRAPHQL_LEDGER is not None:
+            _ACTIVE_SHARED_GRAPHQL_LEDGER.settle(shared_reservation, 1)
+    return payload
 
 
 def _repository_name(repository: str | None) -> str:
@@ -1478,7 +1938,10 @@ def _require_boundary(
 
 
 def _review_thread_comments(
-    thread_id: object, initial_cursor: object
+    thread_id: object,
+    initial_cursor: object,
+    *,
+    budget: _GraphQLBudget | None = None,
 ) -> list[dict[str, object]]:
     """Read every comment on one review thread with its own cursor."""
 
@@ -1488,6 +1951,7 @@ def _review_thread_comments(
         raise TypeError("review thread comments endCursor must be a unique string")
     query = """
 query($threadId: ID!, $commentsCursor: String) {
+  rateLimit { cost remaining resetAt }
   node(id: $threadId) {
     __typename
     ... on PullRequestReviewThread {
@@ -1503,6 +1967,9 @@ query($threadId: ID!, $commentsCursor: String) {
     cursor = initial_cursor
     seen_cursors = {cursor}
     follow_up_pages = 0
+    active_budget = budget or _GraphQLBudget()
+    first_payload: object | None = None
+    first_arguments: list[str] | None = None
     while True:
         arguments = [
             "api",
@@ -1513,7 +1980,12 @@ query($threadId: ID!, $commentsCursor: String) {
             f"threadId={thread_id}",
         ]
         arguments.extend(("-F", f"commentsCursor={cursor}"))
+        active_budget.before_request()
         payload = _gh_json(*arguments)
+        active_budget.observe(payload)
+        if follow_up_pages == 0:
+            first_payload = payload
+            first_arguments = list(arguments)
         if not isinstance(payload, Mapping):
             raise TypeError("review thread comments response must be an object")
         data = payload.get("data")
@@ -1540,6 +2012,13 @@ query($threadId: ID!, $commentsCursor: String) {
             raise TypeError("review thread comments pageInfo must be an object")
         has_next_page = page_info.get("hasNextPage")
         if has_next_page is False:
+            if first_payload is None or first_arguments is None:
+                raise TypeError("review thread comments initial page is missing")
+            active_budget.before_request()
+            reread = _gh_json(*first_arguments)
+            active_budget.observe(reread)
+            if _stable_graphql_payload(reread) != _stable_graphql_payload(first_payload):
+                raise ValueError("review thread comments changed during pagination")
             return comments
         if has_next_page is not True:
             raise TypeError("review thread comments hasNextPage must be a boolean")
@@ -1553,9 +2032,15 @@ query($threadId: ID!, $commentsCursor: String) {
         seen_cursors.add(cursor)
 
 
-def _review_threads(repository: str, pull_request: int) -> list[dict[str, object]]:
+def _review_threads(
+    repository: str,
+    pull_request: int,
+    *,
+    budget: _GraphQLBudget | None = None,
+) -> list[dict[str, object]]:
     query = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $cursor) {
@@ -1580,6 +2065,10 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
     threads: list[dict[str, object]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
+    active_budget = budget or _GraphQLBudget()
+    page_count = 0
+    first_payload: object | None = None
+    first_arguments: list[str] | None = None
     while True:
         arguments = [
             "api",
@@ -1595,7 +2084,12 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
         ]
         if cursor is not None:
             arguments.extend(("-F", f"cursor={cursor}"))
+        active_budget.before_request()
         payload = _gh_json(*arguments)
+        active_budget.observe(payload)
+        if page_count == 0:
+            first_payload = payload
+            first_arguments = list(arguments)
         connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
         if not isinstance(connection, Mapping):
             raise TypeError("reviewThreads must be an object")
@@ -1629,31 +2123,54 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
                         )
                     comment_nodes = [
                         *comment_nodes,
-                        *_review_thread_comments(node.get("id"), comments_cursor),
+                        *_review_thread_comments(
+                            node.get("id"),
+                            comments_cursor,
+                            budget=active_budget,
+                        ),
                     ]
                 elif has_next_page is not False:
                     raise TypeError("review thread comments hasNextPage must be a boolean")
                 node = {**node, "comments": comment_nodes}
             threads.append(node)
+        page_count += 1
         page_info = connection["pageInfo"]
         if not isinstance(page_info, Mapping):
             raise TypeError("reviewThreads pageInfo must be an object")
         has_next_page = page_info.get("hasNextPage")
         if has_next_page is False:
+            if first_payload is None or first_arguments is None:
+                raise TypeError("reviewThreads initial page is missing")
+            active_budget.before_request()
+            reread = _gh_json(*first_arguments)
+            active_budget.observe(reread)
+            if _stable_graphql_payload(reread) != _stable_graphql_payload(first_payload):
+                raise ValueError("reviewThreads changed during pagination")
             return threads
         if has_next_page is not True:
             raise TypeError("reviewThreads hasNextPage must be a boolean")
         cursor = page_info.get("endCursor")
         if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise TypeError("reviewThreads endCursor must be a string")
+        if page_count >= _MAX_REVIEW_CONNECTION_PAGES:
+            raise ValueError(
+                "reviewThreads exceed the outer page limit "
+                f"({_MAX_REVIEW_CONNECTION_PAGES})"
+            )
         seen_cursors.add(cursor)
 
 
-def _reviews(repository: str, pull_request: int) -> list[dict[str, object]]:
+def _reviews(
+    repository: str,
+    pull_request: int,
+    *,
+    budget: _GraphQLBudget | None = None,
+) -> list[dict[str, object]]:
     """Read every pull-request review page, failing closed on invalid cursors."""
 
     query = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviews(first: 100, after: $cursor) {
@@ -1668,6 +2185,10 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
     reviews: list[dict[str, object]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
+    active_budget = budget or _GraphQLBudget()
+    page_count = 0
+    first_payload: object | None = None
+    first_arguments: list[str] | None = None
     while True:
         arguments = [
             "api",
@@ -1683,7 +2204,12 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
         ]
         if cursor is not None:
             arguments.extend(("-F", f"cursor={cursor}"))
+        active_budget.before_request()
         payload = _gh_json(*arguments)
+        active_budget.observe(payload)
+        if page_count == 0:
+            first_payload = payload
+            first_arguments = list(arguments)
         connection = payload["data"]["repository"]["pullRequest"]["reviews"]
         if not isinstance(connection, Mapping):
             raise TypeError("reviews must be an object")
@@ -1694,39 +2220,166 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
             if not isinstance(node, dict):
                 raise TypeError("review must be an object")
             reviews.append(node)
+        page_count += 1
         page_info = connection["pageInfo"]
         if not isinstance(page_info, Mapping):
             raise TypeError("reviews pageInfo must be an object")
         has_next_page = page_info.get("hasNextPage")
         if has_next_page is False:
+            if first_payload is None or first_arguments is None:
+                raise TypeError("reviews initial page is missing")
+            active_budget.before_request()
+            reread = _gh_json(*first_arguments)
+            active_budget.observe(reread)
+            if _stable_graphql_payload(reread) != _stable_graphql_payload(first_payload):
+                raise ValueError("reviews changed during pagination")
             return reviews
         if has_next_page is not True:
             raise TypeError("reviews hasNextPage must be a boolean")
         cursor = page_info.get("endCursor")
         if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
             raise TypeError("reviews endCursor must be a string")
+        if page_count >= _MAX_REVIEW_CONNECTION_PAGES:
+            raise ValueError(
+                "reviews exceed the outer page limit "
+                f"({_MAX_REVIEW_CONNECTION_PAGES})"
+            )
         seen_cursors.add(cursor)
 
 
-def _paginated_api_array(endpoint: str) -> list[dict[str, object]]:
-    """Fetch every REST page and normalize gh --slurp output to one array."""
+def _rest_page_endpoint(endpoint: str, page: int) -> str:
+    """Build one bounded REST request without eager CLI pagination."""
 
-    payload = _gh_json("api", endpoint, "--paginate", "--slurp")
-    if not isinstance(payload, list):
-        raise TypeError("paginated GitHub API response must be an array")
-    if not payload:
-        return []
-    if all(isinstance(item, Mapping) for item in payload):
-        return list(payload)
+    separator = "&" if "?" in endpoint else "?"
+    per_page = "" if "per_page=" in endpoint else "&per_page=100"
+    return f"{endpoint}{separator}page={page}{per_page}"
+
+
+def _rest_pages(endpoint: str, *, item_key: str | None = None) -> list[object]:
+    """Fetch REST pages one at a time and stop before an 11th request."""
+
+    pages: list[object] = []
+    item_count = 0
+    first_payload: object | None = None
+    for page_number in range(1, _MAX_REST_PAGES + 1):
+        payload = _gh_json("api", _rest_page_endpoint(endpoint, page_number))
+        # Keep old unit fixtures that model gh's slurp output compatible while
+        # production always uses the explicit single-page request above.
+        if item_key is None and isinstance(payload, list) and payload and all(
+            isinstance(page, list) for page in payload
+        ):
+            if len(payload) > _MAX_REST_PAGES:
+                raise ValueError(
+                    "paginated GitHub API response exceeds the page limit "
+                    f"({_MAX_REST_PAGES})"
+                )
+            if any(len(page) > _MAX_REST_PAGE_ITEMS for page in payload):
+                raise ValueError(
+                    "paginated GitHub API page exceeds the item limit "
+                    f"({_MAX_REST_PAGE_ITEMS})"
+                )
+            flattened = [item for page in payload for item in page]
+            if len(flattened) > _MAX_REST_ITEMS:
+                raise ValueError(
+                    "paginated GitHub API response exceeds the item limit "
+                    f"({_MAX_REST_ITEMS})"
+                )
+            if not all(isinstance(item, Mapping) for item in flattened):
+                raise TypeError("GitHub API page item must be an object")
+            return payload
+        if item_key is not None and isinstance(payload, list) and all(
+            isinstance(page, Mapping) for page in payload
+        ):
+            return _bounded_rest_object_pages(
+                payload, label="REST", item_key=item_key
+            )
+        if item_key is None:
+            if not isinstance(payload, list):
+                raise TypeError("paginated GitHub API response must be an array")
+            values = payload
+        else:
+            if not isinstance(payload, Mapping):
+                raise TypeError(
+                    "paginated GitHub API response must contain page objects"
+                )
+            values = payload.get(item_key)
+            if not isinstance(values, list):
+                raise TypeError("paginated GitHub API page must contain an array")
+        if len(values) > _MAX_REST_PAGE_ITEMS:
+            raise ValueError(
+                "paginated GitHub API page exceeds the item limit "
+                f"({_MAX_REST_PAGE_ITEMS})"
+            )
+        if not all(isinstance(item, Mapping) for item in values):
+            raise TypeError("GitHub API page item must be an object")
+        if page_number == 1:
+            first_payload = payload
+        pages.append(payload)
+        item_count += len(values)
+        if item_count > _MAX_REST_ITEMS:
+            raise ValueError(
+                "paginated GitHub API response exceeds the item limit "
+                f"({_MAX_REST_ITEMS})"
+            )
+        # A short page proves there is no next page.  A full final page is
+        # deliberately treated as overflow because requesting page 11 would
+        # spend the REST budget before this verifier could inspect it.
+        if len(values) < _MAX_REST_PAGE_ITEMS:
+            if first_payload is None:
+                raise TypeError("REST initial page is missing")
+            reread = _gh_json("api", _rest_page_endpoint(endpoint, 1))
+            if reread != first_payload:
+                raise ValueError("REST page changed during pagination")
+            return pages
+    raise ValueError(
+        "paginated GitHub API response exceeds the page limit "
+        f"({_MAX_REST_PAGES})"
+    )
+
+
+def _paginated_api_array(endpoint: str) -> list[dict[str, object]]:
+    """Fetch every REST page and normalize it to one bounded array."""
+
+    pages = _rest_pages(endpoint)
     flattened: list[dict[str, object]] = []
-    for page in payload:
+    for page in pages:
         if not isinstance(page, list):
             raise TypeError("paginated GitHub API page must be an array")
-        for item in page:
-            if not isinstance(item, dict):
-                raise TypeError("GitHub API item must be an object")
-            flattened.append(item)
+        flattened.extend(page)
     return flattened
+
+
+def _bounded_rest_object_pages(
+    payload: object, *, label: str, item_key: str
+) -> list[Mapping[str, object]]:
+    """Validate a bounded object-page fixture (kept for unit contracts)."""
+
+    if not isinstance(payload, list) or not all(
+        isinstance(page, Mapping) for page in payload
+    ):
+        raise TypeError(f"{label} pagination response must contain page objects")
+    if len(payload) > _MAX_REST_PAGES:
+        raise ValueError(
+            f"{label} pagination response exceeds the page limit "
+            f"({_MAX_REST_PAGES})"
+        )
+    pages = list(payload)
+    item_count = 0
+    for page in pages:
+        values = page.get(item_key)
+        if not isinstance(values, list):
+            raise TypeError(f"{label} page must contain an array")
+        if len(values) > _MAX_REST_PAGE_ITEMS:
+            raise ValueError(
+                f"{label} page exceeds the item limit ({_MAX_REST_PAGE_ITEMS})"
+            )
+        item_count += len(values)
+        if item_count > _MAX_REST_ITEMS:
+            raise ValueError(
+                f"{label} pagination response exceeds the item limit "
+                f"({_MAX_REST_ITEMS})"
+            )
+    return pages
 
 
 def _latch_source_run_id(details_url: object, repository: str) -> str | None:
@@ -1849,18 +2502,12 @@ def _latest_sensor_generation(
         "pull_request_review",
         "pull_request_review_comment",
     ):
-        payload = _gh_json(
-            "api",
-            "--paginate",
-            "--slurp",
+        payload = _rest_pages(
             f"repos/{repository}/actions/workflows/"
             f"pr-governance-review-events.yml/runs?event={event_name}"
             f"&head_sha={head}&per_page=100",
+            item_key="workflow_runs",
         )
-        if not isinstance(payload, list) or not all(
-            isinstance(page, Mapping) for page in payload
-        ):
-            raise TypeError("sensor workflow run pagination response is invalid")
         for page in payload:
             if "truncated" in page and type(page["truncated"]) is not bool:
                 raise TypeError("sensor workflow run page is invalid")
@@ -1986,13 +2633,16 @@ def _governance_check_error(
     run: Mapping[str, object] | None = None
     source_ids: list[str] = []
     if not exclude_trusted_governance_check:
-        raw_pages = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_TRUSTED_CHECK.replace(' ', '%20')}&app_id={app_id}&filter=all&per_page=100")
-        if not isinstance(raw_pages, list) or not all(isinstance(page, Mapping) for page in raw_pages):
-            raise TypeError("check-runs pagination response must contain page objects")
+        raw_pages = _rest_pages(
+            f"repos/{repository}/commits/{head}/check-runs?check_name={_TRUSTED_CHECK.replace(' ', '%20')}&app_id={app_id}&filter=all&per_page=100",
+            item_key="check_runs",
+        )
         runs: list[Mapping[str, object]] = []
         for page in raw_pages:
             page_runs = page.get("check_runs")
-            if not isinstance(page_runs, list) or not all(isinstance(run, Mapping) for run in page_runs):
+            if not isinstance(page_runs, list) or not all(
+                isinstance(run, Mapping) for run in page_runs
+            ):
                 raise TypeError("check-runs page must contain an array")
             runs.extend(page_runs)
         matches = [item for item in runs if item.get("name") == _TRUSTED_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == app_id]
@@ -2045,10 +2695,11 @@ def _governance_check_error(
         if latest is None:
             return "trusted source Actions run is not the latest sensor generation"
         source_ids = [str(latest["id"])]
-    latch_payload = _gh_json("api", "--paginate", "--slurp", f"repos/{repository}/commits/{head}/check-runs?check_name={_LATCH_CHECK.replace(' ', '%20')}&app_id=15368&filter=all&per_page=100")
-    if not isinstance(latch_payload, list) or not all(isinstance(page, Mapping) for page in latch_payload):
-        raise TypeError("latch Check Run pagination response must contain page objects")
-    latch_runs = [item for page in latch_payload for item in (page.get("check_runs") if isinstance(page.get("check_runs"), list) else [])]
+    latch_payload = _rest_pages(
+        f"repos/{repository}/commits/{head}/check-runs?check_name={_LATCH_CHECK.replace(' ', '%20')}&app_id=15368&filter=all&per_page=100",
+        item_key="check_runs",
+    )
+    latch_runs = [item for page in latch_payload for item in page["check_runs"]]
     if not all(isinstance(item, Mapping) for item in latch_runs):
         raise TypeError("latch Check Run page must contain an array")
     latch_candidates = [item for item in latch_runs if item.get("name") == _LATCH_CHECK and item.get("head_sha", "").lower() == head.lower() and isinstance(item.get("app"), Mapping) and item["app"].get("id") == 15368]
@@ -2138,6 +2789,13 @@ def _governance_check_error(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global _ACTIVE_REST_BUDGET, _ACTIVE_GRAPHQL_BUDGET, _ACTIVE_SHARED_GRAPHQL_LEDGER
+    # A verifier invocation is one process-level budget scope.  Resetting here
+    # also keeps embedded/unit callers from carrying a prior invocation's
+    # remaining value into the next readiness check.
+    _ACTIVE_REST_BUDGET = None
+    _ACTIVE_GRAPHQL_BUDGET = None
+    _ACTIVE_SHARED_GRAPHQL_LEDGER = None
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", type=int, required=True, help="pull request number")
     parser.add_argument("--repository", help="GitHub repository as OWNER/REPOSITORY")
@@ -2161,6 +2819,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--expected-base-sha and --expected-head-sha must be provided together")
     if arguments.exclude_trusted_governance_check and arguments.require_draft:
         parser.error("--exclude-trusted-governance-check requires --allow-ready")
+    # The all/early writer passes one private temporary open-PR snapshot to
+    # every verifier process. Its immutable bytes name a single ledger, while
+    # ordinary local invocations retain their existing per-process lease.
+    if (
+        arguments.exclude_trusted_governance_check
+        and arguments.open_pull_snapshot is not None
+    ):
+        _ACTIVE_SHARED_GRAPHQL_LEDGER = _SharedGraphQLLedger.from_open_pull_snapshot(
+            arguments.open_pull_snapshot
+        )
     expected_boundary = _expected_boundary(
         arguments.expected_base_sha, arguments.expected_head_sha
     )
@@ -2181,17 +2849,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     current_reviews = pull_request.get("reviews")
     if not isinstance(current_reviews, list):
         raise TypeError("pull request reviews must be an array")
+    graphql_budget = _ACTIVE_GRAPHQL_BUDGET or _GraphQLBudget()
     # gh pr view exposes a bounded connection.  A full boundary (or an empty
     # compatibility response) requires explicit GraphQL cursor pagination.
     if not current_reviews or len(current_reviews) >= 100:
-        pull_request["reviews"] = _reviews(repository, arguments.pr)
+        pull_request["reviews"] = _reviews(
+            repository, arguments.pr, budget=graphql_budget
+        )
     comments = _paginated_api_array(
         f"repos/{repository}/issues/{arguments.pr}/comments"
     )
     initial_marker_identities = _review_marker_identities(
         _review_markers(comments, marker_author_login)
     )
-    threads = _review_threads(repository, arguments.pr)
+    threads = _review_threads(repository, arguments.pr, budget=graphql_budget)
     base, head = _require_boundary(
         pull_request.get("baseRefOid"), pull_request.get("headRefOid"), expected_boundary
     )
