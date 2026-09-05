@@ -216,19 +216,42 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
 
     @staticmethod
     def _workflow_program(match: re.Match[str]) -> str:
-        """Normalize extracted YAML Python and neutralize its polling delay for tests."""
+        """Normalize extracted YAML Python and make polling deterministic in tests."""
         program = (
             textwrap.dedent(match.group(1))
-            .replace("time.sleep(2)", "None")
-            .replace("time.sleep(5)", "None")
-            .replace("time.sleep(8.1)", "None")
-            .replace("time.sleep(30)", "None")
-            .replace("time.sleep(min(5,remaining))", "None")
-            .replace("time.sleep(min(30,remaining))", "None")
-            .replace('subprocess.run(["sleep", "2"], check=False)', "None")
-            .replace('subprocess.run(["sleep", "5"], check=False)', "None")
-            .replace('subprocess.run(["sleep", "30"], check=False)', "None")
         )
+        # Keep production deadline arithmetic intact while advancing it on a
+        # deterministic clock.  A no-op sleep would leave a timeout loop with
+        # a real deadline and make the fixture depend on wall-clock timing.
+        # Workflow snippets use both ``import time`` and combined imports
+        # such as ``import json, os, ..., time``.  Remove precisely that
+        # import binding and inject the deterministic clock once, so a
+        # terminal deadline cannot accidentally keep reading wall time.
+        def without_time_import(import_match: re.Match[str]) -> str:
+            indentation, names = import_match.groups()
+            modules = [name.strip() for name in names.split(",")]
+            if "time" not in modules:
+                return import_match.group(0)
+            retained = [name for name in modules if name != "time"]
+            return f"{indentation}import {', '.join(retained)}" if retained else ""
+
+        # The standard unittest runner can resolve macOS Python 3.9, whose
+        # ``zip`` has no ``strict=`` keyword.  The production snippets keep
+        # their strict calls unchanged; only the extracted test program uses
+        # an equivalent sentinel-based implementation, including the same
+        # unequal-length failure, so this does not weaken the assertion.
+        program = re.sub(
+            r"(?m)^(\s*)import\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)$",
+            without_time_import,
+            program,
+        )
+        program = re.sub(
+            r"zip\(([^(),]+),([^(),]+),\s*strict=True\)",
+            r"_krr_strict_zip(\1,\2)",
+            program,
+        )
+        program = "time = _krr_clock\n" + program
+        program = program.replace("time.sleep(", "_krr_sleep(")
         # Production pagination deliberately uses one bounded request per
         # page, rereads page one as an anchor, and uses ``--include`` on the
         # terminal page.  Most fixtures predate that contract and model the
@@ -241,12 +264,43 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
             import json as _krr_json
             import re as _krr_re
             import subprocess
+            import time as _krr_real_time
+            from itertools import zip_longest as _krr_zip_longest
+
+            class _KrrFakeClock:
+                def __init__(self):
+                    self._now = _krr_real_time.time()
+
+                def time(self):
+                    return self._now
+
+                def monotonic(self):
+                    return self._now
+
+                def sleep(self, seconds):
+                    if isinstance(seconds, (int, float)) and seconds >= 0:
+                        self._now += seconds
+
+            _krr_clock = _KrrFakeClock()
+
+            def _krr_sleep(seconds):
+                _krr_clock.sleep(seconds)
+
+            def _krr_strict_zip(*iterables):
+                sentinel = object()
+                for values in _krr_zip_longest(*iterables, fillvalue=sentinel):
+                    if any(value is sentinel for value in values):
+                        raise ValueError("zip() argument lengths must be equal")
+                    yield values
 
             _krr_underlying_run = subprocess.run
 
             def _krr_run(*args, **kwargs):
-                result = _krr_underlying_run(*args, **kwargs)
                 argv = args[0] if args else kwargs.get("args", [])
+                if isinstance(argv, (list, tuple)) and argv and argv[0] == "sleep":
+                    _krr_clock.sleep(float(argv[1]))
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                result = _krr_underlying_run(*args, **kwargs)
                 if not isinstance(argv, (list, tuple)) or result.returncode != 0:
                     return result
                 endpoint = next((item for item in argv if isinstance(item, str) and item.startswith("repos/")), "")
@@ -1677,7 +1731,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                     "WRITER_TAIL_CHECK_MANIFEST_1": json.dumps(manifest, separators=(",", ":")), "WRITER_TAIL_CHECK_MANIFEST_2": "[]", "WRITER_PRESERVED_CHECK_MANIFEST": "[]", "WRITER_CARRY_TARGET_NUMBERS_1": "[]", "WRITER_CARRY_TARGET_NUMBERS_2": "[]", "GITHUB_OUTPUT": str(Path(tempfile.mkdtemp()) / "dispatch-output"),
                 }
                 with patch.dict(os.environ, dispatch_env, clear=True), patch("subprocess.run", side_effect=fake_run):
-                    exec(textwrap.dedent(dispatch_program.group(1)), {"__name__": "__main__"})
+                    exec(self._workflow_program(dispatch_program), {"__name__": "__main__"})
                 self.assertEqual(len(writer_dispatches), 1)
             return posts, manifest
 
@@ -3190,7 +3244,12 @@ raise SystemExit(91)
         self.assertEqual(result, 0)
         self.assertEqual(len(posts), 2)
         self.assertEqual(len(rereads), 2)
-        self.assertGreaterEqual(len(sleeps), 1)
+        # ``_workflow_program`` replaces wall-clock sleeps with deterministic
+        # fake-clock advancement, so patch("time.sleep") no longer observes
+        # the pacing call.  Verify the adapted program retains that semantic
+        # boundary while the production-source assertion above covers the
+        # original API spelling.
+        self.assertIn("_krr_sleep(delay)", program)
         for expected_head, post in zip((first, second), posts):
             self.assertIn(f"head_sha={expected_head}", post)
             self.assertIn(f"external_id=krr-governance/v1/{expected_head}/dispatcher-9", post)
@@ -4190,11 +4249,21 @@ raise SystemExit(91)
             self.workflow, re.DOTALL,
         )
         self.assertIsNotNone(match); assert match is not None
+        source_program = textwrap.dedent(match.group(1))
         program = self._workflow_program(match)
-        self.assertIn("write_clock=[time.monotonic()+8.1]", program)
-        self.assertIn("time.sleep(delay)", program)
-        self.assertIn("delay=write_clock[0]-time.monotonic()", program)
-        self.assertIn("write_clock[0]=time.monotonic()+8.1", program)
+        # The extracted fixture rewrites wall-clock access to a fake clock so
+        # polling tests cannot sleep in real time.  Assert production pacing
+        # against the original snippet and the deterministic adaptation
+        # against the transformed program.
+        for value in (
+            "write_clock=[time.monotonic()+8.1]",
+            "time.sleep(delay)",
+            "delay=write_clock[0]-time.monotonic()",
+            "write_clock[0]=time.monotonic()+8.1",
+        ):
+            self.assertIn(value, source_program)
+        self.assertIn("time = _krr_clock", program)
+        self.assertIn("_krr_sleep(delay)", program)
         writer = (ROOT / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
         self.assertIn("cancel-in-progress: ${{ inputs.scope == 'early' }}", writer)
 
@@ -5511,7 +5580,7 @@ raise SystemExit(91)
                 }
                 with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
                     try:
-                        exec(textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n          PY", step.group("body"), re.DOTALL).group(1)), {"__name__": "__main__"})  # type: ignore[union-attr]
+                        exec(self._workflow_program(re.search(r"python3 - <<'PY'\n(.*?)\n          PY", step.group("body"), re.DOTALL)), {"__name__": "__main__"})  # type: ignore[arg-type]
                     except SystemExit as error:
                         self.assertEqual(error.code, 0)
                 await_body = await_steps[index - 1].group("body")
@@ -5526,7 +5595,7 @@ raise SystemExit(91)
                 }
                 with patch.dict(os.environ, await_environment, clear=True), patch("subprocess.run", side_effect=fake_run), patch("time.sleep"):
                     try:
-                        exec(textwrap.dedent(await_program_match.group(1)), {"__name__": "__main__"})
+                        exec(self._workflow_program(await_program_match), {"__name__": "__main__"})
                     except SystemExit as error:
                         self.assertEqual(error.code, 0)
             self.assertEqual(len(dispatches), 4)
@@ -5616,7 +5685,7 @@ raise SystemExit(91)
                 "GITHUB_OUTPUT": str(handoff_output), "PATH": os.environ["PATH"],
             }
             with patch.dict(os.environ, handoff_env, clear=True), patch("subprocess.run", side_effect=dispatch_transport):
-                exec(textwrap.dedent(first_program_match.group(1)), {"__name__": "__main__"})
+                exec(self._workflow_program(first_program_match), {"__name__": "__main__"})
             self.assertEqual(len(carried_dispatches), 1)
             dispatched_fields = {
                 item.split("=", 1)[0]: item.split("=", 1)[1]
@@ -5756,7 +5825,7 @@ raise SystemExit(91)
                         }
                         with patch.dict(os.environ, await_env, clear=True), patch("subprocess.run", side_effect=failed_await_transport), patch("time.sleep"):
                             with self.assertRaises(SystemExit):
-                                exec(textwrap.dedent(await_program.group(1)), {"__name__": "__main__"})
+                                exec(self._workflow_program(await_program), {"__name__": "__main__"})
                     else:
                         # The production writer itself owns the terminal
                         # barrier; a failed main never makes a continuation
@@ -5796,7 +5865,9 @@ raise SystemExit(91)
                     # condition, to decide whether the next dispatch runs.
                     self.assertFalse(self._github_if(next_segment_if, failed_values))
                     if self._github_if(next_segment_if, failed_values):
-                        exec(textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n          PY", dispatch_steps[1].group("body"), re.DOTALL).group(1)), {"__name__": "__main__"})  # pragma: no cover
+                        next_program = re.search(r"python3 - <<'PY'\n(.*?)\n          PY", dispatch_steps[1].group("body"), re.DOTALL)
+                        self.assertIsNotNone(next_program); assert next_program is not None
+                        exec(self._workflow_program(next_program), {"__name__": "__main__"})  # pragma: no cover
                     self.assertEqual(next_segment_dispatches, [])
 
 
