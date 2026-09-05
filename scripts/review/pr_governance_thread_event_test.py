@@ -164,6 +164,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
 
         source_matches = namespace["sensor_run_matches"]
         writer_matches = namespace["writer_run_matches"]
+        repository_identity = (101, "repo", "https://api.github.com/repos/owner/repo")
         self.assertTrue(callable(source_matches))
         self.assertTrue(callable(writer_matches))
         source = {
@@ -176,37 +177,37 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             "conclusion": None,
             "run_attempt": 1,
             "run_number": 4,
-            "repository": {"full_name": "owner/repo"},
+            "repository": {"id": 101, "name": "repo", "url": repository_identity[2]},
             "pull_requests": [{
                 "number": 72,
-                "base": {"sha": base, "ref": "master", "repo": {"full_name": "owner/repo"}},
-                "head": {"sha": head, "repo": {"full_name": "owner/repo"}},
+                "base": {"sha": base, "ref": "master", "repo": {"id": 101, "name": "repo", "url": repository_identity[2]}},
+                "head": {"sha": head, "repo": {"id": 101, "name": "repo", "url": repository_identity[2]}},
             }],
         }
         assert callable(source_matches) and callable(writer_matches)
-        self.assertTrue(source_matches(source))
+        self.assertTrue(source_matches(source, repository_identity))
         for changed in (
             {**source, "id": 18},
             {**source, "head_sha": "c" * 40},
-            {**source, "repository": {"full_name": "other/repo"}},
+            {**source, "repository": {"id": 101, "name": "repo", "url": repository_identity[2], "full_name": "other/repo"}},
             {**source, "status": "completed", "conclusion": "cancelled"},
             {**source, "pull_requests": [{**source["pull_requests"][0], "number": 73}]},
         ):
-            self.assertFalse(source_matches(changed))
+            self.assertFalse(source_matches(changed, repository_identity))
 
         writer = {
             "id": 91,
             "name": "PR governance status writer",
             "event": "workflow_dispatch",
             "path": ".github/workflows/pr-governance-status-writer.yml@master",
-            "repository": {"full_name": "owner/repo"},
+            "repository": {"id": 101, "name": "repo", "url": repository_identity[2]},
             "run_attempt": 1,
             "status": "in_progress",
         }
-        self.assertTrue(writer_matches(writer, "91"))
-        self.assertFalse(writer_matches({**writer, "id": 92}, "91"))
-        self.assertFalse(writer_matches({**writer, "repository": {"full_name": "other/repo"}}, "91"))
-        self.assertFalse(writer_matches({**writer, "status": "completed", "conclusion": "failure"}, "91"))
+        self.assertTrue(writer_matches(writer, "91", repository_identity))
+        self.assertFalse(writer_matches({**writer, "id": 92}, "91", repository_identity))
+        self.assertFalse(writer_matches({**writer, "repository": {"id": 101, "name": "repo", "url": repository_identity[2], "full_name": "other/repo"}}, "91", repository_identity))
+        self.assertFalse(writer_matches({**writer, "status": "completed", "conclusion": "failure"}, "91", repository_identity))
 
     def test_sensor_reads_at_most_two_explicit_check_run_pages_and_rejects_bad_boundaries(self) -> None:
         """A poll has a fixed request ceiling even when GitHub reports many Check Runs."""

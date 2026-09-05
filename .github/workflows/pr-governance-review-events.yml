@@ -98,9 +98,9 @@ jobs:
           check_write_pace_seconds = 8.1
           min_reconciliation_seconds = int(max_reconciliation_heads * check_write_pace_seconds)
           max_latch_timeout_seconds = 5400
-          # One source validation, up to 91 bounded two-page Check Run polls,
-          # then source and writer revalidation on success remain below this
-          # request budget.
+          # One repository identity read, one source validation, up to 91
+          # bounded two-page Check Run polls, then repository/source/writer
+          # revalidation on success remain below this request budget.
           max_latch_api_reads = 200
 
           def fail(message: str) -> None:
@@ -114,6 +114,11 @@ jobs:
           source_run_id = os.environ.get("SOURCE_RUN_ID", "")
           app_id = os.environ.get("CHECK_APP_ID", "")
           repository = os.environ.get("GITHUB_REPOSITORY", "")
+          repository_pattern = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+          if repository_pattern.fullmatch(repository) is None:
+              fail("GitHub repository identity is invalid.")
+          repository_name = repository.rsplit("/", 1)[1]
+          repository_url = f"https://api.github.com/repos/{repository}"
           try:
               server_url = urlsplit(os.environ.get("GITHUB_SERVER_URL", ""))
           except ValueError:
@@ -199,12 +204,39 @@ jobs:
                   return None
               return match.group(1) if source_values == [source_run_id] else None
 
-          def sensor_run_matches(value: object) -> bool:
+          def repository_rest_identity(value: object) -> tuple[int, str, str] | None:
+              if not isinstance(value, dict):
+                  return None
+              identifier = value.get("id")
+              name = value.get("name")
+              url = value.get("url")
+              full_name = value.get("full_name")
+              if (
+                  type(identifier) is not int or identifier < 1
+                  or not isinstance(name, str) or name != repository_name
+                  or not isinstance(url, str) or url != repository_url
+                  or ("full_name" in value and (not isinstance(full_name, str) or full_name != repository))
+              ):
+                  return None
+              return identifier, name, url
+
+          def source_repository_matches(value: object, expected: tuple[int, str, str]) -> bool:
+              if not isinstance(value, dict):
+                  return False
+              if (
+                  type(value.get("id")) is not int or value.get("id") != expected[0]
+                  or not isinstance(value.get("name"), str) or value.get("name") != expected[1]
+                  or not isinstance(value.get("url"), str) or value.get("url") != expected[2]
+              ):
+                  return False
+              return "full_name" not in value or value.get("full_name") == repository
+
+          def sensor_run_matches(value: object, expected: tuple[int, str, str]) -> bool:
               if not isinstance(value, dict):
                   return False
               run_repository = value.get("repository")
               pulls = value.get("pull_requests")
-              if not isinstance(run_repository, dict) or run_repository.get("full_name") != repository:
+              if not source_repository_matches(run_repository, expected):
                   return False
               if not isinstance(pulls, list) or len(pulls) != 1 or not isinstance(pulls[0], dict):
                   return False
@@ -225,11 +257,13 @@ jobs:
                   and pull_base.get("sha") == pr_base_sha and pull_base.get("ref") == pr_base_ref
                   and pull_head.get("sha") == head_sha
                   and isinstance(pull_base.get("repo"), dict) and isinstance(pull_head.get("repo"), dict)
-                  and pull_base["repo"].get("full_name") == repository
-                  and pull_head["repo"].get("full_name") == repository
+                  and source_repository_matches(pull_base["repo"], expected)
+                  and source_repository_matches(pull_head["repo"], expected)
               )
 
-          def writer_run_matches(value: object, writer_run_id: str) -> bool:
+          def writer_run_matches(
+              value: object, writer_run_id: str, expected: tuple[int, str, str],
+          ) -> bool:
               if not isinstance(value, dict):
                   return False
               run_repository = value.get("repository")
@@ -238,7 +272,7 @@ jobs:
                   and value.get("name") == "PR governance status writer"
                   and value.get("event") == "workflow_dispatch"
                   and workflow_path_matches(value.get("path"), writer_workflow)
-                  and isinstance(run_repository, dict) and run_repository.get("full_name") == repository
+                  and source_repository_matches(run_repository, expected)
                   and value.get("run_attempt") == 1
                   and (
                       value.get("status") == "in_progress"
@@ -316,8 +350,14 @@ jobs:
               return first_page + second_page
 
           deadline = time.monotonic() + timeout
+          repository_identity = repository_rest_identity(
+              api_json(f"repos/{repository}", "Repository REST identity is invalid.")
+          )
+          if repository_identity is None:
+              fail("Repository REST identity is invalid.")
           if not sensor_run_matches(
-              api_json(f"repos/{repository}/actions/runs/{source_run_id}", "Sensor source run is invalid.")
+              api_json(f"repos/{repository}/actions/runs/{source_run_id}", "Sensor source run is invalid."),
+              repository_identity,
           ):
               fail("Sensor source run is invalid.")
 
@@ -331,13 +371,19 @@ jobs:
                       writer_run_id = details_writer_run_id(terminal.get("details_url"))
                       if writer_run_id is None:
                           fail("Trusted governance Check Run writer generation is invalid.")
+                      if repository_rest_identity(
+                          api_json(f"repos/{repository}", "Repository REST identity is invalid.")
+                      ) != repository_identity:
+                          fail("Repository REST identity changed.")
                       if not sensor_run_matches(
-                          api_json(f"repos/{repository}/actions/runs/{source_run_id}", "Sensor source run is invalid.")
+                          api_json(f"repos/{repository}/actions/runs/{source_run_id}", "Sensor source run is invalid."),
+                          repository_identity,
                       ):
                           fail("Sensor source run is invalid.")
                       if not writer_run_matches(
                           api_json(f"repos/{repository}/actions/runs/{writer_run_id}", "Trusted governance writer run is invalid."),
                           writer_run_id,
+                          repository_identity,
                       ):
                           fail("Trusted governance writer run is invalid.")
                       raise SystemExit(0)

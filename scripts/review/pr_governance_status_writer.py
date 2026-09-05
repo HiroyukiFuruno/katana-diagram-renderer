@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
@@ -70,6 +70,7 @@ _bound_check_ids_by_number: dict[int, int] = {}
 # all-open writer.  Retain only the fully validated immutable identity; active
 # or otherwise untrusted observations never enter this cache.
 _nonreconciling_dispatcher_generations: dict[int, DispatcherGeneration] = {}
+_INVALID_REPOSITORY_IDENTITY = object()
 
 
 class GovernanceError(RuntimeError):
@@ -321,6 +322,41 @@ def workflow_path_is_default(value: object, expected: str) -> bool:
     }
 
 
+def repository_rest_identity(
+    value: object, repository: str,
+) -> tuple[int, str, str] | object:
+    """Validate the immutable REST repository identity for an Actions run."""
+    if not isinstance(value, Mapping) or repository.count("/") != 1:
+        return _INVALID_REPOSITORY_IDENTITY
+    repository_name = repository.rsplit("/", 1)[1]
+    canonical_url = f"https://api.github.com/repos/{repository}"
+    identifier = value.get("id")
+    name = value.get("name")
+    url = value.get("url")
+    if (
+        type(identifier) is not int or identifier < 1
+        or name != repository_name or url != canonical_url
+        or ("full_name" in value and value.get("full_name") != repository)
+    ):
+        return _INVALID_REPOSITORY_IDENTITY
+    return identifier, repository_name, canonical_url
+
+
+def repository_boundary_matches(
+    repository_value: object, nested_values: Sequence[object], repository: str,
+) -> bool:
+    """Bind every PR repository boundary to its Actions run identity."""
+    run_identity = repository_rest_identity(repository_value, repository)
+    if run_identity is _INVALID_REPOSITORY_IDENTITY:
+        return False
+    nested_identities = [
+        repository_rest_identity(value, repository) for value in nested_values
+    ]
+    if any(identity is _INVALID_REPOSITORY_IDENTITY for identity in nested_identities):
+        return False
+    return all(identity == run_identity for identity in nested_identities)
+
+
 def dispatcher_created_at(value: object) -> datetime:
     """Parse the API's canonical UTC timestamp without accepting local ambiguity."""
     if not isinstance(value, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value) is None:
@@ -350,7 +386,7 @@ def dispatcher_generation(value: object, *, expected_identifier: int | None = No
         and workflow_path_is_default(value.get("path"), DISPATCHER_PATH)
         and value.get("event") in DISPATCHER_EVENTS and value.get("head_branch") == branch
         and value.get("head_sha") == expected_head
-        and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
+        and repository_rest_identity(repository, REPOSITORY) is not _INVALID_REPOSITORY_IDENTITY
         and type(value.get("run_number")) is int and value["run_number"] > 0
         and type(attempt) is int and attempt == 1
         and isinstance(status, str) and status in DISPATCHER_ACTIVE_STATUSES | {"completed"}
@@ -787,7 +823,7 @@ def ensure_writer_run_is_active() -> None:
         and value.get("name") == "PR governance status writer"
         and workflow_path_matches(value.get("path"), WRITER_WORKFLOW_PATH)
         and value.get("event") == "workflow_dispatch" and value.get("head_sha") == expected_head
-        and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
+        and repository_rest_identity(repository, REPOSITORY) is not _INVALID_REPOSITORY_IDENTITY
         and value.get("status") == "in_progress" and type(value.get("run_attempt")) is int and value["run_attempt"] == 1
     ):
         raise NoPostGovernanceError("Writer generation is no longer active.")
@@ -974,7 +1010,7 @@ def trusted_completed_terminal_writers(
             and value.get("event") == "workflow_dispatch"
             and value.get("display_title") == f"source={source.identifier} scope=all segment={segment}"
             and value.get("head_branch") == expected_branch and value.get("head_sha") == expected_head
-            and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
+            and repository_rest_identity(repository, REPOSITORY) is not _INVALID_REPOSITORY_IDENTITY
             and type(value.get("run_attempt")) is int and value["run_attempt"] == 1
             and value.get("status") == "completed" and value.get("conclusion") == "success"
             and isinstance(actor, dict) and actor.get("login") == bot_login and actor.get("type") == "Bot"
@@ -1147,16 +1183,17 @@ def sensor(number: int, base: str, head: str, evidence: EvidenceSnapshot | None 
                 current = pulls[0]
                 run_base, run_head = current.get("base"), current.get("head")
                 repository = run.get("repository")
+                base_repository = run_base.get("repo") if isinstance(run_base, dict) else None
+                head_repository = run_head.get("repo") if isinstance(run_head, dict) else None
                 if not (
                     run.get("name") == "PR governance review sensor" and run.get("event") == event
                     and workflow_path_matches(run.get("path"), ".github/workflows/pr-governance-review-events.yml")
                     and run.get("head_sha") == head and type(run.get("run_attempt")) is int and run.get("run_attempt") == 1
-                    and isinstance(repository, dict) and repository.get("full_name") == REPOSITORY
                     and current.get("number") == number and isinstance(run_base, dict) and isinstance(run_head, dict)
                     and run_base.get("sha") == base and run_head.get("sha") == head
-                    and isinstance(run_base.get("repo"), dict) and isinstance(run_head.get("repo"), dict)
-                    and run_base["repo"].get("full_name") == REPOSITORY
-                    and run_head["repo"].get("full_name") == REPOSITORY
+                    and repository_boundary_matches(
+                        repository, (base_repository, head_repository), REPOSITORY,
+                    )
                     and type(run.get("id")) is int and type(run.get("run_number")) is int
                 ):
                     continue
@@ -1347,15 +1384,16 @@ def generation(number: int, base: str, head: str, name: str, path: str, evidence
                 continue
             item = pulls[0]
             run_base, run_head, repository = item.get("base"), item.get("head"), run.get("repository")
+            base_repository = run_base.get("repo") if isinstance(run_base, dict) else None
+            head_repository = run_head.get("repo") if isinstance(run_head, dict) else None
             if not (
                 run.get("name") == name and workflow_path_matches(run.get("path"), path) and run.get("event") == "pull_request"
-                and run.get("head_sha") == head and isinstance(repository, dict)
-                and repository.get("full_name") == REPOSITORY and item.get("number") == number
+                and run.get("head_sha") == head and item.get("number") == number
                 and isinstance(run_base, dict) and isinstance(run_head, dict)
                 and run_base.get("sha") == base and run_head.get("sha") == head
-                and isinstance(run_base.get("repo"), dict) and isinstance(run_head.get("repo"), dict)
-                and run_base["repo"].get("full_name") == REPOSITORY
-                and run_head["repo"].get("full_name") == REPOSITORY
+                and repository_boundary_matches(
+                    repository, (base_repository, head_repository), REPOSITORY,
+                )
                 and run.get("workflow_id") == workflow_id and type(run.get("id")) is int and type(run.get("run_number")) is int
                 and type(run.get("run_attempt")) is int and isinstance(run.get("status"), str)
             ):

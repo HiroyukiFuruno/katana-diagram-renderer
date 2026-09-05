@@ -21,6 +21,187 @@ sys.path.insert(0, str(ROOT / "scripts/hooks"))
 import verify_push_issue as canonical_issue_contract
 
 
+class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
+    """Exercise the Actions workflow_run repository identity boundary."""
+
+    repository = "owner/repository"
+    repository_identity = (101, "repository", f"https://api.github.com/repos/{repository}")
+    head = "a" * 40
+    base = "b" * 40
+
+    def setUp(self) -> None:
+        self.sensor = (ROOT / ".github/workflows/pr-governance-review-events.yml").read_text(encoding="utf-8")
+        start = self.sensor.index("          check_name =")
+        end = self.sensor.index("          deadline =", start)
+        self.program = textwrap.dedent(self.sensor[start:end])
+
+    def namespace(self) -> dict[str, object]:
+        environment = {
+            "HEAD_SHA": self.head,
+            "PR_NUMBER": "72",
+            "PR_BASE_SHA": self.base,
+            "PR_BASE_REF": "master",
+            "SOURCE_RUN_ID": "17",
+            "CHECK_APP_ID": "4766933",
+            "POLL_INTERVAL_SECONDS": "60",
+            "POLL_TIMEOUT_SECONDS": "5400",
+            "GITHUB_REPOSITORY": self.repository,
+            "GITHUB_SERVER_URL": "https://github.com",
+        }
+        namespace: dict[str, object] = {
+            "json": json,
+            "os": os,
+            "parse_qs": parse_qs,
+            "re": re,
+            "subprocess": subprocess,
+            "sys": sys,
+            "time": __import__("time"),
+            "urlencode": __import__("urllib.parse", fromlist=["urlencode"]).urlencode,
+            "urlsplit": __import__("urllib.parse", fromlist=["urlsplit"]).urlsplit,
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            exec(self.program, namespace)
+        return namespace
+
+    def source(self, nested_repo: object | None = None) -> dict[str, object]:
+        repo = nested_repo if nested_repo is not None else {
+            "id": 101,
+            "name": "repository",
+            "url": "https://api.github.com/repos/owner/repository",
+        }
+        return {
+            "id": 17,
+            "name": "PR governance review sensor",
+            "event": "pull_request_review",
+            "path": ".github/workflows/pr-governance-review-events.yml@master",
+            "head_sha": self.head,
+            "status": "in_progress",
+            "conclusion": None,
+            "run_attempt": 1,
+            "run_number": 4,
+            "repository": {"id": 101, "name": "repository", "url": self.repository_identity[2]},
+            "pull_requests": [{
+                "number": 72,
+                "base": {"sha": self.base, "ref": "master", "repo": repo},
+                "head": {"sha": self.head, "repo": repo},
+            }],
+        }
+
+    def test_actions_minimal_nested_repository_is_bound_to_rest_identity(self) -> None:
+        namespace = self.namespace()
+        identity = namespace["repository_rest_identity"]
+        matches = namespace["sensor_run_matches"]
+        assert callable(identity) and callable(matches)
+        self.assertEqual(
+            identity({
+                "id": 101,
+                "name": "repository",
+                "url": "https://api.github.com/repos/owner/repository",
+                "full_name": self.repository,
+            }),
+            self.repository_identity,
+        )
+        self.assertEqual(
+            identity({
+                "id": 101,
+                "name": "repository",
+                "url": "https://api.github.com/repos/owner/repository",
+            }),
+            self.repository_identity,
+        )
+        self.assertTrue(matches(self.source(), self.repository_identity))
+
+    def test_nested_repository_foreign_malformed_and_field_mismatches_fail_closed(self) -> None:
+        namespace = self.namespace()
+        matches = namespace["sensor_run_matches"]
+        assert callable(matches)
+        malformed = (
+            None,
+            [],
+            {},
+            {"id": True, "name": "repository", "url": self.repository_identity[2]},
+            {"id": 202, "name": "repository", "url": self.repository_identity[2]},
+            {"id": 101, "name": "other", "url": self.repository_identity[2]},
+            {"id": 101, "name": "repository", "url": "https://api.github.com/repos/other/repository"},
+            {"id": 101, "name": "repository", "url": self.repository_identity[2], "full_name": "other/repository"},
+            {"id": 101, "name": "repository", "url": self.repository_identity[2], "full_name": 101},
+        )
+        for nested_repo in malformed:
+            for side in ("base", "head"):
+                with self.subTest(nested_repo=nested_repo, side=side):
+                    candidate = json.loads(json.dumps(self.source()))
+                    candidate["pull_requests"][0][side]["repo"] = nested_repo
+                    self.assertFalse(matches(candidate, self.repository_identity))
+
+    def test_top_level_rest_identity_and_run_identity_mismatches_fail_closed(self) -> None:
+        namespace = self.namespace()
+        identity = namespace["repository_rest_identity"]
+        matches = namespace["sensor_run_matches"]
+        assert callable(identity) and callable(matches)
+        valid = {
+            "id": 101,
+            "name": "repository",
+            "url": "https://api.github.com/repos/owner/repository",
+            "full_name": self.repository,
+        }
+        for field, value in (
+            ("id", True),
+            ("name", "other"),
+            ("name", None),
+            ("url", "https://api.github.com/repos/other/repository"),
+            ("url", None),
+            ("full_name", "other/repository"),
+            ("full_name", None),
+        ):
+            with self.subTest(field=field, value=value):
+                candidate = dict(valid)
+                candidate[field] = value
+                self.assertIsNone(identity(candidate))
+        for partial in (
+            {"full_name": self.repository},
+            {"id": 101, "name": "repository"},
+            {"id": 101, "url": self.repository_identity[2]},
+            {"id": 101, "name": "repository", "full_name": self.repository},
+        ):
+            with self.subTest(partial=partial):
+                self.assertIsNone(identity(partial))
+        run_repository = {"id": 101, "name": "repository", "url": self.repository_identity[2]}
+        for changed in (
+            {**run_repository, "id": 202},
+            {**run_repository, "id": True},
+            {**run_repository, "name": "other"},
+            {**run_repository, "url": "https://api.github.com/repos/other/repository"},
+            {**run_repository, "full_name": "other/repository"},
+        ):
+            with self.subTest(run_repository=changed):
+                candidate = self.source()
+                candidate["repository"] = changed
+                self.assertFalse(matches(candidate, self.repository_identity))
+
+    def test_writer_run_uses_rest_identity_without_requiring_full_name(self) -> None:
+        namespace = self.namespace()
+        matches = namespace["writer_run_matches"]
+        assert callable(matches)
+        writer = {
+            "id": 91,
+            "name": "PR governance status writer",
+            "event": "workflow_dispatch",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "repository": {"id": 101, "name": "repository", "url": self.repository_identity[2]},
+            "run_attempt": 1,
+            "status": "in_progress",
+        }
+        self.assertTrue(matches(writer, "91", self.repository_identity))
+        for changed in (
+            {**writer, "repository": {**writer["repository"], "full_name": "other/repository"}},
+            {**writer, "repository": {**writer["repository"], "id": 202}},
+            {**writer, "repository": {**writer["repository"], "name": "other"}},
+            {**writer, "repository": {**writer["repository"], "url": "https://api.github.com/repos/other/repository"}},
+        ):
+            with self.subTest(repository=changed["repository"]):
+                self.assertFalse(matches(changed, "91", self.repository_identity))
+
+
 class GovernanceDispatcherContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
@@ -5040,6 +5221,7 @@ raise SystemExit(91)
         # fixture. This catches missing source/snapshot/carry API reads.
         all_targets = list(range(1, 601)); preserved = all_targets[:40]
         heads = {number: f"{number:040x}" for number in all_targets}
+        rest_repository = {"id": 101, "name": "repository", "url": "https://api.github.com/repos/owner/repository", "full_name": "owner/repository"}
         snapshots = [[number, heads[number], False] for number in all_targets]
         pre_manifest = [[number, 50_000 + number] for number in all_targets]
         batches = [all_targets[40 + start:40 + start + 150] for start in range(0, 560, 150)]
@@ -5048,8 +5230,8 @@ raise SystemExit(91)
             candidates: list[dict[str, object]] = []; dispatches: list[list[str]] = []
             pages = [[
                 {"number": number, "state": "open", "body": "Fixes #64", "draft": False,
-                 "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
-                 "head": {"sha": heads[number], "repo": {"full_name": "owner/repository"}}}
+                 "base": {"ref": "master", "repo": rest_repository},
+                 "head": {"sha": heads[number], "repo": rest_repository}}
                 for number in range(start, min(start + 100, 601))
             ] for start in range(1, 601, 100)]
             # The continuation snapshots must ignore an unavailable fork
@@ -5059,7 +5241,7 @@ raise SystemExit(91)
                 "state": "open",
                 "body": "Fixes #64",
                 "draft": False,
-                "base": {"ref": "master", "repo": {"full_name": "owner/repository"}},
+                "base": {"ref": "master", "repo": rest_repository},
                 "head": {"sha": "f" * 40, "repo": None},
             })
 
@@ -5073,11 +5255,11 @@ raise SystemExit(91)
                 if isinstance(endpoint, str) and endpoint.endswith("/git/ref/heads/master"):
                     return response({"object": {"sha": "a" * 40}})
                 if isinstance(endpoint, str) and endpoint == "repos/owner/repository":
-                    return response({"default_branch": "master"})
+                    return response({**rest_repository, "full_name": "owner/repository", "default_branch": "master"})
                 if isinstance(endpoint, str) and "/actions/runs/" in endpoint:
                     identifier = int(endpoint.rsplit("/", 1)[1])
                     if identifier == 9:
-                        return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_number": 1, "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": {"full_name": "owner/repository"}, "created_at": "2026-09-01T00:00:00Z"})
+                        return response({"id": 9, "name": "PR governance dispatcher", "event": "issues", "status": "in_progress", "run_number": 1, "run_attempt": 1, "head_branch": "master", "head_sha": "a" * 40, "repository": rest_repository, "created_at": "2026-09-01T00:00:00Z"})
                     return response(next(candidate for candidate in candidates if candidate["id"] == identifier))
                 if isinstance(endpoint, str) and "actions/workflows/pr-governance-status-writer.yml/runs?" in endpoint:
                     return response({"total_count": len(candidates), "workflow_runs": candidates})
@@ -5089,7 +5271,7 @@ raise SystemExit(91)
                     completed = json.loads(fields["inputs[completed_writer_run_ids]"])
                     self.assertEqual(order, all_targets[40:])
                     self.assertEqual(completed, [70_000 + prior for prior in range(1, len(dispatches))])
-                    candidate = {"id": 70_000 + len(dispatches), "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={index}", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "repository": {"full_name": "owner/repository"}, "head_branch": "master", "head_sha": "a" * 40, "status": "completed", "conclusion": "success", "run_number": len(dispatches), "run_attempt": 1, "actor": {"login": "katana-rust-pr-governance-hf[bot]", "type": "Bot"}, "triggering_actor": {"login": "katana-rust-pr-governance-hf[bot]", "type": "Bot"}}
+                    candidate = {"id": 70_000 + len(dispatches), "name": "PR governance status writer", "display_title": f"source=9 scope=all segment={index}", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "repository": rest_repository, "head_branch": "master", "head_sha": "a" * 40, "status": "completed", "conclusion": "success", "run_number": len(dispatches), "run_attempt": 1, "actor": {"login": "katana-rust-pr-governance-hf[bot]", "type": "Bot"}, "triggering_actor": {"login": "katana-rust-pr-governance-hf[bot]", "type": "Bot"}}
                     candidates.append(candidate)
                     return response({})
                 raise AssertionError(arguments)
@@ -5157,8 +5339,8 @@ raise SystemExit(91)
         carry_heads = {1: f"{1:040x}", 301: f"{301:040x}"}
         carry_pulls = [{
             "number": number, "state": "open", "body": "Fixes #64", "draft": False,
-            "base": {"sha": "a" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}},
-            "head": {"sha": head, "ref": f"issue/{number}", "repo": {"full_name": "owner/repository"}},
+            "base": {"sha": "a" * 40, "ref": "master", "repo": rest_repository},
+            "head": {"sha": head, "ref": f"issue/{number}", "repo": rest_repository},
         } for number, head in carry_heads.items()]
         carry_snapshots = [[number, head, False] for number, head in carry_heads.items()]
         carry_manifest = [[1, 91], [301, 92]]
@@ -5172,7 +5354,7 @@ raise SystemExit(91)
             "id": 9, "workflow_id": 8, "name": "PR governance dispatcher",
             "path": ".github/workflows/pr-governance.yml@master", "event": "issues",
             "head_branch": "master", "head_sha": "a" * 40,
-            "repository": {"full_name": "owner/repository"}, "run_number": 1,
+            "repository": rest_repository, "run_number": 1,
             "run_attempt": 1, "status": "in_progress", "conclusion": None,
             "created_at": "2026-08-30T00:00:00Z",
         }
@@ -5180,7 +5362,7 @@ raise SystemExit(91)
         def dispatch_transport(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             endpoint = next((item for item in arguments if isinstance(item, str) and item.startswith("repos/")), arguments[-1])
             if isinstance(endpoint, str) and endpoint == "repos/owner/repository":
-                return response({"default_branch": "master"})
+                return response({**rest_repository, "full_name": "owner/repository", "default_branch": "master"})
             if isinstance(endpoint, str) and endpoint.endswith("/git/ref/heads/master"):
                 return response({"object": {"sha": "a" * 40}})
             if isinstance(endpoint, str) and endpoint.endswith("/actions/runs/9"):
@@ -5195,7 +5377,7 @@ raise SystemExit(91)
                     "id": 77, "name": "PR governance status writer",
                     "display_title": "source=9 scope=all segment=1",
                     "path": ".github/workflows/pr-governance-status-writer.yml@master",
-                    "event": "workflow_dispatch", "repository": {"full_name": "owner/repository"},
+                    "event": "workflow_dispatch", "repository": rest_repository,
                     "head_branch": "master", "head_sha": "a" * 40, "status": "queued",
                     "run_number": 1, "run_attempt": 1,
                 })
@@ -5268,7 +5450,7 @@ raise SystemExit(91)
                         "id": 77, "name": "PR governance status writer",
                         "path": ".github/workflows/pr-governance-status-writer.yml@master",
                         "event": "workflow_dispatch", "head_sha": "a" * 40,
-                        "repository": {"full_name": "owner/repository"}, "status": "in_progress", "run_attempt": 1,
+                        "repository": rest_repository, "status": "in_progress", "run_attempt": 1,
                     })
                 if isinstance(endpoint, str) and "/actions/workflows/8/runs?" in endpoint:
                     return response({"workflow_runs": [{**dispatcher_source_active, "status": "completed", "conclusion": "success"}], "total_count": 1})

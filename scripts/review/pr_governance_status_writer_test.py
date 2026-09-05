@@ -51,14 +51,37 @@ class StatusWriterUnitTest(unittest.TestCase):
 
     @staticmethod
     def generation(identifier: int = 900, attempt: int = 1, status: str = "completed", conclusion: object = "success") -> dict[str, object]:
+        repository = {
+            "id": 101,
+            "name": "repository",
+            "url": "https://api.github.com/repos/owner/repository",
+        }
         return {
             "id": identifier, "run_number": 8, "run_attempt": attempt, "name": "CI",
             "path": ".github/workflows/test-and-build.yml", "event": "pull_request",
             "workflow_id": 44,
             "head_sha": "a" * 40, "status": status, "conclusion": conclusion,
-            "repository": {"full_name": "owner/repository"},
-            "pull_requests": [{"number": 72, "base": {"sha": "b" * 40, "ref": "master", "repo": {"full_name": "owner/repository"}}, "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repository"}}}],
+            "repository": dict(repository),
+            "pull_requests": [{"number": 72, "base": {"sha": "b" * 40, "ref": "master", "repo": dict(repository)}, "head": {"sha": "a" * 40, "repo": dict(repository)}}],
         }
+
+    @staticmethod
+    def rest_repository(identifier: int = 101) -> dict[str, object]:
+        return {
+            "id": identifier,
+            "name": "repository",
+            "url": "https://api.github.com/repos/owner/repository",
+        }
+
+    def with_rest_repository_identity(
+        self, run: dict[str, object], *, run_identifier: int = 101,
+        base_identifier: int = 101, head_identifier: int = 101,
+    ) -> dict[str, object]:
+        run["repository"] = self.rest_repository(run_identifier)
+        pull_request = run["pull_requests"][0]  # type: ignore[index]
+        pull_request["base"]["repo"] = self.rest_repository(base_identifier)  # type: ignore[index]
+        pull_request["head"]["repo"] = self.rest_repository(head_identifier)  # type: ignore[index]
+        return run
 
     @staticmethod
     def dispatcher_run(
@@ -68,7 +91,10 @@ class StatusWriterUnitTest(unittest.TestCase):
         return {
             "id": identifier, "name": WRITER.DISPATCHER_NAME,
             "path": ".github/workflows/pr-governance.yml@master", "event": event,
-            "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"},
+            "head_sha": "d" * 40, "repository": {
+                "id": 101, "name": "repository",
+                "url": "https://api.github.com/repos/owner/repository",
+            },
             "head_branch": "master", "workflow_id": 66, "run_number": 1, "run_attempt": 1, "status": status,
             "conclusion": conclusion, "created_at": created_at,
         }
@@ -770,7 +796,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "id": 99, "name": "PR governance status writer",
             "path": ".github/workflows/pr-governance-status-writer.yml@master",
             "event": "workflow_dispatch", "head_sha": head,
-            "repository": {"full_name": "owner/repository"}, "status": "in_progress", "run_attempt": 1,
+            "repository": self.rest_repository(), "status": "in_progress", "run_attempt": 1,
         }
         with self.identity(), patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_SHA": head}), \
              patch.object(WRITER, "api_json", return_value=writer_run) as api:
@@ -789,6 +815,55 @@ class StatusWriterUnitTest(unittest.TestCase):
             with self.subTest(sensor_attempt=attempt), self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_page", return_value={"total_count": 1, "workflow_runs": [sensor_run | {"run_attempt": attempt}]}):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.sensor(72, "b" * 40, head)
+
+    def test_repository_rest_identity_accepts_minimal_identity_and_rejects_mismatches(self) -> None:
+        identity = self.rest_repository()
+        with self.identity():
+            self.assertTrue(WRITER.repository_boundary_matches(
+                identity, (dict(identity), dict(identity)), "owner/repository",
+            ))
+            for label, run_identity, base_identity, head_identity in (
+                ("full-name-only", {"full_name": "owner/repository"}, identity, identity),
+                ("partial-rest", {"id": 101, "name": "repository"}, identity, identity),
+                ("id-bool", {**identity, "id": True}, identity, identity),
+                ("id-string", {**identity, "id": "101"}, identity, identity),
+                ("id-mismatch", {**identity, "id": 202}, identity, identity),
+                ("name-mismatch", {**identity, "name": "foreign"}, identity, identity),
+                ("url-mismatch", {**identity, "url": "https://api.github.com/repos/foreign/repository"}, identity, identity),
+                ("nested-id-mismatch", identity, {**identity, "id": 202}, identity),
+                ("nested-name-mismatch", identity, {**identity, "name": "foreign"}, identity),
+                ("nested-url-mismatch", identity, identity, {**identity, "url": "https://api.github.com/repos/foreign/repository"}),
+                ("mixed-rest-and-legacy", identity, {"full_name": "owner/repository"}, identity),
+            ):
+                with self.subTest(label=label):
+                    self.assertFalse(WRITER.repository_boundary_matches(
+                        run_identity, (base_identity, head_identity), "owner/repository",
+                    ))
+
+    def test_dispatcher_and_writer_reject_full_name_only_repository_identity(self) -> None:
+        writer = {
+            "id": 99, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": "d" * 40,
+            "repository": self.rest_repository(), "run_attempt": 1,
+            "status": "in_progress",
+        }
+        with self.identity(), patch.dict(os.environ, {
+            "GITHUB_ACTIONS": "true", "GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40,
+        }):
+            WRITER.dispatcher_generation(self.dispatcher_run())
+            with patch.object(WRITER, "api_json", return_value=writer):
+                WRITER.ensure_writer_run_is_active()
+            for subject in (self.dispatcher_run(), writer):
+                subject["repository"] = {"full_name": "owner/repository"}
+                with self.subTest(subject=subject["name"]):
+                    if subject["name"] == WRITER.DISPATCHER_NAME:
+                        with self.assertRaises(WRITER.GovernanceError):
+                            WRITER.dispatcher_generation(subject)
+                    else:
+                        with patch.object(WRITER, "api_json", return_value=subject):
+                            with self.assertRaises(WRITER.NoPostGovernanceError):
+                                WRITER.ensure_writer_run_is_active()
 
     def test_observed_invalidations_returns_only_exact_current_carry_markers(self) -> None:
         snapshot = WRITER.OpenSnapshot(
@@ -993,7 +1068,7 @@ class StatusWriterUnitTest(unittest.TestCase):
                 "path": ".github/workflows/pr-governance-status-writer.yml@master",
                 "event": "workflow_dispatch", "display_title": f"source=88 scope=all segment={segment}",
                 "head_sha": default_head, "head_branch": "master",
-                "repository": {"full_name": "owner/repository"}, "run_attempt": 1,
+                "repository": self.rest_repository(), "run_attempt": 1,
                 "status": status, "conclusion": "success" if status == "completed" else None,
                 "actor": {"login": "krr-governance[bot]", "type": "Bot"},
                 "triggering_actor": {"login": "krr-governance[bot]", "type": "Bot"},
@@ -1046,8 +1121,12 @@ class StatusWriterUnitTest(unittest.TestCase):
                 common = {
                     "run_number": number, "run_attempt": 1, "event": "pull_request",
                     "head_sha": heads[number], "status": "completed", "conclusion": "success",
-                    "repository": {"full_name": "owner/repository"},
-                    "pull_requests": [{"number": number, "base": pull["base"], "head": pull["head"]}],
+                    "repository": self.rest_repository(),
+                    "pull_requests": [{
+                        "number": number,
+                        "base": {**pull["base"], "repo": self.rest_repository()},
+                        "head": {**pull["head"], "repo": self.rest_repository()},
+                    }],
                 }
                 sensor = {
                     **common, "id": 1_000 + number, "name": "PR governance review sensor",
@@ -1414,8 +1493,8 @@ class StatusWriterUnitTest(unittest.TestCase):
             702: {"id": 702, "name": WRITER.CHECK_NAME, "head_sha": heads[73], "external_id": f"krr-governance/v1/{heads[73]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
             703: {"id": 703, "name": WRITER.CHECK_NAME, "head_sha": heads[1], "external_id": f"krr-governance/v1/{heads[1]}/dispatcher-88", "updated_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "status": "in_progress", "conclusion": None, "details_url": f"https://github.com/owner/repository/actions/runs/88?dispatcher_run_id=88&carry_pending=0"},
         }
-        dispatcher = {"id": 88, "name": WRITER.DISPATCHER_NAME, "path": ".github/workflows/pr-governance.yml@master", "event": "issues", "head_sha": "d" * 40, "head_branch": "master", "workflow_id": 66, "repository": {"full_name": "owner/repository"}, "run_number": 1, "run_attempt": 1, "status": "in_progress", "conclusion": None, "created_at": "2026-08-30T00:00:00Z"}
-        writer = {"id": 99, "name": "PR governance status writer", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "head_sha": "d" * 40, "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress"}
+        dispatcher = {"id": 88, "name": WRITER.DISPATCHER_NAME, "path": ".github/workflows/pr-governance.yml@master", "event": "issues", "head_sha": "d" * 40, "head_branch": "master", "workflow_id": 66, "repository": self.rest_repository(), "run_number": 1, "run_attempt": 1, "status": "in_progress", "conclusion": None, "created_at": "2026-08-30T00:00:00Z"}
+        writer = {"id": 99, "name": "PR governance status writer", "path": ".github/workflows/pr-governance-status-writer.yml@master", "event": "workflow_dispatch", "head_sha": "d" * 40, "repository": self.rest_repository(), "run_attempt": 1, "status": "in_progress"}
         reads: list[int] = []; terminal_ids: list[int] = []
         def api(endpoint: str, *, default_token: bool = False) -> object:
             if endpoint.endswith("/actions/runs/88"):
@@ -1939,7 +2018,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "id": 99, "name": "PR governance status writer",
             "path": ".github/workflows/pr-governance-status-writer.yml@master",
             "event": "workflow_dispatch", "head_sha": "d" * 40,
-            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+            "repository": self.rest_repository(), "run_attempt": 1, "status": "in_progress",
         }
         app_reads = 0
         terminal_read_tokens: set[str] = set()
@@ -2036,8 +2115,12 @@ class StatusWriterUnitTest(unittest.TestCase):
             pulls[number] = pull_request
             common = {
                 "run_number": number, "run_attempt": 1, "event": "pull_request", "head_sha": head,
-                "status": "completed", "conclusion": "success", "repository": {"full_name": "owner/repository"},
-                "pull_requests": [{"number": number, "base": pull_request["base"], "head": pull_request["head"]}],
+                "status": "completed", "conclusion": "success", "repository": self.rest_repository(),
+                "pull_requests": [{
+                    "number": number,
+                    "base": {**pull_request["base"], "repo": self.rest_repository()},
+                    "head": {**pull_request["head"], "repo": self.rest_repository()},
+                }],
             }
             sensor_run = {
                 **common, "id": 1_000 + number, "name": "PR governance review sensor",
@@ -2061,7 +2144,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "id": 99, "name": "PR governance status writer",
             "path": ".github/workflows/pr-governance-status-writer.yml@master",
             "event": "workflow_dispatch", "head_sha": default_head,
-            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+            "repository": self.rest_repository(), "run_attempt": 1, "status": "in_progress",
         }
         app_reads = 0
         read_tokens: set[str] = set()
@@ -2219,7 +2302,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         for run in (old_sensor, latest_sensor, old_ci, latest_ci, release):
             run["head_sha"] = head
             run["pull_requests"] = [dict(run["pull_requests"][0]) | {
-                "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+                "head": {"sha": head, "repo": self.rest_repository()},
             }]
 
         def page(endpoint: str):
@@ -2265,8 +2348,8 @@ class StatusWriterUnitTest(unittest.TestCase):
                 "head_sha": head,
                 "pull_requests": [{
                     "number": number,
-                    "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
-                    "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+                    "base": {"sha": "b" * 40, "repo": self.rest_repository()},
+                    "head": {"sha": head, "repo": self.rest_repository()},
                 }],
             }
             if workflow_id is not None:
@@ -2514,6 +2597,60 @@ class StatusWriterUnitTest(unittest.TestCase):
         self.assertEqual(value.identifier, 901)
         self.assertEqual(value.attempt, 2)
 
+    def test_sensor_and_generation_accept_same_minimal_rest_repository_identity(self) -> None:
+        sensor = self.with_rest_repository_identity(self.generation(700))
+        sensor.update({
+            "name": "PR governance review sensor",
+            "path": ".github/workflows/pr-governance-review-events.yml@master",
+        })
+        ci = self.with_rest_repository_identity(self.generation(900))
+        evidence = WRITER.EvidenceSnapshot(
+            {"pull_request": (sensor,), "pull_request_review": (), "pull_request_review_comment": ()},
+            {".github/workflows/test-and-build.yml": 44},
+            {".github/workflows/test-and-build.yml": (ci,)},
+        )
+        with self.identity():
+            self.assertEqual(WRITER.sensor(72, "b" * 40, "a" * 40, evidence), 700)
+            self.assertEqual(
+                WRITER.generation(
+                    72, "b" * 40, "a" * 40, "CI",
+                    ".github/workflows/test-and-build.yml", evidence,
+                ).identifier,
+                900,
+            )
+
+    def test_sensor_and_generation_reject_mixed_or_malformed_rest_repository_identity(self) -> None:
+        for label, mutate in (
+            ("top-id-bool", lambda run: run["repository"].update(id=True)),
+            ("top-id-string", lambda run: run["repository"].update(id="101")),
+            ("top-name", lambda run: run["repository"].update(name="foreign")),
+            ("top-url", lambda run: run["repository"].update(url="https://api.github.com/repos/foreign/repository")),
+            ("base-id", lambda run: run["pull_requests"][0]["base"]["repo"].update(id=202)),
+            ("head-name", lambda run: run["pull_requests"][0]["head"]["repo"].update(name="foreign")),
+            ("head-url", lambda run: run["pull_requests"][0]["head"]["repo"].update(url="https://api.github.com/repos/foreign/repository")),
+        ):
+            with self.subTest(label=label), self.identity():
+                sensor = self.with_rest_repository_identity(self.generation(700))
+                sensor.update({
+                    "name": "PR governance review sensor",
+                    "path": ".github/workflows/pr-governance-review-events.yml@master",
+                })
+                ci = self.with_rest_repository_identity(self.generation(900))
+                mutate(sensor)
+                mutate(ci)
+                evidence = WRITER.EvidenceSnapshot(
+                    {"pull_request": (sensor,), "pull_request_review": (), "pull_request_review_comment": ()},
+                    {".github/workflows/test-and-build.yml": 44},
+                    {".github/workflows/test-and-build.yml": (ci,)},
+                )
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.sensor(72, "b" * 40, "a" * 40, evidence)
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.generation(
+                        72, "b" * 40, "a" * 40, "CI",
+                        ".github/workflows/test-and-build.yml", evidence,
+                    )
+
     def test_generation_rejects_pr_modified_or_missing_workflow_blob(self) -> None:
         with patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40}), self.identity(), patch.object(WRITER, "api_json", side_effect=[{"sha": "c" * 40}, {"sha": "c" * 40}, {"sha": "d" * 40}]):
             with self.assertRaises(WRITER.GovernanceError):
@@ -2673,8 +2810,12 @@ class StatusWriterUnitTest(unittest.TestCase):
         }
         common_run = {
             "run_number": 8, "run_attempt": 1, "event": "pull_request", "head_sha": head,
-            "status": "completed", "conclusion": "success", "repository": {"full_name": "owner/repository"},
-            "pull_requests": [{"number": 72, "base": base, "head": pull_request["head"]}],
+            "status": "completed", "conclusion": "success", "repository": self.rest_repository(),
+            "pull_requests": [{
+                "number": 72,
+                "base": {**base, "repo": self.rest_repository()},
+                "head": {**pull_request["head"], "repo": self.rest_repository()},
+            }],
         }
         sensor_run = {
             **common_run, "id": 77, "name": "PR governance review sensor",
@@ -2715,7 +2856,7 @@ class StatusWriterUnitTest(unittest.TestCase):
             "id": 99, "name": "PR governance status writer",
             "path": ".github/workflows/pr-governance-status-writer.yml@master",
             "event": "workflow_dispatch", "head_sha": default_head,
-            "repository": {"full_name": "owner/repository"}, "run_attempt": 1, "status": "in_progress",
+            "repository": self.rest_repository(), "run_attempt": 1, "status": "in_progress",
         }
         calls: list[str] = []
         terminal_patches: list[list[str]] = []
