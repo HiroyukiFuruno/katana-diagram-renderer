@@ -33,6 +33,8 @@ def marker(
     head: str,
     updated_at: str | None = None,
     body: str = BODY,
+    login: str = "HiroyukiFuruno",
+    author_association: object = "OWNER",
 ) -> dict[str, object]:
     created_at = f"2026-08-29T03:0{comment_id}:00Z"
     return {
@@ -44,7 +46,8 @@ def marker(
         ),
         "created_at": created_at,
         "updated_at": updated_at or created_at,
-        "user": {"login": "HiroyukiFuruno"},
+        "user": {"login": login},
+        "author_association": author_association,
     }
 
 
@@ -83,6 +86,7 @@ def successful_state() -> tuple[
         "baseRefName": "master",
         "headRefOid": HEAD,
         "body": BODY,
+        "author": {"login": "HiroyukiFuruno"},
         "updatedAt": "2026-08-29T03:03:00Z",
         "statusCheckRollup": [
             {
@@ -107,7 +111,16 @@ def successful_state() -> tuple[
             },
         ],
     }
-    threads = [{"id": "thread-1", "isResolved": True}]
+    threads = [
+        {
+            "id": "thread-1",
+            "isResolved": True,
+            "comments": [
+                {"author": {"login": "reviewer"}},
+                {"author": {"login": "HiroyukiFuruno"}},
+            ],
+        }
+    ]
     comments = [
         marker(1, "initial", HEAD),
         marker(2, "final", HEAD),
@@ -165,6 +178,114 @@ class VerifyPrReadyTest(unittest.TestCase):
 
     def test_accepts_two_phase_review_on_current_head(self) -> None:
         self.assertEqual(self.errors(), [])
+
+    def test_ignores_newer_valid_looking_marker_from_an_untrusted_user(self) -> None:
+        for phase in ("initial", "final"):
+            with self.subTest(phase=phase):
+                pull_request, threads, comments = successful_state()
+                comments.append(
+                    marker(
+                        3,
+                        phase,
+                        INITIAL_HEAD,
+                        login="external-user",
+                        author_association="NONE",
+                    )
+                )
+                self.assertEqual(
+                    self.errors(
+                        pull_request=pull_request,
+                        threads=threads,
+                        comments=comments,
+                    ),
+                    [],
+                )
+
+    def test_accepts_markers_from_the_pr_author(self) -> None:
+        pull_request, threads, comments = successful_state()
+        pull_request["author"] = {"login": "HiroyukiFuruno"}
+        for comment in comments:
+            comment["author_association"] = "NONE"
+        threads[0]["comments"] = [
+            {"author": {"login": "reviewer"}},
+            {"author": {"login": "HiroyukiFuruno"}},
+        ]
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request,
+                threads=threads,
+                comments=comments,
+            ),
+            [],
+        )
+
+    def test_accepts_markers_from_a_trusted_maintainer(self) -> None:
+        pull_request, threads, comments = successful_state()
+        for comment in comments:
+            comment["author"] = {"login": "trusted-maintainer"}
+            comment["authorAssociation"] = "MEMBER"
+            comment.pop("user")
+            comment.pop("author_association")
+        self.assertEqual(
+            self.errors(
+                pull_request=pull_request,
+                threads=threads,
+                comments=comments,
+            ),
+            [],
+        )
+
+    def test_ignores_newer_marker_with_missing_or_malformed_identity(self) -> None:
+        variants = {
+            "missing author": lambda comment: comment.pop("user"),
+            "invalid author": lambda comment: comment.update({"user": {"login": 42}}),
+            "missing association": lambda comment: comment.pop("author_association"),
+            "invalid association": lambda comment: comment.update({"author_association": []}),
+        }
+        for name, mutate in variants.items():
+            with self.subTest(name=name):
+                _, _, comments = successful_state()
+                untrusted_marker = marker(3, "final", INITIAL_HEAD)
+                mutate(untrusted_marker)
+                comments.append(untrusted_marker)
+                self.assertEqual(self.errors(comments=comments), [])
+
+    def test_rejects_missing_or_malformed_pr_author_despite_trusted_markers(self) -> None:
+        variants = {
+            "missing": lambda pull_request: pull_request.pop("author"),
+            "null": lambda pull_request: pull_request.update({"author": None}),
+            "non-mapping": lambda pull_request: pull_request.update({"author": []}),
+            "missing login": lambda pull_request: pull_request.update({"author": {}}),
+            "non-string login": lambda pull_request: pull_request.update({"author": {"login": 42}}),
+            "empty login": lambda pull_request: pull_request.update({"author": {"login": ""}}),
+        }
+        for name, mutate in variants.items():
+            with self.subTest(name=name):
+                pull_request, _, _ = successful_state()
+                pull_request["author"] = {"login": "HiroyukiFuruno"}
+                mutate(pull_request)
+                with self.assertRaisesRegex(TypeError, "pull request author"):
+                    self.errors(pull_request=pull_request)
+
+    def test_rejects_pr_author_marker_without_an_association(self) -> None:
+        pull_request, threads, comments = successful_state()
+        pull_request["author"] = {"login": "HiroyukiFuruno"}
+        threads[0]["comments"] = [
+            {"author": {"login": "reviewer"}},
+            {"author": {"login": "HiroyukiFuruno"}},
+        ]
+        for comment in comments:
+            comment["author_association"] = "NONE"
+            comment.pop("author_association")
+        errors = " ".join(
+            self.errors(
+                pull_request=pull_request,
+                threads=threads,
+                comments=comments,
+            )
+        )
+        self.assertIn("initial review marker がありません", errors)
+        self.assertIn("final review marker がありません", errors)
 
     def test_rejects_latest_initial_marker_for_old_head_even_with_current_final_review(self) -> None:
         pull_request, threads, comments = successful_state()
@@ -583,11 +704,16 @@ class VerifyPrReadyTest(unittest.TestCase):
                 f"phase=initial body-sha256={BODY_SHA256} head={INITIAL_HEAD}",
             ),
         }
-        self.assertEqual(subject._review_markers([canonical]), [("initial", INITIAL_HEAD, BODY_SHA256, canonical)])
+        self.assertEqual(
+            subject._review_markers([canonical], "HiroyukiFuruno"),
+            [("initial", INITIAL_HEAD, BODY_SHA256, canonical)],
+        )
         for name, value in malformed.items():
             with self.subTest(name=name):
                 rejected = {**canonical, "body": value}
-                self.assertEqual(subject._review_markers([rejected]), [])
+                self.assertEqual(
+                    subject._review_markers([rejected], "HiroyukiFuruno"), []
+                )
 
     def test_rejects_final_evidence_before_referenced_issue_edit(self) -> None:
         pull_request, _, _ = successful_state()
@@ -2018,6 +2144,7 @@ class VerifyPrReadyTest(unittest.TestCase):
             "baseRefName": "master",
             "headRefOid": HEAD,
             "body": "Closes #64",
+            "author": {"login": "HiroyukiFuruno"},
             "updatedAt": "2026-08-29T03:03:00Z",
             "statusCheckRollup": [
                 {
@@ -2060,6 +2187,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 ),
                 "created_at": "2026-08-29T03:01:00Z",
                 "user": {"login": "HiroyukiFuruno"},
+                "author_association": "OWNER",
             },
             {
                 "id": 32,
@@ -2069,6 +2197,7 @@ class VerifyPrReadyTest(unittest.TestCase):
                 ),
                 "created_at": "2026-08-29T03:03:00Z",
                 "user": {"login": "HiroyukiFuruno"},
+                "author_association": "OWNER",
             },
         ]
 
@@ -2085,7 +2214,22 @@ class VerifyPrReadyTest(unittest.TestCase):
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
-                                    "nodes": [{"id": "thread-1", "isResolved": True}],
+                                    "nodes": [
+                                        {
+                                            "id": "thread-1",
+                                            "isResolved": True,
+                                            "comments": {
+                                                "nodes": [
+                                                    {"author": {"login": "reviewer"}},
+                                                    {"author": {"login": "HiroyukiFuruno"}},
+                                                ],
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
+                                            },
+                                        }
+                                    ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 }
                             }
@@ -2171,7 +2315,19 @@ class VerifyPrReadyTest(unittest.TestCase):
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
-                                    "nodes": threads,
+                                    "nodes": [
+                                        {
+                                            **thread,
+                                            "comments": {
+                                                "nodes": thread["comments"],
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
+                                            },
+                                        }
+                                        for thread in threads
+                                    ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 }
                             }
@@ -2628,6 +2784,51 @@ class VerifyPrReadyTest(unittest.TestCase):
                 ),
                 0,
             )
+
+    def test_rejects_trusted_marker_added_before_the_final_fence(self) -> None:
+        pull_request, threads, comments = successful_state()
+        changed_comments = [
+            *comments,
+            marker(3, "final", HEAD),
+        ]
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject,
+            "_paginated_api_array",
+            side_effect=[comments, changed_comments],
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            with self.assertRaisesRegex(ValueError, "trusted review marker.*changed"):
+                subject.main(["--pr", "72", "--repository", "owner/repo"])
+
+    def test_ignores_untrusted_marker_added_before_the_final_fence(self) -> None:
+        pull_request, threads, comments = successful_state()
+        changed_comments = [
+            *comments,
+            marker(
+                3,
+                "final",
+                INITIAL_HEAD,
+                login="external-user",
+                author_association="NONE",
+            ),
+        ]
+        with patch.object(subject, "_gh_json", return_value=pull_request), patch.object(
+            subject,
+            "_paginated_api_array",
+            side_effect=[comments, changed_comments],
+        ), patch.object(subject, "_review_threads", return_value=threads), patch.object(
+            subject.issue_contract,
+            "referenced_issue_snapshot",
+            return_value=(self.issue(64, "2026-08-29T03:00:00Z"),),
+        ), patch.object(
+            subject, "_open_pull_requests", return_value=current_canonical_closer()
+        ):
+            self.assertEqual(subject.main(["--pr", "72", "--repository", "owner/repo"]), 0)
 
     def test_rejects_issue_edit_between_identical_pr_boundaries(self) -> None:
         pull_request, threads, comments = successful_state()
@@ -3209,6 +3410,7 @@ class StrictGovernanceCheckRunTest(unittest.TestCase):
             "headRefOid": self.head,
             "baseRefName": self.branch,
             "body": "Closes #64",
+            "author": {"login": "HiroyukiFuruno"},
             "updatedAt": "2026-08-29T03:03:00Z",
             "statusCheckRollup": [],
             "reviews": [{}],

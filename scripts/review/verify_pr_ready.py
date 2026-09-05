@@ -44,6 +44,7 @@ _CODEX_NO_ISSUES_COMMENT = re.compile(
 )
 _SHA = re.compile(r"[0-9a-fA-F]{40}")
 _TRUSTED_REPLY_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
+_TRUSTED_MARKER_ASSOCIATIONS = frozenset({"COLLABORATOR", "MEMBER", "OWNER"})
 _TRUSTED_CHECK = "KRR / PR governance (trusted check)"
 _LATCH_CHECK = "KRR / PR governance review latch"
 # The initial thread query returns the first 100 comments; continuation is bounded.
@@ -52,6 +53,7 @@ _ACTIVE_SENSOR_OR_LATCH_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
 _ReviewMarker = tuple[str, str, str, Mapping[str, object]]
+_ReviewMarkerIdentity = tuple[int, str, str, str, str, str, str, str]
 _RequiredStatusChecks = tuple[tuple[str, ...], tuple[tuple[str, int | None], ...]]
 
 
@@ -662,7 +664,39 @@ def _final_review_evidence_is_fresh(
     return any(submitted_at > freshness_floor for submitted_at in review_times)
 
 
-def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[_ReviewMarker]:
+def _pull_request_author_login(pull_request: Mapping[str, object]) -> str:
+    """Return the required PR-author login or fail closed."""
+
+    author_login = _bot_login(pull_request.get("author"))
+    if author_login is None or not author_login:
+        raise TypeError("pull request author.login must be a non-empty string")
+    return author_login
+
+
+def _marker_comment_identity(comment: Mapping[str, object]) -> tuple[str, str] | None:
+    """Read a marker author's REST or GraphQL identity without trusting malformed data."""
+
+    if "user" in comment:
+        author = comment["user"]
+        association = comment.get("author_association")
+    elif "author" in comment:
+        author = comment["author"]
+        association = comment.get("authorAssociation")
+    else:
+        return None
+    login = _bot_login(author)
+    if login is None or not login or not isinstance(association, str):
+        return None
+    return login, association.upper()
+
+
+def _review_markers(
+    comments: Sequence[Mapping[str, object]], pull_request_author: str
+) -> list[_ReviewMarker]:
+    """Return only review markers controlled by the PR author or a maintainer."""
+
+    if not isinstance(pull_request_author, str) or not pull_request_author:
+        raise TypeError("pull request author.login must be a non-empty string")
     markers: list[_ReviewMarker] = []
     for comment in comments:
         body = comment["body"]
@@ -671,6 +705,15 @@ def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[_ReviewMar
         if _CODEX_REVIEW_TRIGGER.search(body) is None:
             continue
         for match in _MARKER_PATTERN.finditer(body):
+            identity = _marker_comment_identity(comment)
+            if identity is None:
+                continue
+            login, association = identity
+            if (
+                login.casefold() != pull_request_author.casefold()
+                and association not in _TRUSTED_MARKER_ASSOCIATIONS
+            ):
+                continue
             markers.append(
                 (
                     match.group("phase"),
@@ -680,6 +723,42 @@ def _review_markers(comments: Sequence[Mapping[str, object]]) -> list[_ReviewMar
                 )
             )
     return markers
+
+
+def _review_marker_identities(
+    markers: Sequence[_ReviewMarker],
+) -> tuple[_ReviewMarkerIdentity, ...]:
+    """Make the accepted marker set comparable at the final readiness fence."""
+
+    identities: list[_ReviewMarkerIdentity] = []
+    for phase, head, body_sha256, comment in markers:
+        comment_id = comment.get("id")
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        updated_at = _marker_updated_at(comment)
+        identity = _marker_comment_identity(comment)
+        if (
+            type(comment_id) is not int
+            or not isinstance(body, str)
+            or not isinstance(created_at, str)
+            or not isinstance(updated_at, str)
+            or identity is None
+        ):
+            raise TypeError("trusted review marker identity is malformed")
+        login, association = identity
+        identities.append(
+            (
+                comment_id,
+                phase,
+                head,
+                body_sha256,
+                login.casefold(),
+                association,
+                created_at,
+                updated_at,
+            )
+        )
+    return tuple(sorted(identities))
 
 
 def _resolved_thread_has_author_reply(
@@ -1044,21 +1123,17 @@ def readiness_errors(
     if unresolved:
         errors.append(f"未resolve review thread が {len(unresolved)} 件あります")
 
-    author = pull_request.get("author")
-    author_login = _bot_login(author)
-    if author is not None and author_login is None:
-        raise TypeError("pull request author.login must be a string")
-    if author_login is not None:
-        missing_replies = [
-            thread
-            for thread in threads
-            if thread.get("isResolved") is True
-            and not _resolved_thread_has_author_reply(thread, author_login)
-        ]
-        if missing_replies:
-            errors.append(
-                f"resolve 済み review thread に PR author の reply が {len(missing_replies)} 件ありません"
-            )
+    author_login = _pull_request_author_login(pull_request)
+    missing_replies = [
+        thread
+        for thread in threads
+        if thread.get("isResolved") is True
+        and not _resolved_thread_has_author_reply(thread, author_login)
+    ]
+    if missing_replies:
+        errors.append(
+            f"resolve 済み review thread に PR author の reply が {len(missing_replies)} 件ありません"
+        )
 
     reviews = pull_request["reviews"]
     if not isinstance(reviews, Sequence) or isinstance(reviews, (str, bytes)):
@@ -1076,7 +1151,7 @@ def readiness_errors(
     if body_sha256 is None:
         errors.append("PR本文の review marker digestを検証できません")
 
-    markers = _review_markers(comments)
+    markers = _review_markers(comments, author_login)
     initial_markers = [marker for marker in markers if marker[0] == "initial"]
     final_markers = [marker for marker in markers if marker[0] == "final"]
 
@@ -2041,6 +2116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not isinstance(pull_request, dict):
         raise TypeError("pull request response must be an object")
+    marker_author_login = _pull_request_author_login(pull_request)
     current_reviews = pull_request.get("reviews")
     if not isinstance(current_reviews, list):
         raise TypeError("pull request reviews must be an array")
@@ -2050,6 +2126,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         pull_request["reviews"] = _reviews(repository, arguments.pr)
     comments = _paginated_api_array(
         f"repos/{repository}/issues/{arguments.pr}/comments"
+    )
+    initial_marker_identities = _review_marker_identities(
+        _review_markers(comments, marker_author_login)
     )
     threads = _review_threads(repository, arguments.pr)
     base, head = _require_boundary(
@@ -2143,6 +2222,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if not isinstance(initial_body, str):
         raise TypeError("pull request body must be a string")
+    final_comments = _paginated_api_array(
+        f"repos/{repository}/issues/{arguments.pr}/comments"
+    )
+    if (
+        _review_marker_identities(
+            _review_markers(final_comments, marker_author_login)
+        )
+        != initial_marker_identities
+    ):
+        raise ValueError("trusted review marker identities changed during readiness check")
     _verify_final_readiness_snapshot_unchanged(
         repository=repository,
         pull_request=arguments.pr,
