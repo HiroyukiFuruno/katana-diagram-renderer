@@ -55,6 +55,11 @@ DISPATCHER_TERMINAL_CONCLUSIONS = frozenset({
     "startup_failure", "success", "timed_out",
 })
 MAX_DISPATCHER_FENCE_RUNS = 100
+# A terminal continuation handles at most 150 PRs.  Every sensor/CI listing is
+# restricted by the immutable current PR head and must fit in one response,
+# rather than paging arbitrary retained workflow history with the App token.
+MAX_EVIDENCE_TARGETS = 150
+MAX_EVIDENCE_RUNS_PER_QUERY = 100
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 BODY_SHA256 = re.compile(r"[0-9a-f]{64}")
 NUMBER = re.compile(r"[1-9][0-9]*")
@@ -1114,14 +1119,19 @@ def observed_invalidations(
 def sensor(number: int, base: str, head: str, evidence: EvidenceSnapshot | None = None) -> int:
     if evidence is None:
         trusted_workflow_blob(".github/workflows/pr-governance-review-events.yml", base, head)
+        query = urlencode({"head_sha": head, "per_page": 100})
+        direct_runs = bounded_head_runs(
+            f"repos/{REPOSITORY}/actions/workflows/pr-governance-review-events.yml/runs?{query}",
+            head, "Review sensor",
+        )
+        direct_by_event = {
+            event: tuple(run for run in direct_runs if run.get("event") == event)
+            for event in ("pull_request", "pull_request_review", "pull_request_review_comment")
+        }
     candidates: list[tuple[int, int, int]] = []
     for event in ("pull_request", "pull_request_review", "pull_request_review_comment"):
         if evidence is None:
-            endpoint = (
-                f"repos/{REPOSITORY}/actions/workflows/pr-governance-review-events.yml/"
-                f"runs?event={event}&per_page=100"
-            )
-            run_pages = object_pages(endpoint)
+            run_pages = [{"workflow_runs": list(direct_by_event[event])}]
         else:
             run_pages = [{"workflow_runs": list(evidence.sensor_runs.get(event, ()))}]
         for page in run_pages:
@@ -1196,17 +1206,62 @@ class PendingDecision:
     body_sha256: str
 
 
-def evidence_snapshot() -> EvidenceSnapshot:
-    sensor_runs: dict[str, tuple[dict[str, Any], ...]] = {}
-    for event in ("pull_request", "pull_request_review", "pull_request_review_comment"):
-        endpoint = f"repos/{REPOSITORY}/actions/workflows/pr-governance-review-events.yml/runs?event={event}&per_page=100"
-        values: list[dict[str, Any]] = []
-        for page in object_pages(endpoint):
-            runs = page.get("workflow_runs")
-            if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
-                raise GovernanceError("Review sensor response is invalid.")
-            values.extend(runs)
-        sensor_runs[event] = tuple(values)
+def bounded_head_runs(endpoint: str, head: str, response_name: str) -> tuple[dict[str, Any], ...]:
+    """Read one server-filtered workflow-run page for one immutable PR head."""
+    if SHA.fullmatch(head) is None:
+        raise GovernanceError("Evidence PR head is invalid.")
+    page = object_page(endpoint)
+    runs = page.get("workflow_runs")
+    total_count = page.get("total_count")
+    if (
+        not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
+        or type(total_count) is not int or total_count != len(runs)
+        or total_count > MAX_EVIDENCE_RUNS_PER_QUERY
+        or any(run.get("head_sha") != head for run in runs)
+    ):
+        # A missing filter, page cursor, or capacity overflow could hide a
+        # later rerun.  Do not select a terminal generation from it.
+        raise GovernanceError(f"{response_name} exact-head evidence is incomplete or mismatched.")
+    return tuple(runs)
+
+
+def evidence_snapshot(snapshot: OpenSnapshot, target_numbers: tuple[int, ...]) -> EvidenceSnapshot:
+    """Cache only bounded, server-filtered evidence for this terminal slice."""
+    if (
+        not isinstance(target_numbers, tuple) or not target_numbers
+        or len(target_numbers) > MAX_EVIDENCE_TARGETS
+        or len(set(target_numbers)) != len(target_numbers)
+        or any(type(number) is not int or number < 1 for number in target_numbers)
+    ):
+        raise GovernanceError("Evidence target slice is invalid.")
+    heads: dict[int, str] = {}
+    for pull_request in snapshot.pull_requests:
+        number = pull_request.get("number")
+        head = pull_request.get("head_sha")
+        if number in target_numbers:
+            if type(number) is not int or not isinstance(head, str) or SHA.fullmatch(head) is None or number in heads:
+                raise GovernanceError("Evidence target head is invalid.")
+            heads[number] = head.lower()
+    if set(heads) != set(target_numbers):
+        raise GovernanceError("Evidence target snapshot is incomplete.")
+    # Multiple open PRs may intentionally share an immutable commit.  Preserve
+    # every number-to-head binding above, but read each exact head only once.
+    unique_heads = tuple(dict.fromkeys(heads.values()))
+
+    # One exact-head request covers the sensor's three PR-only event kinds.
+    # Repeating a separate event query triples a terminal slice's front-loaded
+    # App reads and breaches the rolling installation budget at 150 PRs.
+    sensor_values: list[dict[str, Any]] = []
+    for head in unique_heads:
+        query = urlencode({"head_sha": head, "per_page": 100})
+        sensor_values.extend(bounded_head_runs(
+            f"repos/{REPOSITORY}/actions/workflows/pr-governance-review-events.yml/runs?{query}",
+            head, "Review sensor",
+        ))
+    sensor_runs = {
+        event: tuple(run for run in sensor_values if run.get("event") == event)
+        for event in ("pull_request", "pull_request_review", "pull_request_review_comment")
+    }
     workflow_ids: dict[str, int] = {}
     workflow_runs: dict[str, tuple[dict[str, Any], ...]] = {}
     for path in (".github/workflows/test-and-build.yml", ".github/workflows/release-preflight.yml"):
@@ -1214,12 +1269,12 @@ def evidence_snapshot() -> EvidenceSnapshot:
         workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
         if type(workflow_id) is not int or workflow_id < 1:
             raise GovernanceError("Default-branch CI workflow ID is invalid.")
-        values = []
-        for page in object_pages(f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?event=pull_request&per_page=100"):
-            runs = page.get("workflow_runs")
-            if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
-                raise GovernanceError("CI generation response is invalid.")
-            values.extend(runs)
+        values: list[dict[str, Any]] = []
+        for head in unique_heads:
+            query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
+            values.extend(bounded_head_runs(
+                f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?{query}", head, "CI generation",
+            ))
         workflow_ids[path] = workflow_id
         workflow_runs[path] = tuple(values)
     return EvidenceSnapshot(sensor_runs, workflow_ids, workflow_runs)
@@ -1270,7 +1325,10 @@ def generation(number: int, base: str, head: str, name: str, path: str, evidence
         workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
         if type(workflow_id) is not int or workflow_id < 1:
             raise GovernanceError("Default-branch CI workflow ID is invalid.")
-        run_pages = object_pages(f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?event=pull_request&per_page=100")
+        query = urlencode({"event": "pull_request", "head_sha": head, "per_page": 100})
+        run_pages = [{"workflow_runs": list(bounded_head_runs(
+            f"repos/{REPOSITORY}/actions/workflows/{workflow_id}/runs?{query}", head, "CI generation",
+        ))}]
     else:
         workflow_id = evidence.workflow_ids.get(path)
         if type(workflow_id) is not int or workflow_id < 1:
@@ -1754,7 +1812,6 @@ def main() -> int:
         )
         if scope == "all" and set(preserved).intersection(scoped_snapshot.numbers):
             raise GovernanceError("Preserved early success reappeared in an all-open terminal segment.")
-        initial_evidence = evidence_snapshot()
     except GovernanceError as error:
         print(str(error), file=sys.stderr)
         return 1
@@ -1778,6 +1835,11 @@ def main() -> int:
         numbers_to_process = terminal_batch
     else:
         numbers_to_process = ordered_numbers
+    try:
+        initial_evidence = evidence_snapshot(scoped_snapshot, numbers_to_process)
+    except GovernanceError as error:
+        print(str(error), file=sys.stderr)
+        return 1
     failures = 0
     # Do not make one malformed/changed PR leave other open PRs stale.
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json") as source:

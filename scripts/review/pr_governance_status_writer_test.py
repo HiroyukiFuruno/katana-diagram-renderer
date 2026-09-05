@@ -783,10 +783,10 @@ class StatusWriterUnitTest(unittest.TestCase):
                     WRITER.ensure_writer_run_is_active()
 
         sensor_run = self.generation(attempt=1) | {"name": "PR governance review sensor", "event": "pull_request_review", "head_sha": head, "path": ".github/workflows/pr-governance-review-events.yml@master"}
-        with self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [sensor_run]}]):
+        with self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_page", return_value={"total_count": 1, "workflow_runs": [sensor_run]}):
             self.assertEqual(WRITER.sensor(72, "b" * 40, head), 900)
         for attempt in (0, True, "1", 2):
-            with self.subTest(sensor_attempt=attempt), self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [sensor_run | {"run_attempt": attempt}]}]):
+            with self.subTest(sensor_attempt=attempt), self.identity(), patch.object(WRITER, "trusted_workflow_blob"), patch.object(WRITER, "object_page", return_value={"total_count": 1, "workflow_runs": [sensor_run | {"run_attempt": attempt}]}):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.sensor(72, "b" * 40, head)
 
@@ -1194,16 +1194,22 @@ class StatusWriterUnitTest(unittest.TestCase):
                     payload = {"id": 44}
                 elif endpoint == "repos/owner/repository/actions/workflows/release-preflight.yml":
                     payload = {"id": 45}
+                elif endpoint.startswith("repos/owner/repository/actions/workflows/pr-governance-review-events.yml/runs?"):
+                    query = WRITER.parse_qs(WRITER.urlparse(endpoint).query)
+                    head = query["head_sha"][0]
+                    self.assertNotIn("event", query)
+                    values = [run for run in sensor_runs if run["head_sha"] == head]
+                    payload = {"total_count": len(values), "workflow_runs": values}
                 elif endpoint.startswith("repos/owner/repository/actions/workflows/44/runs?"):
-                    payload = page_chunks(ci_runs)
+                    query = WRITER.parse_qs(WRITER.urlparse(endpoint).query)
+                    head = query["head_sha"][0]
+                    values = [run for run in ci_runs if run["head_sha"] == head]
+                    payload = {"total_count": len(values), "workflow_runs": values}
                 elif endpoint.startswith("repos/owner/repository/actions/workflows/45/runs?"):
-                    payload = page_chunks(release_runs)
-                elif endpoint.endswith("runs?event=pull_request&per_page=100"):
-                    payload = page_chunks(sensor_runs)
-                elif endpoint.endswith("runs?event=pull_request_review&per_page=100"):
-                    payload = [{"workflow_runs": []}]
-                elif endpoint.endswith("runs?event=pull_request_review_comment&per_page=100"):
-                    payload = [{"workflow_runs": []}]
+                    query = WRITER.parse_qs(WRITER.urlparse(endpoint).query)
+                    head = query["head_sha"][0]
+                    values = [run for run in release_runs if run["head_sha"] == head]
+                    payload = {"total_count": len(values), "workflow_runs": values}
                 elif endpoint.startswith("repos/owner/repository/actions/workflows/66/runs?"):
                     payload = self.dispatcher_page(source)
                 elif endpoint.startswith("repos/owner/repository/actions/runs?head_sha="):
@@ -1339,7 +1345,9 @@ class StatusWriterUnitTest(unittest.TestCase):
         graphql = [
             value for segment in range(1, 5) for value in transport[segment]["graphql"]
         ]
-        self.assertEqual(rolling_maximum(installation_rest), 3_801)
+        # 150 terminal heads issue one exact sensor-workflow query and two
+        # exact CI-workflow queries each; 21.5s pacing still leaves headroom.
+        self.assertEqual(rolling_maximum(installation_rest), 4_231)
         self.assertLessEqual(rolling_maximum(installation_rest), 4_500)
         self.assertEqual(rolling_maximum(graphql), 300)
         self.assertLessEqual(rolling_maximum(graphql), 4_500)
@@ -2171,17 +2179,141 @@ class StatusWriterUnitTest(unittest.TestCase):
              patch.object(WRITER, "check_run", return_value=value):
             self.assertEqual(WRITER.check_baseline("a" * 40), WRITER.check_fingerprint(value))
 
-    def test_evidence_snapshot_pages_each_workflow_once_for_all_300_prs(self) -> None:
+    def test_evidence_snapshot_uses_exact_head_queries_with_fixed_page_budget(self) -> None:
+        snapshot = self.snapshot(tuple(range(1, 151)))
         calls: list[str] = []
-        def pages(endpoint: str):
+
+        def page(endpoint: str):
             calls.append(endpoint)
-            return [{"workflow_runs": []}]
+            return {"total_count": 0, "workflow_runs": []}
+
         def api(endpoint: str):
             return {"id": 44 if endpoint.endswith("test-and-build.yml") else 45}
-        with self.identity(), patch.object(WRITER, "object_pages", side_effect=pages), patch.object(WRITER, "api_json", side_effect=api):
-            evidence = WRITER.evidence_snapshot()
-        self.assertEqual(len(calls), 5)
+
+        with self.identity(), patch.object(WRITER, "object_page", side_effect=page), \
+             patch.object(WRITER, "object_pages") as pages, patch.object(WRITER, "api_json", side_effect=api):
+            evidence = WRITER.evidence_snapshot(snapshot, tuple(range(1, 151)))
+        self.assertEqual(len(calls), 450)
+        pages.assert_not_called()
         self.assertEqual(evidence.workflow_ids, {".github/workflows/test-and-build.yml": 44, ".github/workflows/release-preflight.yml": 45})
+        for endpoint in calls:
+            query = WRITER.parse_qs(WRITER.urlparse(endpoint).query)
+            self.assertEqual(query.get("head_sha"), [endpoint.split("head_sha=", 1)[1].split("&", 1)[0]])
+            self.assertEqual(query.get("per_page"), ["100"])
+            if "pr-governance-review-events.yml" in endpoint:
+                self.assertNotIn("event", query)
+            else:
+                self.assertEqual(query.get("event"), ["pull_request"])
+        self.assertEqual(sum("/actions/workflows/44/" in endpoint or "/actions/workflows/45/" in endpoint for endpoint in calls), 300)
+
+    def test_evidence_snapshot_keeps_old_current_head_runs_and_selects_latest_rerun(self) -> None:
+        snapshot = self.snapshot((72,))
+        old_sensor = self.generation(700, 1)
+        old_sensor.update({"name": "PR governance review sensor", "path": ".github/workflows/pr-governance-review-events.yml@master"})
+        latest_sensor = dict(old_sensor) | {"id": 701, "run_number": 9}
+        old_ci = self.generation(900, 1)
+        latest_ci = self.generation(901, 2)
+        release = self.generation(902, 1)
+        release.update({"name": "release-preflight", "path": ".github/workflows/release-preflight.yml@master", "workflow_id": 45})
+        head = "0000000000000000000000000000000000000048"
+        for run in (old_sensor, latest_sensor, old_ci, latest_ci, release):
+            run["head_sha"] = head
+            run["pull_requests"] = [dict(run["pull_requests"][0]) | {
+                "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+            }]
+
+        def page(endpoint: str):
+            query = WRITER.parse_qs(WRITER.urlparse(endpoint).query)
+            self.assertEqual(query.get("head_sha"), [head])
+            if "/44/runs?" in endpoint:
+                return {"total_count": 2, "workflow_runs": [old_ci, latest_ci]}
+            if "/45/runs?" in endpoint:
+                return {"total_count": 1, "workflow_runs": [release]}
+            self.assertNotIn("event", query)
+            return {"total_count": 2, "workflow_runs": [old_sensor, latest_sensor]}
+
+        def api(endpoint: str):
+            return {"id": 44 if endpoint.endswith("test-and-build.yml") else 45}
+
+        with self.identity(), patch.object(WRITER, "object_page", side_effect=page), patch.object(WRITER, "api_json", side_effect=api):
+            evidence = WRITER.evidence_snapshot(snapshot, (72,))
+            self.assertEqual(WRITER.sensor(72, "b" * 40, head, evidence), 701)
+            self.assertEqual(
+                WRITER.generation(72, "b" * 40, head, "CI", ".github/workflows/test-and-build.yml", evidence).identifier,
+                901,
+            )
+
+    def test_evidence_snapshot_reuses_one_exact_head_query_for_two_open_prs(self) -> None:
+        head = "a" * 40
+        snapshot = WRITER.OpenSnapshot(
+            (72, 73), {},
+            (
+                {"number": 72, "head_sha": head, "isDraft": False},
+                {"number": 73, "head_sha": head, "isDraft": False},
+            ),
+        )
+
+        def run(identifier: int, number: int, *, name: str, workflow_id: int | None = None) -> dict[str, object]:
+            value = self.generation(identifier) | {
+                "name": name, "path": (
+                    ".github/workflows/pr-governance-review-events.yml@master"
+                    if workflow_id is None else (
+                        ".github/workflows/test-and-build.yml@master"
+                        if workflow_id == 44 else ".github/workflows/release-preflight.yml@master"
+                    )
+                ),
+                "head_sha": head,
+                "pull_requests": [{
+                    "number": number,
+                    "base": {"sha": "b" * 40, "repo": {"full_name": "owner/repository"}},
+                    "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
+                }],
+            }
+            if workflow_id is not None:
+                value["workflow_id"] = workflow_id
+            return value
+
+        sensors = [run(700 + number, number, name="PR governance review sensor") for number in (72, 73)]
+        ci = [run(900 + number, number, name="CI", workflow_id=44) for number in (72, 73)]
+        release = [run(1_100 + number, number, name="release-preflight", workflow_id=45) for number in (72, 73)]
+        calls: list[str] = []
+
+        def page(endpoint: str):
+            calls.append(endpoint)
+            if "/44/runs?" in endpoint:
+                values = ci
+            elif "/45/runs?" in endpoint:
+                values = release
+            else:
+                values = sensors
+            return {"total_count": len(values), "workflow_runs": values}
+
+        def api(endpoint: str):
+            return {"id": 44 if endpoint.endswith("test-and-build.yml") else 45}
+
+        with self.identity(), patch.object(WRITER, "object_page", side_effect=page), patch.object(WRITER, "api_json", side_effect=api):
+            evidence = WRITER.evidence_snapshot(snapshot, (72, 73))
+            self.assertEqual(WRITER.sensor(72, "b" * 40, head, evidence), 772)
+            self.assertEqual(WRITER.sensor(73, "b" * 40, head, evidence), 773)
+            self.assertEqual(WRITER.generation(72, "b" * 40, head, "CI", ".github/workflows/test-and-build.yml", evidence).identifier, 972)
+            self.assertEqual(WRITER.generation(73, "b" * 40, head, "CI", ".github/workflows/test-and-build.yml", evidence).identifier, 973)
+        self.assertEqual(len(calls), 3)
+
+    def test_evidence_snapshot_fails_closed_for_broad_or_incomplete_exact_head_page(self) -> None:
+        snapshot = self.snapshot((72,))
+        foreign = self.generation(900)
+        foreign["head_sha"] = "f" * 40
+        cases = (
+            {"total_count": 101, "workflow_runs": []},
+            {"total_count": 1, "workflow_runs": []},
+            {"total_count": 1, "workflow_runs": [foreign]},
+        )
+        for page in cases:
+            with self.subTest(page=page), self.identity(), \
+                 patch.object(WRITER, "object_page", return_value=page), \
+                 patch.object(WRITER, "api_json", return_value={"id": 44}):
+                with self.assertRaises(WRITER.GovernanceError):
+                    WRITER.evidence_snapshot(snapshot, (72,))
 
     def test_final_evidence_uses_one_complete_head_specific_repository_page(self) -> None:
         calls: list[str] = []
@@ -2377,7 +2509,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         second = self.generation(901, 2)
         second["path"] = ".github/workflows/test-and-build.yml@main"
         with patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40}), self.identity(), patch.object(WRITER, "api_json", side_effect=[{"sha": "c" * 40}] * 3 + [{"id": 44}]), \
-             patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [first, second]}]):
+             patch.object(WRITER, "object_page", return_value={"total_count": 2, "workflow_runs": [first, second]}):
             value = WRITER.generation(72, "b" * 40, "a" * 40, "CI", ".github/workflows/test-and-build.yml")
         self.assertEqual(value.identifier, 901)
         self.assertEqual(value.attempt, 2)
@@ -2398,7 +2530,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         ):
             run = self.generation(); mutate(run)
             with self.subTest(run=run), patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40}), self.identity(), patch.object(WRITER, "api_json", side_effect=[{"sha": "c" * 40}] * 3 + [{"id": 44}]), \
-                 patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [run]}]):
+                 patch.object(WRITER, "object_page", return_value={"total_count": 1, "workflow_runs": [run]}):
                 with self.assertRaises(WRITER.GovernanceError):
                     WRITER.generation(72, "b" * 40, "a" * 40, "CI", ".github/workflows/test-and-build.yml")
 
@@ -2406,7 +2538,7 @@ class StatusWriterUnitTest(unittest.TestCase):
         run = self.generation(); run["workflow_id"] = 45
         with patch.dict(os.environ, {"GITHUB_REF_NAME": "master", "GITHUB_SHA": "d" * 40}), self.identity(), \
              patch.object(WRITER, "api_json", side_effect=[{"sha": "c" * 40}] * 3 + [{"id": 44}]), \
-             patch.object(WRITER, "object_pages", return_value=[{"workflow_runs": [run]}]):
+             patch.object(WRITER, "object_page", return_value={"total_count": 1, "workflow_runs": [run]}):
             with self.assertRaises(WRITER.GovernanceError):
                 WRITER.generation(72, "b" * 40, "a" * 40, "CI", ".github/workflows/test-and-build.yml")
 

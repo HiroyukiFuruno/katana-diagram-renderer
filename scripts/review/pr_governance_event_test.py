@@ -13,6 +13,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).parents[2]
@@ -5210,13 +5211,22 @@ raise SystemExit(91)
                 if isinstance(endpoint, str) and endpoint.startswith("repos/owner/repository/check-runs/"):
                     return response(check_runs[int(endpoint.rsplit("/", 1)[1])])
                 if isinstance(endpoint, str) and "pr-governance-review-events.yml/runs?" in endpoint:
-                    return response([{"workflow_runs": []}])
+                    query = parse_qs(urlparse(endpoint).query)
+                    self.assertEqual(set(query), {"head_sha", "per_page"})
+                    self.assertIn(query["head_sha"][0], set(carry_heads.values()))
+                    self.assertEqual(query["per_page"], ["100"])
+                    return response({"total_count": 0, "workflow_runs": []})
                 if isinstance(endpoint, str) and endpoint.endswith("test-and-build.yml"):
                     return response({"id": 31})
                 if isinstance(endpoint, str) and endpoint.endswith("release-preflight.yml"):
                     return response({"id": 32})
                 if isinstance(endpoint, str) and "/actions/workflows/" in endpoint and "/runs?" in endpoint:
-                    return response([{"workflow_runs": []}])
+                    query = parse_qs(urlparse(endpoint).query)
+                    self.assertEqual(set(query), {"event", "head_sha", "per_page"})
+                    self.assertEqual(query["event"], ["pull_request"])
+                    self.assertIn(query["head_sha"][0], set(carry_heads.values()))
+                    self.assertEqual(query["per_page"], ["100"])
+                    return response({"total_count": 0, "workflow_runs": []})
                 raise AssertionError(arguments)
 
             writer_env = os.environ | {
