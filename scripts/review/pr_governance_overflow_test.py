@@ -23,7 +23,14 @@ class GovernanceOverflowContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.writer = (ROOT / "scripts/review/pr_governance_status_writer.py").read_text(encoding="utf-8")
         self.workflow = (ROOT / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
-        self.dispatcher = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.dispatcher_workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.dispatcher = self.dispatcher_workflow + "\n" + "\n".join(
+            (ROOT / "scripts/review" / script).read_text(encoding="utf-8")
+            for script in (
+                "pr_governance_preflight.py",
+                "pr_governance_resolve_event.py",
+            )
+        )
         self.review_events = (ROOT / ".github/workflows/pr-governance-review-events.yml").read_text(
             encoding="utf-8"
         )
@@ -130,7 +137,7 @@ class GovernanceOverflowContractTest(unittest.TestCase):
     def test_every_governance_workflow_api_subprocess_has_a_twenty_second_timeout(self) -> None:
         """Keep the complete API-call inventory bounded as the three workflows grow."""
         workflows = (
-            ("dispatcher", self.dispatcher, 79),
+            ("dispatcher", self.dispatcher, 81),
             ("status writer", self.workflow, 2),
             ("review events", self.review_events, 1),
         )
@@ -138,11 +145,22 @@ class GovernanceOverflowContractTest(unittest.TestCase):
             with self.subTest(workflow=name):
                 blocks = re.finditer(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)
                 api_calls: list[ast.Call] = []
-                for block in blocks:
-                    source = "".join(
+                sources = [
+                    "".join(
                         line[10:] if line.startswith("          ") else line
                         for line in block.group(1).splitlines(keepends=True)
                     )
+                    for block in blocks
+                ]
+                if name == "dispatcher":
+                    sources.extend(
+                        (ROOT / "scripts/review" / script).read_text(encoding="utf-8")
+                        for script in (
+                            "pr_governance_preflight.py",
+                            "pr_governance_resolve_event.py",
+                        )
+                    )
+                for source in sources:
                     tree = ast.parse(source)
                     finite_timeout_names = {
                         target.id: value.value
@@ -202,6 +220,22 @@ class GovernanceOverflowContractTest(unittest.TestCase):
                 # Updating this count makes a new production subprocess explicit
                 # in review; the assertion above makes its timeout non-optional.
                 self.assertEqual(len(api_calls), expected_count)
+
+    def test_dispatcher_run_blocks_fit_the_actions_command_limit(self) -> None:
+        """GitHub Actions rejects an expanded `run:` command over 21,000 bytes."""
+        blocks = re.finditer(r"(?ms)^        run: \|\n(.*?)(?=^      - name: |^  [A-Za-z_-]|\Z)", self.dispatcher_workflow)
+        for block in blocks:
+            command = "".join(
+                line[10:] if line.startswith("          ") else line
+                for line in block.group(1).splitlines(keepends=True)
+            )
+            with self.subTest(command=command.splitlines()[0] if command else "empty"):
+                self.assertLessEqual(len(command), 21_000)
+        for script in ("pr_governance_preflight.py", "pr_governance_resolve_event.py"):
+            self.assertLessEqual(
+                len((ROOT / "scripts/review" / script).read_text(encoding="utf-8")),
+                300_000,
+            )
 
     def test_phase_deadlines_leave_a_terminal_start_margin_inside_six_hours(self) -> None:
         phase_seconds = (15 + 15 + 30 + 290) * 60

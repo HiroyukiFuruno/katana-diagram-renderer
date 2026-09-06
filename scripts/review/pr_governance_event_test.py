@@ -203,6 +203,66 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             with self.subTest(repository=changed["repository"]):
                 self.assertFalse(matches(changed, "91", self.repository_identity))
 
+    def test_all_scope_dispatcher_generation_requires_exact_dispatcher_writer_pair(self) -> None:
+        """All-scope success may use dispatcher-N only for its paired writer."""
+        namespace = self.namespace()
+        check_matches = namespace["check_matches_source"]
+        dispatcher_matches = namespace["dispatcher_run_matches"]
+        writer_matches = namespace["all_scope_writer_run_matches"]
+        assert callable(check_matches) and callable(dispatcher_matches) and callable(writer_matches)
+        dispatcher = {
+            "id": 91,
+            "name": "PR governance dispatcher",
+            "path": ".github/workflows/pr-governance.yml@master",
+            "event": "issues",
+            "repository": {"id": 101, "name": "repository", "url": self.repository_identity[2]},
+            "head_branch": "master",
+            "head_sha": self.base,
+            "run_attempt": 1,
+            "run_number": 8,
+            "status": "in_progress",
+            "conclusion": None,
+        }
+        writer = {
+            "id": 92,
+            "name": "PR governance status writer",
+            "display_title": "source=91 scope=all segment=1",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch",
+            "repository": {"id": 101, "name": "repository", "url": self.repository_identity[2]},
+            "head_branch": "master",
+            "head_sha": self.base,
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "success",
+        }
+        check = {
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4766933},
+            "head_sha": self.head,
+            "external_id": f"krr-governance/v1/{self.head}/dispatcher-91",
+            "details_url": "https://github.com/owner/repository/actions/runs/92?source_run_id=17",
+        }
+        self.assertTrue(check_matches(check))
+        self.assertTrue(dispatcher_matches(dispatcher, "91", self.repository_identity))
+        self.assertTrue(writer_matches(writer, "92", "91", self.base, self.repository_identity))
+        for changed_dispatcher in (
+            {**dispatcher, "id": 90},
+            {**dispatcher, "repository": {**dispatcher["repository"], "full_name": "other/repository"}},
+            {**dispatcher, "status": "completed", "conclusion": "failure"},
+        ):
+            with self.subTest(dispatcher=changed_dispatcher):
+                self.assertFalse(dispatcher_matches(changed_dispatcher, "91", self.repository_identity))
+        for changed_writer in (
+            {**writer, "display_title": "source=90 scope=all segment=1"},
+            {**writer, "display_title": "source=91 scope=early segment=1"},
+            {**writer, "head_sha": self.head},
+            {**writer, "id": 93},
+        ):
+            with self.subTest(writer=changed_writer):
+                self.assertFalse(writer_matches(changed_writer, "92", "91", self.base, self.repository_identity))
+        self.assertFalse(writer_matches(writer, "92", "91", "c" * 40, self.repository_identity))
+
     def test_source_bound_check_run_scan_finds_current_sensor_check_after_two_historical_pages(self) -> None:
         """A retained same-head history cannot hide the current source's Check Run."""
         namespace = self.namespace()
@@ -383,13 +443,37 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
 
 class GovernanceDispatcherContractTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.actual_workflow = (ROOT / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.workflow = self._materialize_trusted_programs(self.actual_workflow)
         prior_started_at = os.environ.get("TERMINAL_SEGMENT_STARTED_AT")
         os.environ["TERMINAL_SEGMENT_STARTED_AT"] = str(int(time.time()))
         if prior_started_at is None:
             self.addCleanup(os.environ.pop, "TERMINAL_SEGMENT_STARTED_AT", None)
         else:
             self.addCleanup(os.environ.__setitem__, "TERMINAL_SEGMENT_STARTED_AT", prior_started_at)
+
+    @staticmethod
+    def _materialize_trusted_programs(workflow: str) -> str:
+        """Keep legacy snippet contracts pointed at the immutable fetched sources."""
+        for step, script in (
+            ("Exclude unavailable fork sources before dispatcher lock", "pr_governance_preflight.py"),
+            ("Resolve current open pull requests from the trusted default branch", "pr_governance_resolve_event.py"),
+        ):
+            program = (ROOT / "scripts/review" / script).read_text(encoding="utf-8")
+            replacement = "          python3 - <<'PY'\n" + "".join(
+                f"          {line}\n" for line in program.splitlines()
+            ) + "          PY\n"
+            pattern = (
+                rf"(- name: {re.escape(step)}.*?^        run: \|\n)"
+                r"          python3 - <<'PY'\n.*?^          PY\n"
+            )
+            workflow, count = re.subn(
+                pattern, lambda match: match.group(1) + replacement,
+                workflow, count=1, flags=re.MULTILINE | re.DOTALL,
+            )
+            if count != 1:
+                raise AssertionError(f"trusted governance runner missing: {step}")
+        return workflow
 
     @staticmethod
     def _workflow_program(match: re.Match[str]) -> str:

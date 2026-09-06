@@ -159,8 +159,11 @@ jobs:
               or server_url.fragment
           ):
               fail("GitHub server URL is invalid.")
-          generation_pattern = re.compile(
+          writer_generation_pattern = re.compile(
               rf"^krr-governance/v1/{re.escape(head_sha.lower())}/writer-([1-9][0-9]*)$"
+          )
+          dispatcher_generation_pattern = re.compile(
+              rf"^krr-governance/v1/{re.escape(head_sha.lower())}/dispatcher-([1-9][0-9]*)$"
           )
 
           try:
@@ -290,6 +293,55 @@ jobs:
                   )
               )
 
+          def dispatcher_run_matches(
+              value: object, dispatcher_run_id: str, expected: tuple[int, str, str],
+          ) -> bool:
+              """Bind an all-scope Check Run to its exact dispatcher source."""
+              if not isinstance(value, dict):
+                  return False
+              run_repository = value.get("repository")
+              status = value.get("status")
+              conclusion = value.get("conclusion")
+              return bool(
+                  value.get("id") == int(dispatcher_run_id)
+                  and value.get("name") == "PR governance dispatcher"
+                  and workflow_path_matches(value.get("path"), ".github/workflows/pr-governance.yml")
+                  and value.get("event") in {
+                      "pull_request_target", "issue_comment", "issues", "schedule",
+                      "workflow_dispatch", "workflow_run",
+                  }
+                  and source_repository_matches(run_repository, expected)
+                  and value.get("head_branch") == default_branch
+                  and isinstance(value.get("head_sha"), str)
+                  and sha_pattern.fullmatch(value["head_sha"]) is not None
+                  and value.get("run_attempt") == 1
+                  and type(value.get("run_number")) is int and value["run_number"] > 0
+                  and (
+                      status in {"requested", "queued", "in_progress"}
+                      or (status == "completed" and conclusion == "success")
+                  )
+              )
+
+          def all_scope_writer_run_matches(
+              value: object, writer_run_id: str, dispatcher_run_id: str,
+              dispatcher_head_sha: str, expected: tuple[int, str, str],
+          ) -> bool:
+              """Require the all-scope writer title/head to name its dispatcher."""
+              if not writer_run_matches(value, writer_run_id, expected):
+                  return False
+              if not isinstance(value, dict):
+                  return False
+              title = value.get("display_title")
+              return bool(
+                  isinstance(title, str)
+                  and re.fullmatch(
+                      rf"source={re.escape(dispatcher_run_id)} scope=all segment=[1-4]",
+                      title,
+                  )
+                  and value.get("head_branch") == default_branch
+                  and value.get("head_sha") == dispatcher_head_sha
+              )
+
           def api_json(
               endpoint: str,
               failure: str,
@@ -347,8 +399,11 @@ jobs:
                   or writer_run_id is None
               ):
                   return False
-              generation = generation_pattern.fullmatch(external_id)
-              return generation is not None and generation.group(1) == writer_run_id
+              writer_generation = writer_generation_pattern.fullmatch(external_id)
+              if writer_generation is not None:
+                  return writer_generation.group(1) == writer_run_id
+              dispatcher_generation = dispatcher_generation_pattern.fullmatch(external_id)
+              return dispatcher_generation is not None
 
           endpoint = f"repos/{repository}/commits/{head_sha}/check-runs?" + urlencode({"check_name": check_name, "app_id": app_id, "filter": "all", "per_page": 100})
 
@@ -519,12 +574,35 @@ jobs:
                           repository_identity,
                       ):
                           fail("Sensor source run is invalid.")
-                      if not writer_run_matches(
-                          api_json(f"repos/{repository}/actions/runs/{writer_run_id}", "Trusted governance writer run is invalid."),
-                          writer_run_id,
-                          repository_identity,
-                      ):
-                          fail("Trusted governance writer run is invalid.")
+                      writer_run = api_json(
+                          f"repos/{repository}/actions/runs/{writer_run_id}",
+                          "Trusted governance writer run is invalid.",
+                      )
+                      writer_generation = writer_generation_pattern.fullmatch(terminal["external_id"])
+                      dispatcher_generation = dispatcher_generation_pattern.fullmatch(terminal["external_id"])
+                      if writer_generation is not None:
+                          if writer_generation.group(1) != writer_run_id or not writer_run_matches(
+                              writer_run, writer_run_id, repository_identity,
+                          ):
+                              fail("Trusted governance writer run is invalid.")
+                      elif dispatcher_generation is not None:
+                          dispatcher_run_id = dispatcher_generation.group(1)
+                          dispatcher_run = api_json(
+                              f"repos/{repository}/actions/runs/{dispatcher_run_id}",
+                              "Trusted governance dispatcher run is invalid.",
+                          )
+                          if not dispatcher_run_matches(
+                              dispatcher_run, dispatcher_run_id, repository_identity,
+                          ):
+                              fail("Trusted governance dispatcher run is invalid.")
+                          dispatcher_head_sha = dispatcher_run.get("head_sha") if isinstance(dispatcher_run, dict) else None
+                          if not isinstance(dispatcher_head_sha, str) or not all_scope_writer_run_matches(
+                              writer_run, writer_run_id, dispatcher_run_id,
+                              dispatcher_head_sha, repository_identity,
+                          ):
+                              fail("Trusted governance all-scope writer run is invalid.")
+                      else:
+                          fail("Trusted governance Check Run writer generation is invalid.")
                       raise SystemExit(0)
                   if terminal.get("status") == "completed":
                       fail("Trusted governance publisher reported failure.")
