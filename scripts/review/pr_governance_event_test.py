@@ -3182,7 +3182,10 @@ raise SystemExit(91)
         self.assertIn('urlencode({"event": "workflow_dispatch", "branch": branch, "status": status, "per_page": "100"})', section)
         self.assertIn('f"repos/{repository}/actions/workflows/{workflow_id}/runs?{query}"', section)
         self.assertIn('total > 100 or len(entries) != total', section)
-        self.assertIn('if any(active_writer_runs(status) != listed[status] for status in active):', section)
+        self.assertIn("class ActiveWriterSnapshotChanged(Exception):", section)
+        self.assertIn("def active_writer_snapshot():", section)
+        self.assertIn("active_snapshot_attempts = 4", section)
+        self.assertIn("Governance writer active run list did not stabilize.", section)
         self.assertIn('f"repos/{repository}/actions/runs/{identifier}/cancel"', section)
         self.assertIn('active = ("requested", "queued", "pending", "waiting", "in_progress")', section)
         self.assertIn("for _ in range(150):", section)
@@ -4506,7 +4509,8 @@ raise SystemExit(91)
         self.assertIn('"filter":"all"', program)
         self.assertNotIn('"--paginate"', program)
         self.assertIn("prior_scan_max_pages=181", program)
-        self.assertIn("prior_scan_deadline=time.monotonic()+20", program)
+        self.assertIn("prior_scan_page_timeout_seconds=15", program)
+        self.assertIn("prior_scan_deadline=prior_scan_started+prior_scan_page_timeout_seconds*(page_count+1)", program)
         second_match = re.search(
             r"- name: Invalidate current pull requests for the all-open writer \(second TTL-safe chunk\).*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
@@ -4566,6 +4570,64 @@ raise SystemExit(91)
         )
         self.assertIn("details_url=https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0", post_arguments)
 
+    def test_invalidator_carry_scan_converges_for_the_entire_advertised_page_window(self) -> None:
+        """The 181-page contract has a proportional deadline, not an impossible 20s cap."""
+
+        match = re.search(
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None").replace("write_clock=[time.monotonic()+8.1]", "write_clock=[time.monotonic()]")
+        prefix = program[:program.index("# This is intentionally before every")]
+        head = "a" * 40
+        total, page_count = 18_100, 181
+        pages: list[int] = []
+        timeouts: list[float] = []
+        latest = {
+            "id": 900_001, "created_at": "2026-08-30T00:00:01Z", "app": {"id": 42},
+            "name": "KRR / PR governance (trusted check)", "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/dispatcher-8",
+            "status": "in_progress", "conclusion": None,
+            "details_url": "https://github.com/owner/repository/actions/runs/8?dispatcher_run_id=8&carry_pending=1",
+        }
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            endpoint = next((item for item in arguments if isinstance(item, str) and "/check-runs?" in item), "")
+            self.assertTrue(endpoint, arguments)
+            page = int(parse_qs(urlparse(endpoint).query)["page"][0])
+            self.assertGreaterEqual(page, 1)
+            self.assertLessEqual(page, page_count)
+            pages.append(page)
+            timeout = kwargs.get("timeout")
+            self.assertIsInstance(timeout, (int, float))
+            assert isinstance(timeout, (int, float))
+            timeouts.append(float(timeout))
+            first_identifier = (page - 1) * 100 + 1
+            entries: list[dict[str, object]] = [
+                {"id": identifier, "name": "unrelated"}
+                for identifier in range(first_identifier, first_identifier + 100)
+            ]
+            if page == page_count:
+                entries[0] = latest
+            payload = json.dumps({"total_count": total, "check_runs": entries})
+            if "--include" in arguments:
+                self.assertEqual(page, page_count)
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        environment = os.environ | {
+            "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+            "GH_TOKEN": "read", "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "DUPLICATE_GOVERNED_HEADS": "[]",
+            "AFFECTED": "[72]", "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, False]]), "PATH": os.environ["PATH"],
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+            namespace: dict[str, object] = {"__name__": "__main__"}
+            exec(prefix, namespace)
+            self.assertEqual(namespace["prior_carry_pending"](head), 1)
+        self.assertEqual(pages, [*range(1, page_count + 1), 1])
+        self.assertTrue(all(timeout == 15.0 for timeout in timeouts))
+
     def test_invalidator_fences_a_single_page_link_next_as_truncated(self) -> None:
         """Even a one-page result must reject a contradictory pagination fence."""
         match = re.search(
@@ -4624,7 +4686,7 @@ raise SystemExit(91)
         head = "a" * 40
 
         def clock() -> int:
-            values = [0, 19, 21]
+            values = [0, 29, 31]
             value = values[min(len(clock_reads), len(values) - 1)]
             clock_reads.append(value)
             return value
@@ -4955,6 +5017,75 @@ raise SystemExit(91)
         self.assertEqual(
             queried_statuses,
             ["requested", "queued", "pending", "waiting", "in_progress"] * 2,
+        )
+
+    def test_writer_drain_reconciles_a_normal_active_status_partition_transition(self) -> None:
+        """A requested→queued transition restarts enumeration before one safe cancel."""
+
+        match = re.search(
+            r"- name: Drain authoritative writer before the next governance hand-off.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match)
+        head = "a" * 40
+        template: dict[str, object] = {
+            "id": 7, "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "head_sha": head, "workflow_id": 44,
+            "repository": {"full_name": "owner/repository"},
+            "run_number": 1, "run_attempt": 1,
+        }
+        listing_calls = 0
+        queried_statuses: list[str] = []
+        cancelled: list[int] = []
+        current = {**template, "status": "queued"}
+
+        def response(value: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal listing_calls
+            endpoint = next((item for item in arguments if isinstance(item, str) and item.startswith("repos/")), "")
+            if endpoint == "repos/owner/repository":
+                return response({"default_branch": "master"})
+            if endpoint == "repos/owner/repository/git/ref/heads/master":
+                return response({"object": {"sha": head}})
+            if endpoint == "repos/owner/repository/actions/workflows/pr-governance-status-writer.yml":
+                return response({"id": 44})
+            if endpoint.startswith("repos/owner/repository/actions/workflows/44/runs?"):
+                status = parse_qs(urlparse(endpoint).query)["status"][0]
+                queried_statuses.append(status)
+                snapshot = listing_calls // 5
+                listing_calls += 1
+                # The first read sees the same run in two adjacent partitions;
+                # this is the ordinary status transition that must restart.
+                entries: list[dict[str, object]] = []
+                if snapshot == 0 and status in {"requested", "queued"}:
+                    entries = [{**template, "status": status}]
+                elif snapshot > 0 and status == "queued":
+                    entries = [{**template, "status": "queued"}]
+                return response({"total_count": len(entries), "workflow_runs": entries})
+            if endpoint == "repos/owner/repository/actions/runs/7/cancel":
+                cancelled.append(7)
+                current["status"] = "completed"
+                return response({})
+            if endpoint == "repos/owner/repository/actions/runs/7":
+                return response(current)
+            raise AssertionError(arguments)
+
+        environment = os.environ | {
+            "GITHUB_REPOSITORY": "owner/repository", "GH_TOKEN": "actions-write",
+            "PATH": os.environ["PATH"],
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(SystemExit) as exited:
+                exec(program, {"__name__": "__main__"})
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(cancelled, [7])
+        self.assertEqual(
+            queried_statuses,
+            ["requested", "queued", "pending", "waiting", "in_progress"] * 3,
         )
 
     def test_dispatch_waits_for_exact_new_writer_registration_and_rejects_gap_or_bad_identity(self) -> None:

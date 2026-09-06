@@ -110,7 +110,7 @@ PR に紐付く変更では、push 成功や CI green だけで review 完了・
 4. initial/final のいずれでも新規指摘が出たら、分離可能な修正を subagent に委譲し、修正 → push → 新HEAD・本文の initial review から反復する。同一 HEAD でも body edit により digest が変われば、旧 marker、review、trusted success を完了扱いにしない。
 5. 修正した各 review thread に、対応内容と検証結果を reply し、確認できた thread だけを resolve する。
 6. review thread の未 resolve 数が 0 であることを確認する。CI green だけで review 完了・Ready 条件成立とは扱わない。
-7. 最新 HEAD・本文 digest の review 完了、未 resolve 0、必要な CI/品質ゲート確認を満たしたら、main が機械ゲートを実行する。success を再利用する writer/trusted Check Run evidence の query にある current `pr_body_sha256` は、GitHub APIから再取得した current PR body を正規化せず strict UTF-8でSHA-256化したdigestと**ちょうど1個（exactly one）**一致しなければならない。missing、duplicate、stale、または異なるdigestはfail-closedで拒否し、旧successを再利用せずReady化・mergeへ進まない。成功後も PR は Draft のまま維持し、ユーザーの明示承認後に main が Ready 化を判断する。このスキルは Ready 化コマンドを実行しない。
+7. 最新 HEAD・本文 digest の review 完了、未 resolve 0、必要な CI/品質ゲート確認を満たしたら、main が機械ゲートを実行する。success を再利用する writer/trusted Check Run evidence の query にある current `pr_body_sha256` は、GitHub APIから再取得した current PR body を正規化せず strict UTF-8でSHA-256化したdigestと**ちょうど1個（exactly one）**一致しなければならない。missing、duplicate、stale、または異なるdigestはfail-closedで拒否し、旧successを再利用せずReady化・mergeへ進まない。成功したらmainは `gh pr ready <number>` でPRをReady化する。Ready化の後に初めてユーザーへfreshなmerge承認を求める。承認後はmerge直前に同じ `just pr-ready-check "<number>"` を再実行し、global bootstrap skillの `merge --apply` だけでmergeする。UI・ブラウザ・通常のGitHub CLI merge（`gh pr merge`）・人間/admin bypassは禁止する。このスキル自体はReady化・mergeコマンドを実行しない。
 
 P1 などの review 指摘修正を実装する場合、分離可能ならファイルまたは責務単位で subagent に委譲し、main はオーケストレーターとして要件・DoD・差分・検証を統合確認します。同じファイルや責務を重ねて委譲しません。
 

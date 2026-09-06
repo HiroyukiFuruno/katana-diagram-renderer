@@ -117,7 +117,9 @@ class GovernanceOverflowContractTest(unittest.TestCase):
         for marker in (
             "Open pull request response first page changed.",
             "Current open pull request response first page changed.",
-            "Governance writer active run list changed.",
+            "active_snapshot_attempts = 4",
+            "ActiveWriterSnapshotChanged",
+            "Governance writer active run list did not stabilize.",
             "Governance writer runs first page changed.",
             "Early governance Check Run first page changed.",
             "Affected-head barrier current pull request response first page changed.",
@@ -141,7 +143,18 @@ class GovernanceOverflowContractTest(unittest.TestCase):
                         line[10:] if line.startswith("          ") else line
                         for line in block.group(1).splitlines(keepends=True)
                     )
-                    for call in ast.walk(ast.parse(source)):
+                    tree = ast.parse(source)
+                    finite_timeout_names = {
+                        target.id: value.value
+                        for assignment in ast.walk(tree)
+                        if isinstance(assignment, ast.Assign)
+                        and len(assignment.targets) == 1
+                        and isinstance(target := assignment.targets[0], ast.Name)
+                        and isinstance(value := assignment.value, ast.Constant)
+                        and isinstance(value.value, (int, float))
+                        and 0 < value.value <= 20
+                    }
+                    for call in ast.walk(tree):
                         if not (
                             isinstance(call, ast.Call)
                             and isinstance(call.func, ast.Attribute)
@@ -160,8 +173,31 @@ class GovernanceOverflowContractTest(unittest.TestCase):
                             self.assertIsInstance(timeout.value, (int, float))
                             self.assertLessEqual(timeout.value, 20)
                         else:
-                            self.assertEqual(ast.unparse(timeout).split("(", 1)[0], "min")
-                            self.assertIn("20", ast.unparse(timeout))
+                            self.assertIsInstance(timeout, ast.Call)
+                            assert isinstance(timeout, ast.Call)
+                            self.assertIsInstance(timeout.func, ast.Name)
+                            assert isinstance(timeout.func, ast.Name)
+                            self.assertEqual(timeout.func.id, "min")
+                            self.assertIn("remaining", ast.unparse(timeout))
+                            self.assertRegex(
+                                source,
+                                r"\bremaining\s*=\s*[A-Za-z_]*deadline\s*-\s*time\.(?:time|monotonic)\(\)",
+                            )
+                            self.assertTrue(
+                                any(
+                                    (
+                                        isinstance(argument, ast.Constant)
+                                        and isinstance(argument.value, (int, float))
+                                        and 0 < argument.value <= 20
+                                    )
+                                    or (
+                                        isinstance(argument, ast.Name)
+                                        and argument.id in finite_timeout_names
+                                    )
+                                    for argument in timeout.args
+                                ),
+                                ast.unparse(timeout),
+                            )
 
                 # Updating this count makes a new production subprocess explicit
                 # in review; the assertion above makes its timeout non-optional.

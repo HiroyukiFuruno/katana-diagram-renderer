@@ -362,8 +362,11 @@ const SKILL_CONTRACTS: &[SkillContract] = &[
             RequiredTerm::Alternatives(&["reply", "返信"]),
             RequiredTerm::Alternatives(&["resolve", "解決"]),
             RequiredTerm::Exact("pr-ready-check"),
+            RequiredTerm::Exact("gh pr ready <number>"),
+            RequiredTerm::Exact("freshなmerge承認"),
+            RequiredTerm::Exact("merge --apply"),
         ],
-        promotes_ready: false,
+        promotes_ready: true,
     },
     SkillContract {
         path: ".codex/skills/create_pull_request/SKILL.md",
@@ -775,7 +778,12 @@ fn assert_ready_promotion_boundary(skill: &str, contract: &SkillContract) -> Tes
             "{} must own Ready promotion",
             contract.path
         );
-        assert_in_order(skill, READY_PROMOTION_ORDER)?;
+        if contract.path == ".codex/skills/commit_and_push/SKILL.md" {
+            assert_commit_and_push_ready_boundary(skill)?;
+        } else {
+            assert_in_order(skill, READY_PROMOTION_ORDER)
+                .map_err(|error| format!("{}: {error}", contract.path))?;
+        }
     } else {
         assert!(
             !skill.contains("gh pr ready"),
@@ -789,6 +797,31 @@ fn assert_ready_promotion_boundary(skill: &str, contract: &SkillContract) -> Tes
         );
         assert_in_order(skill, contract.required_terms)?;
     }
+    Ok(())
+}
+
+fn assert_commit_and_push_ready_boundary(skill: &str) -> TestResult {
+    assert_eq!(
+        skill.matches("gh pr ready <number>").count(),
+        1,
+        "commit-and-push must not describe a pre-gate Ready transition"
+    );
+    assert_in_order(
+        skill,
+        &[
+            RequiredTerm::Exact("final"),
+            RequiredTerm::Exact("main が機械ゲートを実行"),
+            RequiredTerm::Exact("成功したらmainは `gh pr ready <number>`"),
+            RequiredTerm::Exact("freshなmerge承認"),
+            RequiredTerm::Exact("merge直前"),
+            RequiredTerm::Exact("just pr-ready-check"),
+            RequiredTerm::Exact("merge --apply"),
+        ],
+    )?;
+    assert!(
+        skill.contains("通常のGitHub CLI merge（`gh pr merge`）・人間/admin bypassは禁止"),
+        "commit-and-push must continue rejecting direct merge and bypass paths"
+    );
     Ok(())
 }
 

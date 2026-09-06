@@ -211,6 +211,8 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
             ".codex/skills/kdr-workflow-guide/SKILL.md",
             ".agents/skills/kdr-workflow-guide/SKILL.md",
             ".codex/skills/gh-address-comments/SKILL.md",
+            ".codex/skills/commit_and_push/SKILL.md",
+            ".agents/skills/commit_and_push/SKILL.md",
         ):
             with self.subTest(path=relative):
                 text = (root / relative).read_text(encoding="utf-8")
@@ -224,6 +226,11 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
                 self.assertRegex(text, r"(?:UI|ブラウザ).*(?:禁止|bypass)")
                 self.assertRegex(text, r"(?:人間|human).*(?:禁止|bypass)")
                 self.assertRegex(text, r"admin.*(?:禁止|bypass)")
+                if relative.endswith("commit_and_push/SKILL.md"):
+                    self.assertLess(
+                        text.index("`gh pr ready <number>`"),
+                        text.index("freshなmerge承認"),
+                    )
 
     def test_review_skills_restart_initial_review_after_every_push_or_body_edit(self) -> None:
         root = Path(__file__).parents[2]

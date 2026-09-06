@@ -2189,6 +2189,9 @@ jobs:
           workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
           if type(workflow_id) is not int or workflow_id < 1:
               raise SystemExit("Governance writer workflow ID is invalid.")
+          class ActiveWriterSnapshotChanged(Exception):
+              pass
+
           def active_writer_runs(status):
               if status not in active:
                   raise SystemExit("Governance writer run status is invalid.")
@@ -2210,12 +2213,52 @@ jobs:
               total = page.get("total_count") if isinstance(page, dict) else None
               if not isinstance(page, dict) or not isinstance(entries, list) or len(entries) > 100 or not all(isinstance(run, dict) for run in entries) or type(total) is not int or total < 0 or total > 100 or len(entries) != total:
                   raise SystemExit("Governance writer run list is invalid.")
-              if any(run.get("status") != status for run in entries):
-                  raise SystemExit("Governance writer run status changed.")
+              identifiers = set()
+              for run in entries:
+                  identifier = run.get("id")
+                  observed_status = run.get("status")
+                  if type(identifier) is not int or identifier < 1 or identifier in identifiers:
+                      raise SystemExit("Governance writer run list is invalid.")
+                  identifiers.add(identifier)
+                  # A run can move requested→queued→in_progress while the
+                  # five state partitions are being read. Retry the whole
+                  # snapshot rather than treating that ordinary transition as
+                  # a terminal hand-off failure; unknown states remain invalid.
+                  if observed_status != status:
+                      if observed_status in active or observed_status == "completed":
+                          raise ActiveWriterSnapshotChanged
+                      raise SystemExit("Governance writer run status is invalid.")
               return entries
-          listed = {status: active_writer_runs(status) for status in active}
-          if any(active_writer_runs(status) != listed[status] for status in active):
-              raise SystemExit("Governance writer active run list changed.")
+
+          def active_writer_snapshot():
+              snapshot = {status: active_writer_runs(status) for status in active}
+              identifiers = [run["id"] for runs in snapshot.values() for run in runs]
+              if len(set(identifiers)) != len(identifiers):
+                  # A transition can make one run visible in two partitions
+                  # during a single enumeration. It is not safe to cancel
+                  # until a complete snapshot is stable.
+                  raise ActiveWriterSnapshotChanged
+              return snapshot
+
+          listed = None
+          active_snapshot_attempts = 4
+          for attempt in range(active_snapshot_attempts):
+              try:
+                  first_snapshot = active_writer_snapshot()
+                  second_snapshot = active_writer_snapshot()
+              except ActiveWriterSnapshotChanged:
+                  if attempt + 1 == active_snapshot_attempts:
+                      raise SystemExit("Governance writer active run list did not stabilize.")
+                  time.sleep(1)
+                  continue
+              if first_snapshot == second_snapshot:
+                  listed = second_snapshot
+                  break
+              if attempt + 1 == active_snapshot_attempts:
+                  raise SystemExit("Governance writer active run list did not stabilize.")
+              time.sleep(1)
+          if not isinstance(listed, dict):
+              raise SystemExit("Governance writer active run list did not stabilize.")
 
           def validate(run):
               run_repository = run.get("repository") if isinstance(run, dict) else None
@@ -2538,14 +2581,21 @@ jobs:
               # histories larger than 600 entries.
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
               prior_scan_max_pages=181
-              prior_scan_deadline=time.monotonic()+20
+              # A full retained-history scan needs page_count + 1 reads: the
+              # first page, every remaining page, then the page-one anchor.
+              # Budget each bounded read explicitly so the documented 181-page
+              # window can converge instead of being impossible under one
+              # global 20-second wall clock.
+              prior_scan_page_timeout_seconds=15
+              prior_scan_started=time.monotonic()
+              prior_scan_deadline=prior_scan_started+prior_scan_page_timeout_seconds*2
               try:
                   def check_page(page_number, terminal=False):
                       remaining=prior_scan_deadline-time.monotonic()
                       if remaining<=0: raise ValueError
                       arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
                       if terminal: arguments.insert(2,"--include")
-                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(20,remaining))
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(prior_scan_page_timeout_seconds,remaining))
                       if time.monotonic() >= prior_scan_deadline: raise ValueError
                       if listed.returncode!=0: raise ValueError
                       raw=listed.stdout
@@ -2558,6 +2608,8 @@ jobs:
                       return page
                   first=check_page(1); total_count=first["total_count"]; page_count=max(1,(total_count+99)//100)
                   if page_count>prior_scan_max_pages: raise ValueError
+                  prior_scan_deadline=prior_scan_started+prior_scan_page_timeout_seconds*(page_count+1)
+                  if time.monotonic() >= prior_scan_deadline: raise ValueError
                   pages=[first]
                   for page_number in range(2,page_count+1):
                       page=check_page(page_number,terminal=page_number==page_count)
@@ -2695,14 +2747,21 @@ jobs:
               # histories larger than 600 entries.
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
               prior_scan_max_pages=181
-              prior_scan_deadline=time.monotonic()+20
+              # A full retained-history scan needs page_count + 1 reads: the
+              # first page, every remaining page, then the page-one anchor.
+              # Budget each bounded read explicitly so the documented 181-page
+              # window can converge instead of being impossible under one
+              # global 20-second wall clock.
+              prior_scan_page_timeout_seconds=15
+              prior_scan_started=time.monotonic()
+              prior_scan_deadline=prior_scan_started+prior_scan_page_timeout_seconds*2
               try:
                   def check_page(page_number, terminal=False):
                       remaining=prior_scan_deadline-time.monotonic()
                       if remaining<=0: raise ValueError
                       arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
                       if terminal: arguments.insert(2,"--include")
-                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(20,remaining))
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(prior_scan_page_timeout_seconds,remaining))
                       if time.monotonic() >= prior_scan_deadline: raise ValueError
                       if listed.returncode!=0: raise ValueError
                       raw=listed.stdout
@@ -2715,6 +2774,8 @@ jobs:
                       return page
                   first=check_page(1); total_count=first["total_count"]; page_count=max(1,(total_count+99)//100)
                   if page_count>prior_scan_max_pages: raise ValueError
+                  prior_scan_deadline=prior_scan_started+prior_scan_page_timeout_seconds*(page_count+1)
+                  if time.monotonic() >= prior_scan_deadline: raise ValueError
                   pages=[first]
                   for page_number in range(2,page_count+1):
                       page=check_page(page_number,terminal=page_number==page_count)
