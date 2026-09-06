@@ -283,7 +283,7 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             reader()
 
     def test_source_bound_check_run_scan_fails_closed_when_page_one_anchor_races(self) -> None:
-        """A candidate collected before a changed anchor can never authorize the latch."""
+        """A changed anchor clears the candidate and bounded scanning restarts."""
         namespace = self.namespace()
         reader = namespace["source_bound_trusted_check_runs"]
         assert callable(reader)
@@ -296,6 +296,7 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             "details_url": "https://github.com/owner/repository/actions/runs/91?source_run_id=17",
         }
         first_page_reads = 0
+        calls: list[tuple[int, bool]] = []
 
         def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             nonlocal first_page_reads
@@ -303,6 +304,7 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             page_match = re.search(r"[?&]page=(\d+)", endpoint)
             assert page_match is not None
             page = int(page_match.group(1))
+            calls.append((page, "--include" in arguments))
             if page == 1:
                 first_page_reads += 1
                 runs = [{"id": value} for value in (range(1, 101) if first_page_reads == 1 else range(301, 401))]
@@ -319,9 +321,14 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
 
         with patch.object(subprocess, "run", side_effect=fake_run):
             self.assertIsNone(reader())
-            with self.assertRaises(SystemExit):
-                reader()
-        self.assertEqual(first_page_reads, 2)
+            self.assertIsNone(reader())
+            result = reader()
+        self.assertEqual(result, [candidate])
+        self.assertEqual(first_page_reads, 3)
+        self.assertEqual(
+            calls,
+            [(1, False), (2, False), (3, True), (1, False), (2, False), (3, True), (1, False)],
+        )
 
     def test_source_bound_check_run_scan_rejects_ambiguous_raced_and_malformed_pages(self) -> None:
         """Pagination may wait for a stable source snapshot, never accept an ambiguous one."""
@@ -476,7 +483,7 @@ class GovernanceDispatcherContractTest(unittest.TestCase):
                 endpoint = next((item for item in argv if isinstance(item, str) and item.startswith("repos/")), "")
                 page_match = _krr_re.search(r"[?&]page=(\d+)", endpoint)
                 page_number = int(page_match.group(1)) if page_match else 1
-                is_terminal = page_number == 6 and "--include" in argv
+                is_terminal = "--include" in argv
                 is_pull_page = "/pulls?state=open" in endpoint
                 is_run_page = "/actions/workflows/" in endpoint and "/runs?" in endpoint
                 is_check_page = "/check-runs?" in endpoint
@@ -4487,6 +4494,160 @@ raise SystemExit(91)
             result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_invalidator_selects_latest_generation_beyond_first_page_with_dynamic_history_scan(self) -> None:
+        """A newer generation beyond page one must supersede an old carry."""
+        match = re.search(
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None").replace("write_clock=[time.monotonic()+8.1]", "write_clock=[time.monotonic()]")
+        self.assertIn('"filter":"all"', program)
+        self.assertNotIn('"--paginate"', program)
+        self.assertIn("prior_scan_max_pages=181", program)
+        self.assertIn("prior_scan_deadline=time.monotonic()+20", program)
+        second_match = re.search(
+            r"- name: Invalidate current pull requests for the all-open writer \(second TTL-safe chunk\).*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(second_match); assert second_match is not None
+        second_program = self._workflow_program(second_match)
+        self.assertIn('"filter":"all"', second_program)
+        self.assertNotIn('"--paginate"', second_program)
+        head = "a" * 40
+        prior = {
+            "id": 101, "created_at": "2026-08-30T00:00:00Z", "app": {"id": 42}, "name": "KRR / PR governance (trusted check)",
+            "head_sha": head, "external_id": f"krr-governance/v1/{head}/dispatcher-8",
+            "status": "in_progress", "conclusion": None,
+            "details_url": "https://github.com/owner/repository/actions/runs/8?dispatcher_run_id=8&carry_pending=1",
+        }
+        newer = {**prior, "id": 102, "created_at": "2026-08-30T00:00:01Z", "external_id": f"krr-governance/v1/{head}/dispatcher-7", "details_url": "https://github.com/owner/repository/actions/runs/7?dispatcher_run_id=7&carry_pending=0"}
+        current = {**prior, "id": 103, "external_id": f"krr-governance/v1/{head}/dispatcher-9", "details_url": "https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0"}
+        page_one = {"total_count": 601, "check_runs": [prior] + [{"id": value, "name": "unrelated"} for value in range(200, 299)]}
+        pages = {1: page_one, 2: {"total_count": 601, "check_runs": [newer] + [{"id": value, "name": "unrelated"} for value in range(300, 399)]}}
+        pages.update({page: {"total_count": 601, "check_runs": [{"id": value, "name": "unrelated"} for value in range(400 + (page - 3) * 100, 500 + (page - 3) * 100)]} for page in range(3, 7)})
+        pages[7] = {"total_count": 601, "check_runs": [{"id": 999, "name": "unrelated"}]}
+        calls: list[str] = []
+        post_arguments: list[str] = []
+
+        def response(value: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal post_arguments
+            endpoint = next((value for value in arguments if isinstance(value, str) and value.startswith("repos/")), "")
+            calls.append(endpoint)
+            if "/check-runs?" in endpoint:
+                page = int(parse_qs(urlparse(endpoint).query)["page"][0])
+                return response(pages[page])
+            if arguments[:3] == ["gh", "api", "--method"]:
+                post_arguments = arguments
+                return response(current)
+            if endpoint.endswith("/check-runs/103"):
+                return response(current)
+            if endpoint.endswith("/pulls/72"):
+                return response({"draft": False, "head": {"sha": head}})
+            raise AssertionError(arguments)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+                "GH_TOKEN": "read", "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "DUPLICATE_GOVERNED_HEADS": "[]",
+                "AFFECTED": "[72]", "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, False]]), "GITHUB_OUTPUT": str(Path(temporary) / "output"),
+            }
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                namespace: dict[str, object] = {"__name__": "__main__"}
+                exec(program, namespace)
+        self.assertEqual(sum("/check-runs?" in call for call in calls), 8)
+        self.assertEqual(
+            [int(parse_qs(urlparse(call).query)["page"][0]) for call in calls if "/check-runs?" in call],
+            [1, 2, 3, 4, 5, 6, 7, 1],
+        )
+        self.assertIn("details_url=https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0", post_arguments)
+
+    def test_invalidator_fences_a_single_page_link_next_as_truncated(self) -> None:
+        """Even a one-page result must reject a contradictory pagination fence."""
+        match = re.search(
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None").replace("write_clock=[time.monotonic()+8.1]", "write_clock=[time.monotonic()]")
+        calls: list[list[str]] = []
+        head = "a" * 40
+        current = {
+            "id": 103, "app": {"id": 42}, "name": "KRR / PR governance (trusted check)", "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/dispatcher-9", "status": "in_progress", "conclusion": None,
+            "details_url": "https://github.com/owner/repository/actions/runs/9?dispatcher_run_id=9&carry_pending=0",
+        }
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(arguments)
+            endpoint = next((value for value in arguments if isinstance(value, str) and value.startswith("repos/")), "")
+            if "/check-runs?" in endpoint:
+                payload = json.dumps({"total_count": 0, "check_runs": []})
+                if "--include" in arguments:
+                    payload = 'HTTP/2 200 OK\nLink: <https://api.github.com/next>; rel="next"\n\n' + payload
+                return subprocess.CompletedProcess(arguments, 0, payload, "")
+            if arguments[:3] == ["gh", "api", "--method"]:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(current), "")
+            if endpoint.endswith("/check-runs/103"):
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(current), "")
+            if endpoint.endswith("/pulls/72"):
+                return subprocess.CompletedProcess(arguments, 0, json.dumps({"draft": False, "head": {"sha": head}}), "")
+            raise AssertionError(arguments)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = os.environ | {
+                "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+                "GH_TOKEN": "read", "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "DUPLICATE_GOVERNED_HEADS": "[]",
+                "AFFECTED": "[72]", "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, False]]), "GITHUB_OUTPUT": str(Path(temporary) / "output"),
+            }
+            with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+                with self.assertRaises(SystemExit):
+                    exec(program, {"__name__": "__main__"})
+        self.assertEqual(sum(any("/check-runs?" in item for item in call) for call in calls), 2)
+        self.assertTrue(any(any("/check-runs?" in item for item in call) and "--include" in call for call in calls))
+
+    def test_invalidator_rejects_a_read_that_reaches_the_deadline(self) -> None:
+        """A near-deadline API response cannot authorize a carry decision."""
+        match = re.search(
+            r"- name: Invalidate every current pull request for the all-open writer.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match).replace("time.sleep(delay)", "None").replace("write_clock=[time.monotonic()+8.1]", "write_clock=[0]")
+        prefix = program[:program.index("# This is intentionally before every")]
+        timeouts: list[float] = []
+        clock_reads: list[int] = []
+        head = "a" * 40
+
+        def clock() -> int:
+            values = [0, 19, 21]
+            value = values[min(len(clock_reads), len(values) - 1)]
+            clock_reads.append(value)
+            return value
+
+        def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "/check-runs?" in " ".join(str(item) for item in arguments):
+                timeout = kwargs.get("timeout")
+                self.assertIsInstance(timeout, (int, float))
+                timeouts.append(timeout)
+                return subprocess.CompletedProcess(arguments, 0, json.dumps({"total_count": 0, "check_runs": []}), "")
+            raise AssertionError(arguments)
+
+        environment = os.environ | {
+            "GITHUB_REPOSITORY": "owner/repository", "GITHUB_SERVER_URL": "https://github.com", "GITHUB_RUN_ID": "9",
+            "GH_TOKEN": "read", "CHECK_WRITE_TOKEN": "write", "CHECK_APP_ID": "42", "DUPLICATE_GOVERNED_HEADS": "[]",
+            "AFFECTED": "[72]", "KNOWN_TARGET_SNAPSHOTS": json.dumps([[72, head, False]]),
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+            namespace: dict[str, object] = {"__name__": "__main__"}
+            exec(prefix, namespace)
+            namespace["_krr_clock"].monotonic = clock  # type: ignore[attr-defined]
+            self.assertIsNone(namespace["prior_carry_pending"](head), (timeouts, clock_reads))
+        self.assertEqual(timeouts, [1.0])
 
     def test_invalidator_carries_pending_tail_across_104_to_600_open_prs(self) -> None:
         """Every later all-open generation inherits a valid pending tail, not just its first page."""

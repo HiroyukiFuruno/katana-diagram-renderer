@@ -2533,27 +2533,37 @@ jobs:
               if not isinstance(check,dict) or check.get("id")!=identifier or check.get("name")!="KRR / PR governance (trusted check)" or check.get("head_sha")!=head or check.get("external_id")!=external_id or check.get("status")!="in_progress" or check.get("conclusion") is not None or check.get("details_url")!=details or not isinstance(check.get("app"),dict) or str(check["app"].get("id"))!=app_id: return None
               return identifier
           def prior_carry_pending(head):
+              # The API's reported total determines a finite page window;
+              # unlike the old six-page cap this remains complete for retained
+              # histories larger than 600 entries.
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
+              prior_scan_max_pages=181
+              prior_scan_deadline=time.monotonic()+20
               try:
-                  def check_page(page_number):
+                  def check_page(page_number, terminal=False):
+                      remaining=prior_scan_deadline-time.monotonic()
+                      if remaining<=0: raise ValueError
                       arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
-                      if page_number == 6: arguments.insert(2,"--include")
-                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+                      if terminal: arguments.insert(2,"--include")
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(20,remaining))
+                      if time.monotonic() >= prior_scan_deadline: raise ValueError
                       if listed.returncode!=0: raise ValueError
                       raw=listed.stdout
-                      if page_number == 6:
+                      if terminal:
                           headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
                           if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise ValueError
                       page=json.loads(raw); entries=page.get("check_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
-                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0: raise ValueError
+                      expected=min(100,total-100*(page_number-1)) if type(total) is int else None
+                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0 or expected is None or len(entries)!=expected: raise ValueError
                       return page
-                  pages=[check_page(1)]; total_count=pages[0]["total_count"]
-                  for page_number in range(2,7):
-                      if len(pages[-1]["check_runs"])<100: break
-                      page=check_page(page_number)
+                  first=check_page(1); total_count=first["total_count"]; page_count=max(1,(total_count+99)//100)
+                  if page_count>prior_scan_max_pages: raise ValueError
+                  pages=[first]
+                  for page_number in range(2,page_count+1):
+                      page=check_page(page_number,terminal=page_number==page_count)
                       if page["total_count"]!=total_count: raise ValueError
                       pages.append(page)
-                  if check_page(1)!=pages[0] or sum(len(page["check_runs"]) for page in pages)!=total_count: raise ValueError
+                  if check_page(1,terminal=page_count==1)!=first: raise ValueError
                   generations=[]; external_ids=set(); pattern=re.compile(rf"krr-governance/v1/{re.escape(head.lower())}/(?:dispatcher|writer)-[1-9][0-9]*$")
                   for page in pages:
                       for candidate in page["check_runs"]:
@@ -2572,7 +2582,8 @@ jobs:
                   parts=urlparse(details); query_values=parse_qs(parts.query,keep_blank_values=True); run_id=parts.path.removeprefix(base_parts.path)
                   return parts.scheme==base_parts.scheme and parts.netloc==base_parts.netloc and not parts.params and not parts.fragment and bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path==base_parts.path+run_id and query_values.keys()=={"dispatcher_run_id","carry_pending"} and query_values["dispatcher_run_id"]==[run_id] and query_values["carry_pending"] in (["0"],["1"])
               prior_id=(urlparse(latest.get("details_url")).path.removeprefix(base_parts.path) if isinstance(latest,dict) and isinstance(latest.get("details_url"),str) else "")
-              return int(latest is not None and latest.get("status")=="in_progress" and latest.get("conclusion") is None and is_prior_dispatcher_invalidation(latest.get("details_url")) and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{prior_id}")
+              prior_query=(parse_qs(urlparse(latest["details_url"]).query,keep_blank_values=True) if isinstance(latest,dict) and isinstance(latest.get("details_url"),str) else {})
+              return int(latest is not None and latest.get("status")=="in_progress" and latest.get("conclusion") is None and is_prior_dispatcher_invalidation(latest.get("details_url")) and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{prior_id}" and prior_query.get("carry_pending")==["1"])
           # This is intentionally before every per-PR refresh.  A refresh can
           # fail or race, but it must never leave a known current/event HEAD's
           # older trusted success mergeable.  Continue every independent POST
@@ -2679,27 +2690,37 @@ jobs:
           if len(heads)>300: raise SystemExit("All-open invalidation chunk exceeds the App-token TTL cap.")
           base=f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/{dispatcher}"; read_env={"GH_TOKEN":read_token,"PATH":os.environ["PATH"]}; write_env={"GH_TOKEN":write_token,"PATH":os.environ["PATH"]}; posted={}; failures=[]; carry_targets=[]; write_clock=[time.monotonic()+8.1]
           def prior_carry_pending(head):
+              # The API's reported total determines a finite page window;
+              # unlike the old six-page cap this remains complete for retained
+              # histories larger than 600 entries.
               query=urlencode({"check_name":"KRR / PR governance (trusted check)","app_id":app_id,"filter":"all","per_page":100})
+              prior_scan_max_pages=181
+              prior_scan_deadline=time.monotonic()+20
               try:
-                  def check_page(page_number):
+                  def check_page(page_number, terminal=False):
+                      remaining=prior_scan_deadline-time.monotonic()
+                      if remaining<=0: raise ValueError
                       arguments=["gh","api",f"repos/{repository}/commits/{head}/check-runs?{query}&page={page_number}"]
-                      if page_number == 6: arguments.insert(2,"--include")
-                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
+                      if terminal: arguments.insert(2,"--include")
+                      listed=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=min(20,remaining))
+                      if time.monotonic() >= prior_scan_deadline: raise ValueError
                       if listed.returncode!=0: raise ValueError
                       raw=listed.stdout
-                      if page_number == 6:
+                      if terminal:
                           headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
                           if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise ValueError
                       page=json.loads(raw); entries=page.get("check_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
-                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0: raise ValueError
+                      expected=min(100,total-100*(page_number-1)) if type(total) is int else None
+                      if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(check,dict) for check in entries) or type(total) is not int or total<0 or expected is None or len(entries)!=expected: raise ValueError
                       return page
-                  pages=[check_page(1)]; total_count=pages[0]["total_count"]
-                  for page_number in range(2,7):
-                      if len(pages[-1]["check_runs"])<100: break
-                      page=check_page(page_number)
+                  first=check_page(1); total_count=first["total_count"]; page_count=max(1,(total_count+99)//100)
+                  if page_count>prior_scan_max_pages: raise ValueError
+                  pages=[first]
+                  for page_number in range(2,page_count+1):
+                      page=check_page(page_number,terminal=page_number==page_count)
                       if page["total_count"]!=total_count: raise ValueError
                       pages.append(page)
-                  if check_page(1)!=pages[0] or sum(len(page["check_runs"]) for page in pages)!=total_count: raise ValueError
+                  if check_page(1,terminal=page_count==1)!=first: raise ValueError
                   pattern=re.compile(rf"krr-governance/v1/{re.escape(head.lower())}/(?:dispatcher|writer)-[1-9][0-9]*$"); generations=[]; external_ids=set()
                   for page in pages:
                       for candidate in page["check_runs"]:
@@ -2714,7 +2735,7 @@ jobs:
               base_parts=urlparse(base)
               if not isinstance(latest,dict) or latest.get("status")!="in_progress" or latest.get("conclusion") is not None or not isinstance(latest.get("details_url"),str): return 0
               parts=urlparse(latest["details_url"]); query_values=parse_qs(parts.query,keep_blank_values=True); run_id=parts.path.removeprefix(base_parts.path)
-              return int(parts.scheme==base_parts.scheme and parts.netloc==base_parts.netloc and not parts.params and not parts.fragment and bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path==base_parts.path+run_id and query_values.keys()=={"dispatcher_run_id","carry_pending"} and query_values["dispatcher_run_id"]==[run_id] and query_values["carry_pending"] in (["0"],["1"]) and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{run_id}")
+              return int(parts.scheme==base_parts.scheme and parts.netloc==base_parts.netloc and not parts.params and not parts.fragment and bool(re.fullmatch(r"[1-9][0-9]*",run_id)) and parts.path==base_parts.path+run_id and query_values.keys()=={"dispatcher_run_id","carry_pending"} and query_values["dispatcher_run_id"]==[run_id] and query_values["carry_pending"]==["1"] and latest.get("external_id")==f"krr-governance/v1/{head.lower()}/dispatcher-{run_id}")
           for head,members in heads.items():
               carry_pending=prior_carry_pending(head)
               if carry_pending is None: failures.extend(members); carry_pending=0

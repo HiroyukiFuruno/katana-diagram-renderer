@@ -290,9 +290,15 @@ jobs:
                   )
               )
 
-          def api_json(endpoint: str, failure: str, *, terminal_page: bool = False) -> object:
+          def api_json(
+              endpoint: str,
+              failure: str,
+              *,
+              terminal_page: bool = False,
+              inspect_link: bool = False,
+          ) -> object:
               arguments = ["gh", "api"]
-              if terminal_page:
+              if terminal_page or inspect_link:
                   arguments.append("--include")
               arguments.append(endpoint)
               try:
@@ -309,15 +315,18 @@ jobs:
                   fail(failure)
               try:
                   raw = result.stdout
-                  if terminal_page:
+                  if terminal_page or inspect_link:
                       headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
                       if (
                           not separator
                           or not headers.startswith("HTTP/")
-                          or re.search(r'(?im)^link:.*rel="next"', headers)
                       ):
                           fail(failure)
-                  return json.loads(raw)
+                      has_next = re.search(r'(?im)^link:.*rel="next"', headers) is not None
+                      if terminal_page and has_next:
+                          fail(failure)
+                  value = json.loads(raw)
+                  return (value, has_next) if inspect_link else value
               except json.JSONDecodeError:
                   fail(failure)
 
@@ -344,19 +353,34 @@ jobs:
           endpoint = f"repos/{repository}/commits/{head_sha}/check-runs?" + urlencode({"check_name": check_name, "app_id": app_id, "filter": "all", "per_page": 100})
 
           def check_run_page(
-              page: int, *, terminal_page: bool = False,
+              page: int,
+              *,
+              terminal_page: bool = False,
+              inspect_link: bool = False,
           ) -> tuple[int, list[dict[str, object]], set[int]]:
               value = api_json(
                   endpoint + f"&page={page}",
                   "Unable to read the trusted governance Check Run.",
                   terminal_page=terminal_page,
+                  inspect_link=inspect_link,
               )
+              has_next = False
+              if inspect_link:
+                  if (
+                      not isinstance(value, tuple)
+                      or len(value) != 2
+                      or type(value[1]) is not bool
+                  ):
+                      fail("Trusted governance Check Run response is invalid.")
+                  value, has_next = value
               if not isinstance(value, dict) or type(value.get("total_count")) is not int:
                   fail("Trusted governance Check Run response is invalid.")
               total_count = value["total_count"]
               runs = value.get("check_runs")
               if total_count < 0 or not isinstance(runs, list) or len(runs) > 100:
                   fail("Trusted governance Check Run response is invalid.")
+              if inspect_link and total_count <= 100 and has_next:
+                  fail("Trusted governance Check Run response changed during pagination.")
               identifiers: set[int] = set()
               for run in runs:
                   identifier = run.get("id") if isinstance(run, dict) else None
@@ -369,9 +393,11 @@ jobs:
           # A fresh sensor's Check Run can therefore be behind more than two
           # 100-entry pages.  Scan the exact check-name/app/head endpoint in
           # bounded source pages instead of making that history a terminal
-          # failure.  Each poll reads page one and at most two new pages; the
-          # final page-one reread is the race anchor before any result may be
-          # used.  This preserves the three-read per-poll budget above.
+          # failure. Each poll reads page one and at most two new pages. A
+          # normal page-one transition (a new Check Run or a status update)
+          # restarts the bounded snapshot; only an unchanged final page-one
+          # anchor may authorize a candidate. This preserves the three-read
+          # per-poll budget above.
           source_pages_per_poll = 2
           max_source_check_pages = 1 + source_pages_per_poll * (check_run_polls - 1)
           check_scan: dict[str, object] = {}
@@ -400,13 +426,21 @@ jobs:
               })
 
           def source_bound_trusted_check_runs() -> list[dict[str, object]] | None:
-              first_terminal = bool(check_scan.get("page_count") == 1)
-              first = check_run_page(1, terminal_page=first_terminal)
+              # A one-page snapshot needs its Link fence on the final anchor.
+              # Request the headers without prematurely rejecting a normal
+              # one-to-many page transition before it can be restarted.
+              first = check_run_page(
+                  1,
+                  inspect_link=bool(check_scan.get("page_count") == 1),
+              )
               if not check_scan:
                   begin_source_check_scan(*first)
               elif first != check_scan.get("snapshot"):
-                  check_scan.clear()
-                  fail("Trusted governance Check Run response changed during pagination.")
+                  # Check Run ordering and history can change between polls.
+                  # The old snapshot, including any candidate collected from
+                  # it, is never reusable; restart from this complete page-one
+                  # snapshot and require its own final stable anchor.
+                  begin_source_check_scan(*first)
               if check_scan["complete"]:
                   matches = check_scan["matches"]
                   if not isinstance(matches, list):

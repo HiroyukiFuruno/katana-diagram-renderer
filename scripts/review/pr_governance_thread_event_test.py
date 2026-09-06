@@ -326,6 +326,10 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             timeout_page: int | None = None,
             matching_page: int | None = None,
         ) -> tuple[object, list[list[str]]]:
+            scan = namespace["check_scan"]
+            self.assertIsInstance(scan, dict)
+            assert isinstance(scan, dict)
+            scan.clear()
             first = first_ids if first_ids is not None else list(range(1, min(total, 100) + 1))
             anchor = anchor_ids if anchor_ids is not None else first
             second = second_ids if second_ids is not None else list(range(101, min(total, 200) + 1))
@@ -425,7 +429,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
 
         result, calls = run_case(101, anchor_ids=list(range(2, 102)))
         self.assertIsInstance(result, SystemExit)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
 
         result, calls = run_case(101, link_overflow=True)
         self.assertIsInstance(result, SystemExit)
@@ -434,6 +438,170 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         result, calls = run_case(101, timeout_page=2)
         self.assertIsInstance(result, SystemExit)
         self.assertEqual(len(calls), 2)
+
+    def test_sensor_restarts_after_a_page_one_status_transition_before_accepting_success(self) -> None:
+        """A normal Check Run update restarts the scan and requires a fresh anchor."""
+
+        start = self.sensor.index("          check_name =")
+        end = self.sensor.index("          deadline =", start)
+        program = textwrap.dedent(self.sensor[start:end])
+        head, base = "a" * 40, "b" * 40
+        with patch.dict(
+            os.environ,
+            {
+                "HEAD_SHA": head,
+                "PR_NUMBER": "72",
+                "PR_BASE_SHA": base,
+                "PR_BASE_REF": "master",
+                "DEFAULT_BRANCH": "master",
+                "SOURCE_RUN_ID": "17",
+                "CHECK_APP_ID": "4766933",
+                "POLL_INTERVAL_SECONDS": "60",
+                "POLL_TIMEOUT_SECONDS": "5400",
+                "GITHUB_REPOSITORY": "owner/repo",
+                "GITHUB_SERVER_URL": "https://github.com",
+            },
+            clear=False,
+        ):
+            namespace: dict[str, object] = {
+                "json": json,
+                "os": os,
+                "parse_qs": parse_qs,
+                "re": re,
+                "subprocess": subprocess,
+                "sys": sys,
+                "urlencode": urlencode,
+                "urlsplit": urlsplit,
+            }
+            exec(program, namespace)
+
+        reader = namespace["source_bound_trusted_check_runs"]
+        self.assertTrue(callable(reader))
+        candidate = {
+            "id": 101,
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4766933},
+            "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/writer-91",
+            "details_url": "https://github.com/owner/repo/actions/runs/91?source_run_id=17",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        page_one_reads = 0
+        calls: list[tuple[int, bool]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal page_one_reads
+            endpoint = arguments[-1]
+            page_match = re.search(r"[?&]page=(\d+)", endpoint)
+            self.assertIsNotNone(page_match)
+            assert page_match is not None
+            page = int(page_match.group(1))
+            calls.append((page, "--include" in arguments))
+            if page == 1:
+                page_one_reads += 1
+                status = "queued" if page_one_reads == 1 else "in_progress"
+                runs: list[dict[str, object]] = [
+                    {"id": identifier, "status": status}
+                    for identifier in range(1, 101)
+                ]
+            else:
+                self.assertEqual(page, 2)
+                runs = [candidate]
+            payload = json.dumps({"total_count": 101, "check_runs": runs})
+            if "--include" in arguments:
+                self.assertEqual(page, 2)
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        assert callable(reader)
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reader())
+            self.assertIsNone(reader())
+            self.assertEqual(reader(), [candidate])
+        self.assertEqual(calls, [(1, False), (2, True), (1, False), (2, True), (1, False)])
+
+    def test_sensor_drops_a_candidate_collected_before_a_page_one_generation_race(self) -> None:
+        """A candidate from the old snapshot cannot survive a new-run page-one restart."""
+
+        start = self.sensor.index("          check_name =")
+        end = self.sensor.index("          deadline =", start)
+        program = textwrap.dedent(self.sensor[start:end])
+        head, base = "a" * 40, "b" * 40
+        with patch.dict(
+            os.environ,
+            {
+                "HEAD_SHA": head,
+                "PR_NUMBER": "72",
+                "PR_BASE_SHA": base,
+                "PR_BASE_REF": "master",
+                "DEFAULT_BRANCH": "master",
+                "SOURCE_RUN_ID": "17",
+                "CHECK_APP_ID": "4766933",
+                "POLL_INTERVAL_SECONDS": "60",
+                "POLL_TIMEOUT_SECONDS": "5400",
+                "GITHUB_REPOSITORY": "owner/repo",
+                "GITHUB_SERVER_URL": "https://github.com",
+            },
+            clear=False,
+        ):
+            namespace: dict[str, object] = {
+                "json": json,
+                "os": os,
+                "parse_qs": parse_qs,
+                "re": re,
+                "subprocess": subprocess,
+                "sys": sys,
+                "urlencode": urlencode,
+                "urlsplit": urlsplit,
+            }
+            exec(program, namespace)
+
+        reader = namespace["source_bound_trusted_check_runs"]
+        self.assertTrue(callable(reader))
+        stale_candidate = {
+            "id": 101,
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4766933},
+            "head_sha": head,
+            "external_id": f"krr-governance/v1/{head}/writer-91",
+            "details_url": "https://github.com/owner/repo/actions/runs/91?source_run_id=17",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        page_one_reads = 0
+        calls: list[tuple[int, bool]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal page_one_reads
+            endpoint = arguments[-1]
+            page_match = re.search(r"[?&]page=(\d+)", endpoint)
+            self.assertIsNotNone(page_match)
+            assert page_match is not None
+            page = int(page_match.group(1))
+            calls.append((page, "--include" in arguments))
+            if page == 1:
+                page_one_reads += 1
+                if page_one_reads == 1:
+                    total, runs = 101, [{"id": identifier} for identifier in range(1, 101)]
+                else:
+                    total, runs = 102, [{"id": 102}, *({"id": identifier} for identifier in range(1, 100))]
+            else:
+                self.assertEqual(page, 2)
+                runs = [stale_candidate] if page_one_reads == 1 else [{"id": 100}, {"id": 101}]
+                total = 101 if page_one_reads == 1 else 102
+            payload = json.dumps({"total_count": total, "check_runs": runs})
+            if "--include" in arguments:
+                self.assertEqual(page, 2)
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        assert callable(reader)
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reader())
+            self.assertIsNone(reader())
+            self.assertEqual(reader(), [])
+        self.assertEqual(calls, [(1, False), (2, True), (1, False), (2, True), (1, False)])
 
 
 if __name__ == "__main__":

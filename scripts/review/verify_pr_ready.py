@@ -214,7 +214,11 @@ class _SharedGraphQLLedger:
 
     _SCHEMA = 1
     _LEASE = _GRAPHQL_MAX_QUERY_COST
-    _LOCK_WAIT_SECONDS = 2.0
+    # The all-writer phase starts up to 150 independent verifier processes.
+    # Each reservation fsyncs the shared state, so a healthy serialized queue
+    # can exceed two seconds on saturated macOS/CI storage.  Keep a finite
+    # failure boundary while allowing that authorized fan-out to converge.
+    _LOCK_WAIT_SECONDS = 15.0
     _LOCK_RETRY_SECONDS = 0.01
 
     def __init__(self, path: Path, snapshot_sha256: str) -> None:

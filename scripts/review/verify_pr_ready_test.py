@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -190,6 +191,32 @@ def _hold_shared_ledger_lock(
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def _contending_shared_ledger_reserver(
+    snapshot_path: str,
+    blocked: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[tuple[object, ...]],
+) -> None:
+    """Prove a real verifier can outwait a healthy, serialized ledger owner."""
+
+    original_flock = subject.fcntl.flock
+
+    def observing_flock(descriptor: int, operation: int) -> None:
+        try:
+            original_flock(descriptor, operation)
+        except BlockingIOError:
+            if operation & fcntl.LOCK_NB:
+                blocked.set()
+            raise
+
+    try:
+        with patch.object(subject.fcntl, "flock", side_effect=observing_flock):
+            ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(snapshot_path)
+            ledger.reserve()
+        results.put(("reserved",))
+    except BaseException as error:
+        results.put(("error", type(error).__name__, str(error)))
 
 
 def successful_state() -> tuple[
@@ -3156,6 +3183,42 @@ class VerifyPrReadyTest(unittest.TestCase):
             os.chmod(ledger.path, 0o600)
             with self.assertRaisesRegex(ValueError, "malformed|schema"):
                 subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+
+    def test_shared_graphql_ledger_outwaits_a_healthy_lock_queue_beyond_two_seconds(self) -> None:
+        """A 150-process verifier burst must not fail merely because fsync serialization is slow."""
+        self.assertGreater(subject._SharedGraphQLLedger._LOCK_WAIT_SECONDS, 2.0)
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "open-pulls.json"
+            snapshot.write_text("[]", encoding="utf-8")
+            os.chmod(snapshot, 0o600)
+            ledger = subject._SharedGraphQLLedger.from_open_pull_snapshot(str(snapshot))
+            acquired = context.Event()
+            release = context.Event()
+            blocked = context.Event()
+            results = context.Queue()
+            holder = context.Process(
+                target=_hold_shared_ledger_lock,
+                args=(str(ledger.path), acquired, release),
+            )
+            holder.start()
+            try:
+                self.assertTrue(acquired.wait(5))
+                reserver = context.Process(
+                    target=_contending_shared_ledger_reserver,
+                    args=(str(snapshot), blocked, results),
+                )
+                reserver.start()
+                self.assertTrue(blocked.wait(5))
+                time.sleep(2.1)
+                release.set()
+                reserver.join(10)
+                self.assertEqual(reserver.exitcode, 0)
+                self.assertEqual(results.get(timeout=5), ("reserved",))
+            finally:
+                release.set()
+                holder.join(5)
+                self.assertEqual(holder.exitcode, 0)
 
     def test_graphql_preflight_and_reread_settle_the_active_shared_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
