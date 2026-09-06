@@ -1523,21 +1523,30 @@ class VerifyPushIssueTest(unittest.TestCase):
             )
 
     def test_trusted_dispatcher_observes_pull_request_target_without_checkout_or_pr_code(self) -> None:
-        workflow = (
-            Path(subject.__file__).parents[2] / ".github/workflows/pr-governance.yml"
-        ).read_text(encoding="utf-8")
+        repository = Path(subject.__file__).parents[2]
+        workflow = (repository / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        preflight = (repository / "scripts/review/pr_governance_preflight.py").read_text(encoding="utf-8")
         writer = (
-            Path(subject.__file__).parents[2] / "scripts/review/pr_governance_status_writer.py"
+            repository / "scripts/review/pr_governance_status_writer.py"
         ).read_text(encoding="utf-8")
         self.assertIn("workflow_run:", workflow)
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("actions/checkout", workflow)
-        self.assertIn('event_name == "pull_request_target"', workflow)
-        self.assertIn('f"repos/{repository}/pulls/{source_number_value}"', workflow)
-        self.assertIn("source_is_local = (", workflow)
-        self.assertIn('current_base_repository.get("full_name") == repository', workflow)
-        self.assertIn('current_head_repository.get("full_name") == repository', workflow)
-        self.assertIn("or not source_is_local:", workflow)
+        # The dispatcher runs only the preflight fetched from the immutable
+        # workflow SHA.  Event interpretation and PR/fork binding therefore
+        # belong to that trusted program, not to an inline copy in the PR
+        # workflow.  Keep both halves of this boundary covered here.
+        self.assertIn('script_path = "scripts/review/pr_governance_preflight.py"', workflow)
+        self.assertIn('f"repos/{repository}/contents/{script_path}?ref={workflow_sha}"', workflow)
+        self.assertIn("base64.b64decode(encoded.replace(\"\\n\", \"\"), validate=True).decode(\"utf-8\", \"strict\")", workflow)
+        self.assertIn('exec(compile(program, f"{script_path}@{workflow_sha}", "exec")', workflow)
+        self.assertIn('event_name == "pull_request_target"', preflight)
+        self.assertIn('f"repos/{repository}/pulls/{int(source_number)}"', preflight)
+        self.assertIn('current_base_repository.get("full_name") != repository', preflight)
+        self.assertIn("initial_source[5] != (current_identity[0], repository)", preflight)
+        self.assertIn("current_head_repository is not None and not isinstance(current_head_repository, dict)", preflight)
+        self.assertIn("valid = False", preflight)
+        self.assertIn("pull_request_target_noop = event_name == \"pull_request_target\"", preflight)
         self.assertIn("scripts/hooks/verify_push_issue.py", writer)
         self.assertIn('"--pr-base-sha", base', writer)
         self.assertIn('"--pr-head-sha", head', writer)
