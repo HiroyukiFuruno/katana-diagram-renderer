@@ -203,6 +203,176 @@ class GovernanceReviewSensorIdentityContractTest(unittest.TestCase):
             with self.subTest(repository=changed["repository"]):
                 self.assertFalse(matches(changed, "91", self.repository_identity))
 
+    def test_source_bound_check_run_scan_finds_current_sensor_check_after_two_historical_pages(self) -> None:
+        """A retained same-head history cannot hide the current source's Check Run."""
+        namespace = self.namespace()
+        reader = namespace["source_bound_trusted_check_runs"]
+        assert callable(reader)
+        candidate = {
+            "id": 201,
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4_766_933},
+            "head_sha": self.head,
+            "external_id": f"krr-governance/v1/{self.head}/writer-91",
+            "details_url": "https://github.com/owner/repository/actions/runs/91?source_run_id=17",
+            "status": "completed",
+            "conclusion": "success",
+        }
+        pages = {
+            1: [{"id": value} for value in range(1, 101)],
+            2: [{"id": value} for value in range(101, 201)],
+            3: [candidate],
+        }
+        calls: list[tuple[int, bool]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            endpoint = arguments[-1]
+            page_match = re.search(r"[?&]page=(\d+)", endpoint)
+            assert page_match is not None
+            page = int(page_match.group(1))
+            included = "--include" in arguments
+            calls.append((page, included))
+            self.assertIn(page, pages)
+            payload = json.dumps({"total_count": 201, "check_runs": pages[page]})
+            if included:
+                self.assertEqual(page, 3)
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reader())
+            result = reader()
+        self.assertEqual(result, [candidate])
+        self.assertEqual(calls, [(1, False), (2, False), (3, True), (1, False)])
+
+    def test_source_bound_check_run_scan_keeps_an_empty_history_pending(self) -> None:
+        """No Check Run yet is a valid pending state, not malformed pagination."""
+        namespace = self.namespace()
+        reader = namespace["source_bound_trusted_check_runs"]
+        assert callable(reader)
+        calls: list[bool] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertTrue(arguments[-1].endswith("page=1"))
+            included = "--include" in arguments
+            calls.append(included)
+            payload = json.dumps({"total_count": 0, "check_runs": []})
+            if included:
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reader())
+            self.assertEqual(reader(), [])
+        self.assertEqual(calls, [False, True])
+
+    def test_source_bound_check_run_scan_has_a_budget_derived_page_ceiling(self) -> None:
+        """The 90-minute latch cannot turn retained history into an unbounded API scan."""
+        namespace = self.namespace()
+        reader = namespace["source_bound_trusted_check_runs"]
+        page_limit = namespace["max_source_check_pages"]
+        assert callable(reader)
+        self.assertEqual(page_limit, 181)
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertTrue(arguments[-1].endswith("page=1"))
+            payload = json.dumps({"total_count": page_limit * 100 + 1, "check_runs": [{"id": value} for value in range(1, 101)]})
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        with patch.object(subprocess, "run", side_effect=fake_run), self.assertRaises(SystemExit):
+            reader()
+
+    def test_source_bound_check_run_scan_fails_closed_when_page_one_anchor_races(self) -> None:
+        """A candidate collected before a changed anchor can never authorize the latch."""
+        namespace = self.namespace()
+        reader = namespace["source_bound_trusted_check_runs"]
+        assert callable(reader)
+        candidate = {
+            "id": 201,
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4_766_933},
+            "head_sha": self.head,
+            "external_id": f"krr-governance/v1/{self.head}/writer-91",
+            "details_url": "https://github.com/owner/repository/actions/runs/91?source_run_id=17",
+        }
+        first_page_reads = 0
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal first_page_reads
+            endpoint = arguments[-1]
+            page_match = re.search(r"[?&]page=(\d+)", endpoint)
+            assert page_match is not None
+            page = int(page_match.group(1))
+            if page == 1:
+                first_page_reads += 1
+                runs = [{"id": value} for value in (range(1, 101) if first_page_reads == 1 else range(301, 401))]
+            elif page == 2:
+                runs = [{"id": value} for value in range(101, 201)]
+            else:
+                self.assertEqual(page, 3)
+                runs = [candidate]
+            payload = json.dumps({"total_count": 201, "check_runs": runs})
+            if "--include" in arguments:
+                self.assertEqual(page, 3)
+                payload = "HTTP/2 200 OK\n\n" + payload
+            return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+        with patch.object(subprocess, "run", side_effect=fake_run):
+            self.assertIsNone(reader())
+            with self.assertRaises(SystemExit):
+                reader()
+        self.assertEqual(first_page_reads, 2)
+
+    def test_source_bound_check_run_scan_rejects_ambiguous_raced_and_malformed_pages(self) -> None:
+        """Pagination may wait for a stable source snapshot, never accept an ambiguous one."""
+        candidate = {
+            "id": 201,
+            "name": "KRR / PR governance (trusted check)",
+            "app": {"id": 4_766_933},
+            "head_sha": self.head,
+            "external_id": f"krr-governance/v1/{self.head}/writer-91",
+            "details_url": "https://github.com/owner/repository/actions/runs/91?source_run_id=17",
+        }
+
+        for mode in ("ambiguous", "count-race", "duplicate", "malformed", "link-overflow"):
+            with self.subTest(mode=mode):
+                namespace = self.namespace()
+                reader = namespace["source_bound_trusted_check_runs"]
+                assert callable(reader)
+                total = 202 if mode == "ambiguous" else 201
+                pages: dict[int, object] = {
+                    1: [{"id": value} for value in range(1, 101)],
+                    2: [{"id": value} for value in range(101, 201)],
+                    3: [candidate],
+                }
+                if mode == "ambiguous":
+                    pages[3] = [candidate, {**candidate, "id": 202}]
+                if mode == "duplicate":
+                    pages[2] = [{"id": 100}, *[{"id": value} for value in range(101, 200)]]
+                if mode == "malformed":
+                    pages[2] = "not-a-list"
+
+                def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                    endpoint = arguments[-1]
+                    page_match = re.search(r"[?&]page=(\d+)", endpoint)
+                    assert page_match is not None
+                    page = int(page_match.group(1))
+                    page_total = total
+                    if mode == "count-race" and page == 2:
+                        page_total -= 1
+                    payload = json.dumps({"total_count": page_total, "check_runs": pages[page]})
+                    if "--include" in arguments:
+                        self.assertEqual(page, 3)
+                        link = 'Link: <https://api.github.com/next>; rel="next"\n' if mode == "link-overflow" else ""
+                        payload = f"HTTP/2 200 OK\n{link}\n" + payload
+                    return subprocess.CompletedProcess(arguments, 0, payload, "")
+
+                with patch.object(subprocess, "run", side_effect=fake_run):
+                    if mode == "ambiguous":
+                        self.assertIsNone(reader())
+                    with self.assertRaises(SystemExit):
+                        reader()
+
 
 class GovernanceDispatcherContractTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -3002,9 +3172,12 @@ raise SystemExit(91)
         self.assertIn("GH_TOKEN: ${{ steps.dispatcher-token.outputs.token }}", section)
         self.assertNotIn("CHECK_WRITE_TOKEN", section)
         self.assertNotIn('"--paginate", "--slurp"', section)
-        self.assertIn('f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100&page={page_number}"', section)
+        self.assertIn('urlencode({"event": "workflow_dispatch", "branch": branch, "status": status, "per_page": "100"})', section)
+        self.assertIn('f"repos/{repository}/actions/workflows/{workflow_id}/runs?{query}"', section)
+        self.assertIn('total > 100 or len(entries) != total', section)
+        self.assertIn('if any(active_writer_runs(status) != listed[status] for status in active):', section)
         self.assertIn('f"repos/{repository}/actions/runs/{identifier}/cancel"', section)
-        self.assertIn('active = {"requested", "queued", "pending", "waiting", "in_progress"}', section)
+        self.assertIn('active = ("requested", "queued", "pending", "waiting", "in_progress")', section)
         self.assertIn("for _ in range(150):", section)
         self.assertIn('run.get("status") != "completed"', section)
         self.assertIn("Governance writer run identity is invalid.", section)
@@ -4525,7 +4698,13 @@ raise SystemExit(91)
                     "#!/bin/sh\ncase \"$*\" in\n"
                     "  *'/actions/runs/7/cancel'*) case \"${MODE}\" in cancel-failure|already-completed) exit 7 ;; esac; touch \"${MARKER}\" ;;\n"
                     "  *'/actions/runs/7'*) printf '%s' \"${POLL}\" ;;\n"
-                    "  *'actions/workflows/44/runs'*) printf '%s' \"${RUNS}\" ;;\n"
+                    "  *'actions/workflows/44/runs?'*) case \"$*\" in\n"
+                    "    *'event=workflow_dispatch&branch=master&status=in_progress&per_page=100'*) printf '%s' \"${RUNS}\" ;;\n"
+                    "    *'event=workflow_dispatch&branch=master&status=requested&per_page=100'*) printf '%s' '{\"total_count\":0,\"workflow_runs\":[]}' ;;\n"
+                    "    *'event=workflow_dispatch&branch=master&status=queued&per_page=100'*) printf '%s' '{\"total_count\":0,\"workflow_runs\":[]}' ;;\n"
+                    "    *'event=workflow_dispatch&branch=master&status=pending&per_page=100'*) printf '%s' '{\"total_count\":0,\"workflow_runs\":[]}' ;;\n"
+                    "    *'event=workflow_dispatch&branch=master&status=waiting&per_page=100'*) printf '%s' '{\"total_count\":0,\"workflow_runs\":[]}' ;;\n"
+                    "    *) exit 93 ;; esac ;;\n"
                     "  *'actions/workflows/pr-governance-status-writer.yml'*) printf '%s' '{\"id\":44}' ;;\n"
                     f"  *'git/ref/heads/master'*) printf '%s' '{{\"object\":{{\"sha\":\"{head}\"}}}}' ;;\n"
                     "  *'repos/owner/repository'*) printf '%s' '{\"default_branch\":\"master\"}' ;;\n"
@@ -4536,11 +4715,86 @@ raise SystemExit(91)
                 poll = valid if mode in {"timeout", "cancel-failure"} else bad if mode == "bad-identity" else {**listed_run, "status": "completed"}
                 environment = os.environ | {
                     "GITHUB_REPOSITORY": "owner/repository", "GH_TOKEN": "actions-write", "MODE": mode,
-                    "MARKER": str(marker), "RUNS": json.dumps([{"workflow_runs": [listed_run]}]),
+                    "MARKER": str(marker), "RUNS": json.dumps({"total_count": 1, "workflow_runs": [listed_run]}),
                     "POLL": json.dumps(poll), "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 }
                 result = subprocess.run([sys.executable, "-c", program], env=environment, capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_writer_drain_filters_more_than_six_hundred_completed_runs_before_cancelling_active_writer(self) -> None:
+        """Completed history must not consume the active-writer drain budget."""
+        match = re.search(
+            r"- name: Drain authoritative writer before the next governance hand-off.*?python3 - <<'PY'\n(.*?)\n          PY",
+            self.workflow, re.DOTALL,
+        )
+        self.assertIsNotNone(match); assert match is not None
+        program = self._workflow_program(match)
+        head = "a" * 40
+        template: dict[str, object] = {
+            "name": "PR governance status writer",
+            "path": ".github/workflows/pr-governance-status-writer.yml@master",
+            "event": "workflow_dispatch", "workflow_id": 44,
+            "repository": {"full_name": "owner/repository"},
+            "run_attempt": 1,
+        }
+        historical = [
+            {
+                **template, "id": identifier, "head_sha": "b" * 40,
+                "run_number": identifier, "status": "completed",
+            }
+            for identifier in range(1, 602)
+        ]
+        active = {
+            **template, "id": 1002, "head_sha": head,
+            "run_number": 1002, "status": "in_progress",
+        }
+        queried_statuses: list[str] = []
+        cancelled: list[int] = []
+
+        def response(value: object, code: int = 0) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], code, json.dumps(value), "")
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            endpoint = next((item for item in arguments if isinstance(item, str) and item.startswith("repos/")), "")
+            if endpoint == "repos/owner/repository":
+                return response({"default_branch": "master"})
+            if endpoint == "repos/owner/repository/git/ref/heads/master":
+                return response({"object": {"sha": head}})
+            if endpoint == "repos/owner/repository/actions/workflows/pr-governance-status-writer.yml":
+                return response({"id": 44})
+            if endpoint.startswith("repos/owner/repository/actions/workflows/44/runs?"):
+                query = parse_qs(urlparse(endpoint).query)
+                self.assertEqual(set(query), {"event", "branch", "status", "per_page"})
+                self.assertEqual(query["event"], ["workflow_dispatch"])
+                self.assertEqual(query["branch"], ["master"])
+                self.assertEqual(query["per_page"], ["100"])
+                status = query["status"][0]
+                self.assertIn(status, {"requested", "queued", "pending", "waiting", "in_progress"})
+                queried_statuses.append(status)
+                matching = [run for run in [*historical, active] if run["status"] == status]
+                return response({"total_count": len(matching), "workflow_runs": matching})
+            if endpoint == "repos/owner/repository/actions/runs/1002/cancel":
+                cancelled.append(1002)
+                active["status"] = "completed"
+                return response({})
+            if endpoint == "repos/owner/repository/actions/runs/1002":
+                return response(active)
+            raise AssertionError(arguments)
+
+        environment = os.environ | {
+            "GITHUB_REPOSITORY": "owner/repository", "GH_TOKEN": "actions-write",
+            "PATH": os.environ["PATH"],
+        }
+        with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(SystemExit) as exited:
+                exec(program, {"__name__": "__main__"})
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(len(historical), 601)
+        self.assertEqual(cancelled, [1002])
+        self.assertEqual(
+            queried_statuses,
+            ["requested", "queued", "pending", "waiting", "in_progress"] * 2,
+        )
 
     def test_dispatch_waits_for_exact_new_writer_registration_and_rejects_gap_or_bad_identity(self) -> None:
         writer = (ROOT / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")

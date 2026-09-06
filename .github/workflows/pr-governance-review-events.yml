@@ -100,8 +100,9 @@ jobs:
           min_reconciliation_seconds = int(max_reconciliation_heads * check_write_pace_seconds)
           max_latch_timeout_seconds = 5400
           # One repository identity read, one source validation, up to 91
-          # bounded three-read Check Run polls (two pages plus the page-one
-          # race anchor), then repository/source/writer
+          # bounded three-read source-bound Check Run polls (page one plus
+          # two progressing pages, with a final page-one race anchor), then
+          # repository/source/writer
           # revalidation on success remain below this request budget.
           max_latch_api_reads = 300
 
@@ -364,28 +365,91 @@ jobs:
                   identifiers.add(identifier)
               return total_count, runs, identifiers
 
-          def trusted_check_runs() -> list[dict[str, object]]:
-              total_count, first_page, first_identifiers = check_run_page(1)
-              if total_count <= 100:
-                  if len(first_page) != total_count:
-                      fail("Trusted governance Check Run response is invalid.")
-                  if check_run_page(1, terminal_page=True) != (
-                      total_count, first_page, first_identifiers,
+          # Historical runs for an unchanged SHA are retained indefinitely.
+          # A fresh sensor's Check Run can therefore be behind more than two
+          # 100-entry pages.  Scan the exact check-name/app/head endpoint in
+          # bounded source pages instead of making that history a terminal
+          # failure.  Each poll reads page one and at most two new pages; the
+          # final page-one reread is the race anchor before any result may be
+          # used.  This preserves the three-read per-poll budget above.
+          source_pages_per_poll = 2
+          max_source_check_pages = 1 + source_pages_per_poll * (check_run_polls - 1)
+          check_scan: dict[str, object] = {}
+
+          def begin_source_check_scan(
+              total_count: int,
+              first_page: list[dict[str, object]],
+              first_identifiers: set[int],
+          ) -> None:
+              page_count = max(1, (total_count + 99) // 100)
+              if (
+                  page_count > max_source_check_pages
+                  or len(first_page) != min(total_count, 100)
+              ):
+                  fail("Trusted governance Check Run response exceeds the bounded source page window.")
+              check_scan.clear()
+              check_scan.update({
+                  "snapshot": (total_count, first_page, first_identifiers),
+                  "page_count": page_count,
+                  "next_page": 2,
+                  "identifiers": set(first_identifiers),
+                  "matches": [check for check in first_page if check_matches_source(check)],
+                  # A one-page (including empty) response gets its terminal
+                  # Link fence on the next page-one anchor read.
+                  "complete": False,
+              })
+
+          def source_bound_trusted_check_runs() -> list[dict[str, object]] | None:
+              first_terminal = bool(check_scan.get("page_count") == 1)
+              first = check_run_page(1, terminal_page=first_terminal)
+              if not check_scan:
+                  begin_source_check_scan(*first)
+              elif first != check_scan.get("snapshot"):
+                  check_scan.clear()
+                  fail("Trusted governance Check Run response changed during pagination.")
+              if check_scan["complete"]:
+                  matches = check_scan["matches"]
+                  if not isinstance(matches, list):
+                      fail("Trusted governance Check Run scan is invalid.")
+                  if len(matches) > 1:
+                      fail("Multiple trusted governance Check Runs match this sensor run.")
+                  check_scan.clear()
+                  return matches
+
+              total_count, _, _ = first
+              page_count = check_scan.get("page_count")
+              next_page = check_scan.get("next_page")
+              identifiers = check_scan.get("identifiers")
+              matches = check_scan.get("matches")
+              if (
+                  type(page_count) is not int
+                  or type(next_page) is not int
+                  or not isinstance(identifiers, set)
+                  or not isinstance(matches, list)
+              ):
+                  fail("Trusted governance Check Run scan is invalid.")
+              for _ in range(source_pages_per_poll):
+                  if next_page > page_count:
+                      check_scan["complete"] = True
+                      break
+                  page_total, page, page_identifiers = check_run_page(
+                      next_page,
+                      terminal_page=next_page == page_count,
+                  )
+                  expected_count = min(100, total_count - 100 * (next_page - 1))
+                  if (
+                      page_total != total_count
+                      or len(page) != expected_count
+                      or identifiers & page_identifiers
                   ):
                       fail("Trusted governance Check Run response changed during pagination.")
-                  return first_page
-              if total_count > 200 or len(first_page) != 100:
-                  fail("Trusted governance Check Run response exceeds the bounded page window.")
-              second_total, second_page, second_identifiers = check_run_page(2, terminal_page=True)
-              if (
-                  second_total != total_count
-                  or len(second_page) != total_count - 100
-                  or first_identifiers & second_identifiers
-              ):
-                  fail("Trusted governance Check Run response is invalid.")
-              if check_run_page(1) != (total_count, first_page, first_identifiers):
-                  fail("Trusted governance Check Run response changed during pagination.")
-              return first_page + second_page
+                  identifiers.update(page_identifiers)
+                  matches.extend(check for check in page if check_matches_source(check))
+                  next_page += 1
+                  check_scan["next_page"] = next_page
+              if next_page > page_count:
+                  check_scan["complete"] = True
+              return None
 
           deadline = time.monotonic() + timeout
           repository_identity = repository_rest_identity(
@@ -400,9 +464,12 @@ jobs:
               fail("Sensor source run is invalid.")
 
           while True:
-              matches = [check for check in trusted_check_runs() if check_matches_source(check)]
-              if len(matches) > 1:
-                  fail("Multiple trusted governance Check Runs match this sensor run.")
+              matches = source_bound_trusted_check_runs()
+              if matches is None:
+                  if time.monotonic() >= deadline:
+                      fail("Timed out waiting for a matching trusted governance Check Run.")
+                  time.sleep(interval)
+                  continue
               if matches:
                   terminal = matches[0]
                   if terminal.get("status") == "completed" and terminal.get("conclusion") == "success":

@@ -2147,10 +2147,15 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess, sys, time
+          from urllib.parse import urlencode
 
           repository = os.environ["GITHUB_REPOSITORY"]
           writer_path = ".github/workflows/pr-governance-status-writer.yml"
-          active = {"requested", "queued", "pending", "waiting", "in_progress"}
+          # workflow-runsは保持済みwriter全体を新しい順に返す。全履歴を
+          # 走査すると固定snapshot上限の後ろに現行writerが隠れるため、
+          # active状態ごとに明示照会する。各応答は独立に有界とし、
+          # state snapshotが変化した場合はhand-off前に拒否する。
+          active = ("requested", "queued", "pending", "waiting", "in_progress")
 
           def request(arguments):
               result = subprocess.run(["gh", "api", *arguments], capture_output=True, text=True, check=False, timeout=20)
@@ -2184,10 +2189,13 @@ jobs:
           workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
           if type(workflow_id) is not int or workflow_id < 1:
               raise SystemExit("Governance writer workflow ID is invalid.")
-          def writer_runs_page(page_number):
-              arguments = ["gh", "api", f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100&page={page_number}"]
-              if page_number == 6:
-                  arguments.insert(2, "--include")
+          def active_writer_runs(status):
+              if status not in active:
+                  raise SystemExit("Governance writer run status is invalid.")
+              # head SHAや作成時刻で絞ると古いdefault-branch writerを
+              # 見落とす。activeである限り次のhand-off前にcancelする。
+              query = urlencode({"event": "workflow_dispatch", "branch": branch, "status": status, "per_page": "100"})
+              arguments = ["gh", "api", f"repos/{repository}/actions/workflows/{workflow_id}/runs?{query}"]
               try:
                   result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=20)
               except subprocess.TimeoutExpired as error:
@@ -2195,32 +2203,19 @@ jobs:
               if result.returncode != 0:
                   raise SystemExit("Unable to enumerate governance writer runs.")
               try:
-                  raw = result.stdout
-                  if page_number == 6:
-                      headers, separator, raw = raw.replace("\r\n", "\n").partition("\n\n")
-                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"', headers):
-                          raise SystemExit("Governance writer run list exceeds the fixed page window.")
-                  page = json.loads(raw)
+                  page = json.loads(result.stdout)
               except json.JSONDecodeError as error:
                   raise SystemExit("Governance writer run list is not JSON.") from error
               entries = page.get("workflow_runs") if isinstance(page, dict) else None
               total = page.get("total_count") if isinstance(page, dict) else None
-              if not isinstance(page, dict) or not isinstance(entries, list) or len(entries) > 100 or not all(isinstance(run, dict) for run in entries) or type(total) is not int or total < 0:
+              if not isinstance(page, dict) or not isinstance(entries, list) or len(entries) > 100 or not all(isinstance(run, dict) for run in entries) or type(total) is not int or total < 0 or total > 100 or len(entries) != total:
                   raise SystemExit("Governance writer run list is invalid.")
-              return page
-          listed = [writer_runs_page(1)]
-          total_count = listed[0]["total_count"]
-          for page_number in range(2, 7):
-              if len(listed[-1]["workflow_runs"]) < 100:
-                  break
-              page = writer_runs_page(page_number)
-              if page["total_count"] != total_count:
-                  raise SystemExit("Governance writer run list count changed.")
-              listed.append(page)
-          if writer_runs_page(1) != listed[0]:
-              raise SystemExit("Governance writer run list first page changed.")
-          if sum(len(page["workflow_runs"]) for page in listed) != total_count:
-              raise SystemExit("Governance writer run list count is incomplete.")
+              if any(run.get("status") != status for run in entries):
+                  raise SystemExit("Governance writer run status changed.")
+              return entries
+          listed = {status: active_writer_runs(status) for status in active}
+          if any(active_writer_runs(status) != listed[status] for status in active):
+              raise SystemExit("Governance writer active run list changed.")
 
           def validate(run):
               run_repository = run.get("repository") if isinstance(run, dict) else None
@@ -2238,13 +2233,10 @@ jobs:
                   raise SystemExit("Governance writer run identity is invalid.")
 
           targets = []
-          for page in listed:
-              for run in page["workflow_runs"]:
-                  if not isinstance(run, dict):
-                      raise SystemExit("Governance writer run is invalid.")
-                  if run.get("status") in active:
-                      validate(run)
-                      targets.append(run["id"])
+          for status in active:
+              for run in listed[status]:
+                  validate(run)
+                  targets.append(run["id"])
           if len(set(targets)) != len(targets):
               raise SystemExit("Governance writer run list is duplicated.")
           for identifier in targets:

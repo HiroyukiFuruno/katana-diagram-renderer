@@ -117,7 +117,7 @@ class GovernanceOverflowContractTest(unittest.TestCase):
         for marker in (
             "Open pull request response first page changed.",
             "Current open pull request response first page changed.",
-            "Governance writer run list first page changed.",
+            "Governance writer active run list changed.",
             "Governance writer runs first page changed.",
             "Early governance Check Run first page changed.",
             "Affected-head barrier current pull request response first page changed.",

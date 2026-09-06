@@ -177,8 +177,11 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         self.assertIn("max_latch_timeout_seconds = 5400", self.sensor)
         self.assertIn("max_latch_api_reads = 300", self.sensor)
         self.assertNotIn('"--paginate"', self.sensor)
-        self.assertIn("def check_run_page(", self.sensor)
-        self.assertIn("check_run_page(2, terminal_page=True)", self.sensor)
+        self.assertIn("source_pages_per_poll = 2", self.sensor)
+        self.assertIn("def source_bound_trusted_check_runs(", self.sensor)
+        self.assertIn("terminal_page=next_page == page_count", self.sensor)
+        self.assertIn("if next_page > page_count:", self.sensor)
+        self.assertIn('"next_page": 2', self.sensor)
         self.assertIn("Trusted governance Check Run response changed during pagination.", self.sensor)
         self.assertIn("terminal_page: bool = False", self.sensor)
         self.assertIn("timeout=20", self.sensor)
@@ -269,8 +272,8 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         self.assertFalse(writer_matches({**writer, "repository": {"id": 101, "name": "repo", "url": repository_identity[2], "full_name": "other/repo"}}, "91", repository_identity))
         self.assertFalse(writer_matches({**writer, "status": "completed", "conclusion": "failure"}, "91", repository_identity))
 
-    def test_sensor_reads_at_most_two_explicit_check_run_pages_and_rejects_bad_boundaries(self) -> None:
-        """A poll has a fixed request ceiling even when GitHub reports many Check Runs."""
+    def test_sensor_scans_source_bound_check_runs_and_rejects_bad_boundaries(self) -> None:
+        """Historical checks may span pages, but every page boundary remains fail-closed."""
 
         start = self.sensor.index("          check_name =")
         end = self.sensor.index("          deadline =", start)
@@ -305,7 +308,7 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             }
             exec(program, namespace)
 
-        reader = namespace["trusted_check_runs"]
+        reader = namespace["source_bound_trusted_check_runs"]
         self.assertTrue(callable(reader))
 
         def run_case(
@@ -314,23 +317,45 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             first_ids: list[int] | None = None,
             anchor_ids: list[int] | None = None,
             second_ids: list[int] | None = None,
+            third_ids: list[int] | None = None,
             second_total: int | None = None,
+            third_total: int | None = None,
             second_failure: bool = False,
+            third_failure: bool = False,
             link_overflow: bool = False,
             timeout_page: int | None = None,
+            matching_page: int | None = None,
         ) -> tuple[object, list[list[str]]]:
             first = first_ids if first_ids is not None else list(range(1, min(total, 100) + 1))
             anchor = anchor_ids if anchor_ids is not None else first
-            second = second_ids if second_ids is not None else list(range(101, total + 1))
+            second = second_ids if second_ids is not None else list(range(101, min(total, 200) + 1))
+            third = third_ids if third_ids is not None else list(range(201, total + 1))
             calls: list[list[str]] = []
-            page_calls: dict[int, int] = {1: 0, 2: 0}
+            page_calls: dict[int, int] = {1: 0, 2: 0, 3: 0}
+
+            def check(value: int, *, matching: bool = False) -> dict[str, object]:
+                if not matching:
+                    return {"id": value}
+                return {
+                    "id": value,
+                    "name": "KRR / PR governance (trusted check)",
+                    "app": {"id": 4766933},
+                    "head_sha": head,
+                    "external_id": f"krr-governance/v1/{head}/writer-91",
+                    "details_url": "https://github.com/owner/repo/actions/runs/91?source_run_id=17",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
 
             def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
                 self.assertEqual(_kwargs.get("timeout"), 20)
                 calls.append(arguments)
                 endpoint = arguments[-1]
-                page = 1 if endpoint.endswith("page=1") else 2 if endpoint.endswith("page=2") else 0
+                page_match = re.search(r"[?&]page=(\d+)$", endpoint)
+                page = int(page_match.group(1)) if page_match else 0
                 if page == 0:
+                    raise AssertionError(f"Unexpected endpoint: {endpoint}")
+                if page > 3:
                     raise AssertionError(f"Unexpected endpoint: {endpoint}")
                 page_calls[page] += 1
                 if timeout_page == page:
@@ -343,30 +368,38 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
                     return f"HTTP/2 200\n{link}\n{raw}"
                 if endpoint.endswith("page=1"):
                     values = first if page_calls[1] == 1 else anchor
-                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total, "check_runs": [{"id": value} for value in values]}), "")
+                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total, "check_runs": [check(value, matching=matching_page == 1) for value in values]}), "")
                 if endpoint.endswith("page=2"):
                     if second_failure:
                         return subprocess.CompletedProcess(arguments, 1, "", "denied")
-                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total if second_total is None else second_total, "check_runs": [{"id": value} for value in second]}), "")
+                    return subprocess.CompletedProcess(arguments, 0, output({"total_count": total if second_total is None else second_total, "check_runs": [check(value, matching=matching_page == 2) for value in second]}), "")
+                if third_failure:
+                    return subprocess.CompletedProcess(arguments, 1, "", "denied")
+                values = [check(value, matching=matching_page == 3) for value in third]
+                return subprocess.CompletedProcess(arguments, 0, output({"total_count": total if third_total is None else third_total, "check_runs": values}), "")
 
             assert callable(reader)
             with patch.object(subprocess, "run", side_effect=fake_run):
                 try:
-                    return reader(), calls
+                    for _ in range(200):
+                        result = reader()
+                        if result is not None:
+                            return result, calls
+                    raise AssertionError("source-bound scan did not converge")
                 except SystemExit as error:
                     return error, calls
 
-        for total, expected_calls in ((100, 2), (101, 3), (200, 3)):
+        for total, expected_calls in ((100, 2), (101, 3), (200, 3), (201, 4)):
             with self.subTest(total=total):
-                result, calls = run_case(total)
+                result, calls = run_case(total, matching_page=3 if total == 201 else None)
                 self.assertIsInstance(result, list)
-                self.assertEqual(len(result), total)
+                self.assertEqual(len(result), 1 if total == 201 else 0)
                 self.assertEqual(len(calls), expected_calls)
                 self.assertTrue(all("--paginate" not in arguments for arguments in calls))
-                self.assertTrue(all(arguments[-1].endswith(("page=1", "page=2")) for arguments in calls))
+                self.assertTrue(all(arguments[-1].endswith(("page=1", "page=2", "page=3")) for arguments in calls))
                 self.assertTrue(all(arguments.count("--include") <= 1 for arguments in calls))
 
-        result, calls = run_case(201)
+        result, calls = run_case(18101)
         self.assertIsInstance(result, SystemExit)
         self.assertEqual(len(calls), 1)
 
