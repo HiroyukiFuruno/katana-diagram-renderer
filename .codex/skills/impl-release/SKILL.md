@@ -20,6 +20,7 @@ governance bootstrap と保護mergeは、PR外の絶対path `/Users/hiroyuki_fur
 5. 直接 `cargo publish` や tag 作成で迂回しない。公開は merge 後の自動実行基盤（GitHub Actions）に任せる。
 6. 秘匿値（secret）は `CARGO_REGISTRY_TOKEN` を使う。値の取得や登録はユーザーが行う。
 7. 不自然な version 飛び番は停止し、`just VERSION=vX.Y.Z release-target-check` の結果を確認する。
+8. ユーザーが release 完了までの継続実行を承認している場合、通常のcommit、push、Draft review、Ready化、gate、公開確認、Issue更新、cleanupごとに再承認を求めて停止しない。停止は不可逆対象の未確定、実際の権限・秘密情報不足、またはversion/公開内容を変える判断だけに限定し、待機中は独立した検証と次版準備を並列で進める。
 
 ## Phase 1: 準備
 
