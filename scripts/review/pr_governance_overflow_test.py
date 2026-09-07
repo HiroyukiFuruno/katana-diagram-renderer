@@ -119,7 +119,7 @@ class GovernanceOverflowContractTest(unittest.TestCase):
         self.assertGreaterEqual(self.dispatcher.count("timeout=20"), 9)
         self.assertGreaterEqual(self.dispatcher.count('rel="next"'), 9)
         self.assertGreaterEqual(
-            self.dispatcher.count("range(2, 7)") + self.dispatcher.count("range(2,7)"), 9
+            self.dispatcher.count("range(2, 7)") + self.dispatcher.count("range(2,7)"), 8
         )
         for marker in (
             "Open pull request response first page changed.",
@@ -127,17 +127,33 @@ class GovernanceOverflowContractTest(unittest.TestCase):
             "active_snapshot_attempts = 4",
             "ActiveWriterSnapshotChanged",
             "Governance writer active run list did not stabilize.",
-            "Governance writer runs first page changed.",
+            "Early writer dispatcher generation is invalid.",
             "Early governance Check Run first page changed.",
             "Affected-head barrier current pull request response first page changed.",
             "Affected-head barrier dispatcher generation is incomplete.",
         ):
             self.assertIn(marker, self.dispatcher)
+        self.assertIn(
+            'urlencode({"branch":branch,"head_sha":head,"created":f">={generation_created_at}","per_page":"100"})',
+            self.dispatcher,
+        )
+        self.assertIn(
+            'urlencode({"branch":branch,"head_sha":head,"created":f">={source.get(\'created_at\')}","per_page":"100","page":str(page_number)})',
+            self.dispatcher,
+        )
+        self.assertNotIn(
+            'pr-governance-status-writer.yml/runs?per_page=100&page={page_number}',
+            self.dispatcher,
+        )
+        self.assertNotIn(
+            'pr-governance.yml/runs?per_page=100&page={page_number}',
+            self.dispatcher,
+        )
 
     def test_every_governance_workflow_api_subprocess_has_a_twenty_second_timeout(self) -> None:
         """Keep the complete API-call inventory bounded as the three workflows grow."""
         workflows = (
-            ("dispatcher", self.dispatcher, 81),
+            ("dispatcher", self.dispatcher, 82),
             ("status writer", self.workflow, 2),
             ("review events", self.review_events, 1),
         )
@@ -237,13 +253,19 @@ class GovernanceOverflowContractTest(unittest.TestCase):
                 300_000,
             )
 
-    def test_phase_deadlines_leave_a_terminal_start_margin_inside_six_hours(self) -> None:
+    def test_phase_deadlines_bound_a_450_head_generation_inside_the_root_deadline(self) -> None:
         phase_seconds = (15 + 15 + 30 + 290) * 60
         self.assertLess(phase_seconds, 6 * 60 * 60)
         self.assertIn("root_deadline_epoch = int(time.time()) + 21_000", self.dispatcher)
         self.assertEqual(self.dispatcher.count("timeout-minutes: 15"), 2)
         self.assertIn("timeout-minutes: 30", self.dispatcher)
         self.assertIn("timeout-minutes: 290", self.dispatcher)
+        self.assertIn("bounded to 450 distinct heads", self.dispatcher)
+        self.assertIn("if len(positions) >= 450:", self.dispatcher)
+        dispatcher_seconds = 450 * 8.1
+        terminal_seconds = 3 * 150 * 20.5
+        self.assertLess(dispatcher_seconds + terminal_seconds, 290 * 60)
+        self.assertLess((15 + 15 + 30) * 60 + dispatcher_seconds + terminal_seconds, 21_000)
         self.assertEqual(self.dispatcher.count("ROOT_DEADLINE_EPOCH:"), 4)
         self.assertEqual(
             self.dispatcher.count("Terminal dispatch cannot complete before the root deadline."), 4

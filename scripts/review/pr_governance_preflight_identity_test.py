@@ -63,7 +63,14 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
             "head": {"sha": head_sha, "repo": head_repo},
         }
 
-    def execute(self, *, url: object = PR_URL, responses: dict[str, list[object]] | None = None) -> dict[str, str]:
+    def execute(
+        self,
+        *,
+        url: object = PR_URL,
+        responses: dict[str, list[object]] | None = None,
+        event_name: str = "issue_comment",
+        loader_failure: str | None = None,
+    ) -> dict[str, str]:
         """Return scope outputs while each endpoint may provide a read sequence.
 
         ``False`` models a non-zero gh API response; the other values are JSON
@@ -85,6 +92,8 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
 
         def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             endpoint = arguments[-1]
+            if endpoint == loader_failure:
+                return subprocess.CompletedProcess(arguments, 1, "", "unavailable")
             if endpoint == script_endpoint:
                 return subprocess.CompletedProcess(arguments, 0, json.dumps(materialized_script), "")
             sequence = supplied.get(endpoint)
@@ -106,7 +115,7 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
             environment = {
                 "GITHUB_REPOSITORY": REPOSITORY,
                 "GITHUB_OUTPUT": str(output),
-                "EVENT_NAME": "issue_comment",
+                "EVENT_NAME": event_name,
                 "EVENT_ACTION": "deleted",
                 "DEFAULT_BRANCH": "master",
                 "WORKFLOW_REF": (
@@ -117,13 +126,34 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
                 "ISSUE_PULL_REQUEST_URL": url,
             }
             with patch.dict(os.environ, environment, clear=True), patch("subprocess.run", side_effect=fake_run):
-                exec(self.scope, {"__name__": "__main__"})
+                try:
+                    exec(self.scope, {"__name__": "__main__"})
+                except SystemExit as error:
+                    if error.code not in (None, 0):
+                        raise
             return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
 
     def assert_fail_closed(self, result: dict[str, str]) -> None:
         self.assertEqual(result["valid"], "false")
         self.assertEqual(result["reconcile"], "true")
+        self.assertEqual(result["priority"], "true")
         self.assertEqual(result["issue_event_noop"], "false")
+
+    def test_issue_source_loader_failures_arm_the_resolver_barrier(self) -> None:
+        script_endpoint = (
+            f"repos/{REPOSITORY}/contents/scripts/review/pr_governance_preflight.py"
+            f"?ref={self.workflow_sha}"
+        )
+        repository_endpoint = f"repos/{REPOSITORY}"
+        for event_name in ("issues", "issue_comment"):
+            for endpoint in (repository_endpoint, script_endpoint):
+                with self.subTest(event_name=event_name, endpoint=endpoint):
+                    result = self.execute(
+                        event_name=event_name,
+                        loader_failure=endpoint,
+                    )
+                    self.assert_fail_closed(result)
+                    self.assertEqual(result["pull_request_target_noop"], "false")
 
     def test_deleted_fork_comment_is_a_verified_noop_after_two_reads(self) -> None:
         deleted_fork = self.pull()

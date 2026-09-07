@@ -3318,15 +3318,17 @@ raise SystemExit(91)
                     "import json, os, sys\n"
                     "arguments = ' '.join(sys.argv[1:]); state = os.environ['STATE']\n"
                     "count = int(open(state).read()) if os.path.exists(state) else 0\n"
-                    "if '/runs?per_page=100' in arguments:\n"
+                    "if '/actions/runs/99' in arguments:\n"
+                    "    print(json.dumps({'id': 99, 'name': 'PR governance dispatcher', 'head_branch': 'master', 'head_sha': 'a' * 40, 'run_attempt': 1, 'created_at': '2026-09-07T00:00:00Z'}))\n"
+                    "elif '/runs?branch=master' in arguments:\n"
                     "    open(state, 'w').write(str(count + 1))\n"
-                    "    if count < 2 or os.environ['MODE'] == 'timeout': print(json.dumps([{'workflow_runs': []}]))\n"
+                    "    if count < 2 or os.environ['MODE'] == 'timeout': print(json.dumps({'total_count': 0, 'workflow_runs': []}))\n"
                     "    else:\n"
                     "        run = json.loads(os.environ['RUN'])\n"
                     "        if os.environ['MODE'] == 'bad-path': run['path'] = '.github/workflows/other.yml@master'\n"
                     "        if os.environ['MODE'] == 'bad-attempt': run['run_attempt'] = True\n"
                     "        runs = [run] if os.environ['MODE'] != 'ambiguous' else [run, dict(run, id=72)]\n"
-                    "        print(json.dumps([{'workflow_runs': runs}]))\n"
+                    "        print(json.dumps({'total_count': len(runs), 'workflow_runs': runs}))\n"
                     "elif '/dispatches' in arguments:\n"
                     "    if 'inputs[scope]=early' not in arguments or 'inputs[target_numbers]=[72,73]' not in arguments or 'inputs[preserved_target_numbers]=[]' not in arguments or 'inputs[preserved_writer_run_id]=0' not in arguments or 'inputs[terminal_order_numbers]=[]' not in arguments or 'inputs[completed_writer_run_ids]=[]' not in arguments: raise SystemExit(92)\n"
                     "else: raise SystemExit(91)\n",
@@ -3671,8 +3673,17 @@ raise SystemExit(91)
             if endpoint == "repos/owner/repository/actions/runs/100/jobs?per_page=100":
                 self.assertEqual(token, "read"); jobs = state["dispatcher_jobs"]
                 self.assertIsInstance(jobs, dict); return completed(jobs[100])
-            if endpoint.startswith("repos/owner/repository/actions/workflows/pr-governance.yml/runs?per_page=100"):
-                self.assertEqual(token, "read"); return completed([{"workflow_runs": state["runs"]}])
+            if endpoint.startswith("repos/owner/repository/actions/workflows/pr-governance.yml/runs?branch=master&head_sha="):
+                self.assertEqual(token, "read")
+                runs = state["runs"]
+                self.assertIsInstance(runs, list)
+                current = [
+                    candidate for candidate in runs
+                    if candidate.get("head_branch") == "master"
+                    and candidate.get("head_sha") == head
+                    and candidate.get("created_at", "") >= run["created_at"]
+                ]
+                return completed({"total_count": len(current), "workflow_runs": current})
             if endpoint == "repos/owner/repository/check-runs":
                 self.assertEqual(token, "marker-write"); return completed({"id": 501, "name": barrier, "head_sha": head, "external_id": f"krr-governance-affected-head-barrier/v1/{head}/scheduler-99", "status": "completed", "conclusion": "success", "details_url": "https://github.com/owner/repository/actions/runs/99?barrier_marker=periodic", "app": {"id": 4_766_933}})
             if endpoint == "repos/owner/repository/check-runs/501":
@@ -5436,7 +5447,7 @@ raise SystemExit(91)
                 self.assertIn("time", imported, f"workflow heredoc #{index} uses time without importing it")
 
     def test_large_priority_targets_are_resolved_into_complete_ttl_safe_chunks(self) -> None:
-        """The resolver and every pre-invalidator cover 41 and 600 current PRs."""
+        """The resolver and preinvalidators cover the 450-head generation bound."""
         resolver = re.search(
             r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
@@ -5446,7 +5457,7 @@ raise SystemExit(91)
             r"- name: Pre-invalidate priority event heads.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
         )
-        # One token pair cannot safely span 600 writes.  The workflow must
+        # One token pair cannot safely span 450 writes. The workflow must
         # expose two independently tokenized 300-head pre-invalidation steps.
         self.assertGreaterEqual(len(pre_blocks), 2)
         self.assertIn("terminal_batch_numbers", self.workflow)
@@ -5463,7 +5474,7 @@ raise SystemExit(91)
                 "head": {"sha": head, "repo": {"full_name": "owner/repository"}},
             }
 
-        for total in (41, 600):
+        for total in (41, 450):
             with self.subTest(total=total), tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary); output = directory / "output"
                 pages = [
@@ -5491,8 +5502,6 @@ raise SystemExit(91)
                 }
                 pulls_json = json.dumps(pages, separators=(",", ":"))
                 (directory / "pulls.json").write_text(pulls_json, encoding="utf-8")
-                if total == 600:
-                    self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
                 self.assertNotIn("PULLS", environment)
                 self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in environment.items()))
                 result = subprocess.run(
@@ -5521,7 +5530,7 @@ raise SystemExit(91)
                 self.assertTrue(all(len(chunk) <= 300 for chunk in chunks))
 
     def test_large_preinvalidation_posts_each_distinct_head_once_with_fresh_token_pair(self) -> None:
-        """Both 300-head chunks must be executable and never duplicate an external ID."""
+        """The two 300-head chunks cover the bounded generation exactly once."""
         resolver = re.search(
             r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow, re.DOTALL,
@@ -5532,7 +5541,7 @@ raise SystemExit(91)
             self.workflow, re.DOTALL,
         )
         self.assertGreaterEqual(len(pre_blocks), 2)
-        total = 600
+        total = 450
         heads = {number: f"{number:040x}" for number in range(1, total + 1)}
         pages = [[
             {
@@ -5564,7 +5573,6 @@ raise SystemExit(91)
             }
             pulls_json = json.dumps(pages, separators=(",", ":"))
             (directory / "pulls.json").write_text(pulls_json, encoding="utf-8")
-            self.assertGreater(len(pulls_json.encode("utf-8")), 128 * 1024)
             self.assertNotIn("PULLS", resolver_environment)
             self.assertTrue(all(len(os.fsencode(key)) + len(os.fsencode(value)) < 128 * 1024 for key, value in resolver_environment.items()))
             result = subprocess.run(
@@ -5658,7 +5666,7 @@ raise SystemExit(91)
             )
 
     def test_oversized_all_invalidation_keeps_affected_prechunk_and_holds_barrier(self) -> None:
-        """The bounded six-page snapshot carries 600 unique heads to both invalidation chunks."""
+        """An oversized six-page snapshot preserves its priority prechunk and holds the barrier."""
         resolver = re.search(
             r"- name: Re-enumerate every current local governance pull request.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
@@ -5741,9 +5749,9 @@ raise SystemExit(91)
             self.assertEqual(json.loads(values["preinvalidate_chunk_2_snapshots"]), [])
             self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(2, total + 1)))
             self.assertEqual(json.loads(values["all_invalidation_target_snapshots"]), [[number, f"{number:040x}", False] for number in range(2, total + 1)])
-            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), list(range(2, 302)))
-            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), list(range(302, 601)))
-            self.assertEqual(values["invalidation_head_cap_exceeded"], "false")
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
 
         hold_program = self._workflow_program(hold)
         base_environment = {
@@ -5844,7 +5852,7 @@ raise SystemExit(91)
             self.assertEqual(len(json.loads(values["target_snapshots"])), len(governed))
 
     def test_nonpriority_workflow_run_oversized_snapshot_seeds_barrier_and_stops_before_dispatch(self) -> None:
-        """A non-priority CI workflow_run still carries the bounded 600-head snapshot."""
+        """A non-priority CI workflow_run arms the barrier before the 450-head cap stops it."""
         source_resolver = re.search(
             r"- name: Resolve current open pull requests from the trusted default branch.*?python3 - <<'PY'\n(.*?)\n          PY",
             self.workflow,
@@ -5978,9 +5986,9 @@ raise SystemExit(91)
             self.assertEqual(json.loads(values["preinvalidate_targets"]), [])
             self.assertEqual(json.loads(values["all_invalidation_targets"]), list(range(1, total + 1)))
             self.assertEqual(len(json.loads(values["all_invalidation_target_snapshots"])), total)
-            self.assertEqual(values["invalidation_head_cap_exceeded"], "false")
-            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), list(range(1, 301)))
-            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), list(range(301, 601)))
+            self.assertEqual(values["invalidation_head_cap_exceeded"], "true")
+            self.assertEqual(json.loads(values["all_invalidation_chunk_1"]), [])
+            self.assertEqual(json.loads(values["all_invalidation_chunk_2"]), [])
 
             marker_calls: list[list[str]] = []
 
@@ -6022,7 +6030,7 @@ raise SystemExit(91)
             with patch.dict(os.environ, marker_environment, clear=True), patch("subprocess.run", side_effect=marker_run):
                 exec(self._workflow_program(marker), {"__name__": "__main__"})
             self.assertEqual(len(marker_calls), 2)
-            self.assertEqual(marker_environment["INVALIDATION_HEAD_CAP_EXCEEDED"], "false")
+            self.assertEqual(marker_environment["INVALIDATION_HEAD_CAP_EXCEEDED"], "true")
 
         hold_program = self._workflow_program(hold)
         for active, message in (("false", "before the affected-head barrier was active"), ("true", "head cap exceeded")):

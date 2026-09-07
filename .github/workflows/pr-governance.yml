@@ -72,6 +72,7 @@ jobs:
           import os
           import re
           import subprocess
+          import time
 
           repository = os.environ.get("GITHUB_REPOSITORY", "")
           workflow_ref = os.environ.get("WORKFLOW_REF", "")
@@ -84,19 +85,39 @@ jobs:
           ):
               raise SystemExit("Governance runner source is not the trusted default branch.")
 
+          def arm_issue_source_failure(message):
+              # Issue mutations must establish the App-bound resolver barrier
+              # even when the immutable source loader cannot read GitHub.
+              # Let the barrier job run, then fail it via ``valid=false``;
+              # exiting this preflight step first would erase its outputs and
+              # leave a former trusted success exposed.
+              if os.environ.get("EVENT_NAME") not in {"issues", "issue_comment"}:
+                  raise SystemExit(message)
+              output_path = os.environ.get("GITHUB_OUTPUT", "")
+              if not output_path:
+                  raise SystemExit(message)
+              with open(output_path, "a", encoding="utf-8") as output:
+                  output.write("reconcile=true\n")
+                  output.write("valid=false\n")
+                  output.write("priority=true\n")
+                  output.write("pull_request_target_noop=false\n")
+                  output.write("issue_event_noop=false\n")
+                  output.write(f"root_deadline_epoch={int(time.time()) + 21_000}\n")
+              raise SystemExit(0)
+
           def request(path):
               result = subprocess.run(
                   ["gh", "api", "--hostname", "github.com", path],
                   capture_output=True, text=True, check=False, timeout=20,
               )
               if result.returncode != 0:
-                  raise SystemExit("Unable to read trusted governance source.")
+                  arm_issue_source_failure("Unable to read trusted governance source.")
               try:
                   value = json.loads(result.stdout)
               except json.JSONDecodeError as error:
-                  raise SystemExit("Trusted governance source is not JSON.") from error
+                  arm_issue_source_failure("Trusted governance source is not JSON.")
               if not isinstance(value, dict):
-                  raise SystemExit("Trusted governance source is invalid.")
+                  arm_issue_source_failure("Trusted governance source is invalid.")
               return value
 
           repository_record = request(f"repos/{repository}")
@@ -468,6 +489,13 @@ jobs:
     if: needs.resolve_event.outputs.reconcile == 'true' && github.run_attempt == 1
     environment: pr-governance
     runs-on: ubuntu-latest
+    # A complete generation is bounded to 450 distinct heads. At the 8.1s
+    # dispatcher pace this costs at most 3,645 seconds, followed by three
+    # 150-target terminal continuations (9,225 seconds). That leaves more
+    # than an hour of API/retry margin inside this 290-minute job and the
+    # 350-minute root generation deadline. A larger snapshot keeps the
+    # App-bound barrier required for the next reconciliation instead of
+    # timing out after it has left every head pending.
     timeout-minutes: 290
     # 通常の全件走査は直列化する。一方、PR / Issue contract mutation と
     # review-sensor workflow_run はこの走査を中断して先に fail-closed
@@ -644,7 +672,7 @@ jobs:
           # preserves uniqueness even while a malformed shared head is being
           # fail-closed.  Each 300-head chunk takes at most ~40.5 minutes at
           # the Check Run pace, safely inside one App-token lifetime.  The
-          # 600-head bound is operational, not an enumeration bound: target
+          # 450-head bound is operational, not an enumeration bound: target
           # discovery must still finish and publish the default-branch output
           # so the global merge barrier can be activated before this run stops.
           def chunks_by_head(numbers):
@@ -654,7 +682,7 @@ jobs:
                   head = target_snapshots[number][0]
                   position = positions.get(head)
                   if position is None:
-                      if len(positions) >= 600:
+                      if len(positions) >= 450:
                           return [[], []], True
                       position = 0 if sum(1 for value in positions.values() if value == 0) < 300 else 1
                       positions[head] = position
@@ -1300,6 +1328,7 @@ jobs:
           python3 - <<'PY'
           import json, os, re, subprocess, time
           from datetime import datetime
+          from urllib.parse import urlencode
           repository=os.environ["GITHUB_REPOSITORY"]
           branch=os.environ.get("DEFAULT_BRANCH", "")
           head=os.environ.get("WRITER_HEAD", "")
@@ -1314,33 +1343,32 @@ jobs:
               if not isinstance(value,str) or not value.startswith(workflow_path+"@"): return False
               ref=value[len(workflow_path)+1:]
               return re.fullmatch(r"[A-Za-z0-9._/-]+",ref) is not None and ref not in {".",".."} and not ref.startswith("/") and "//" not in ref and all(part not in {"",".",".."} for part in ref.split("/"))
-          def runs_page(page_number):
-              arguments=["gh","api",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?per_page=100&page={page_number}"]
-              if page_number == 6: arguments.insert(2,"--include")
+          def source_created_at():
+              response=subprocess.run(["gh","api",f"repos/{repository}/actions/runs/{source}"],capture_output=True,text=True,check=False,timeout=20)
+              if response.returncode != 0: raise SystemExit("Unable to read early writer dispatcher generation.")
+              try: run=json.loads(response.stdout)
+              except json.JSONDecodeError as error: raise SystemExit("Early writer dispatcher generation is not JSON.") from error
+              created=run.get("created_at") if isinstance(run,dict) else None
+              if not (isinstance(run,dict) and run.get("id")==int(source) and run.get("name")=="PR governance dispatcher" and run.get("head_branch")==branch and run.get("head_sha")==head and type(run.get("run_attempt")) is int and run["run_attempt"]==1 and isinstance(created,str)):
+                  raise SystemExit("Early writer dispatcher generation is invalid.")
+              try: datetime.fromisoformat(created.replace("Z","+00:00"))
+              except ValueError as error: raise SystemExit("Early writer dispatcher generation is invalid.") from error
+              return created
+          generation_created_at=source_created_at()
+          def runs_page():
+              query=urlencode({"branch":branch,"head_sha":head,"created":f">={generation_created_at}","per_page":"100"})
+              arguments=["gh","api",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/runs?{query}"]
               try: result=subprocess.run(arguments,capture_output=True,text=True,check=False,timeout=20)
               except subprocess.TimeoutExpired as error: raise SystemExit("Governance writer runs timed out.") from error
               if result.returncode != 0: raise SystemExit("Unable to enumerate governance writer runs.")
               try:
-                  raw=result.stdout
-                  if page_number == 6:
-                      headers,separator,raw=raw.replace("\r\n","\n").partition("\n\n")
-                      if not separator or not headers.startswith("HTTP/") or re.search(r'(?im)^link:.*rel="next"',headers): raise SystemExit("Governance writer runs exceed the fixed page window.")
-                  page=json.loads(raw)
+                  page=json.loads(result.stdout)
               except json.JSONDecodeError as error: raise SystemExit("Governance writer runs are not JSON.") from error
               entries=page.get("workflow_runs") if isinstance(page,dict) else None; total=page.get("total_count") if isinstance(page,dict) else None
-              if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(run,dict) for run in entries) or type(total) is not int or total<0: raise SystemExit("Governance writer runs are invalid.")
-              return page
+              if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(run,dict) for run in entries) or type(total) is not int or total<0 or total>100 or len(entries)!=total: raise SystemExit("Governance writer runs are invalid.")
+              return entries
           def runs():
-              pages=[runs_page(1)]; total_count=pages[0]["total_count"]
-              for page_number in range(2,7):
-                  if len(pages[-1]["workflow_runs"])<100: break
-                  page=runs_page(page_number)
-                  if page["total_count"]!=total_count: raise SystemExit("Governance writer run count changed.")
-                  pages.append(page)
-              if runs_page(1)!=pages[0]: raise SystemExit("Governance writer runs first page changed.")
-              flattened=[run for page in pages for run in page["workflow_runs"]]
-              if len(flattened)!=total_count: raise SystemExit("Governance writer run count is incomplete.")
-              return flattened
+              return runs_page()
           before={run.get("id") for run in runs() if type(run.get("id")) is int}
           result=subprocess.run(["gh","api","--method","POST",f"repos/{repository}/actions/workflows/pr-governance-status-writer.yml/dispatches","-f",f"ref={branch}","-f",f"inputs[dispatcher_run_id]={source}","-f","inputs[scope]=early","-f",f"inputs[target_numbers]={json.dumps(targets,separators=(',', ':'))}","-f","inputs[preserved_target_numbers]=[]","-f","inputs[preserved_writer_run_id]=0","-f","inputs[check_manifest]=[]","-f","inputs[terminal_batch_numbers]=[]","-f","inputs[continuation_index]=0","-f","inputs[terminal_order_numbers]=[]","-f","inputs[completed_writer_run_ids]=[]"],capture_output=True,text=True,check=False, timeout=20)
           if result.returncode != 0: raise SystemExit("Unable to dispatch early governance writer.")
@@ -1859,7 +1887,7 @@ jobs:
           python3 - <<'PY'
           import copy, json, os, re, subprocess
           from datetime import datetime
-          from urllib.parse import parse_qs, urlparse
+          from urllib.parse import parse_qs, urlencode, urlparse
 
           repository=os.environ["GITHUB_REPOSITORY"]; branch=os.environ.get("DEFAULT_BRANCH", ""); head=os.environ.get("DEFAULT_HEAD", ""); dispatcher=os.environ.get("DISPATCHER_RUN_ID", ""); configured_app=os.environ.get("CHECK_APP_ID", ""); workflow_ref=os.environ.get("WORKFLOW_REF", ""); workflow_sha=os.environ.get("WORKFLOW_SHA", "")
           app_id=4_766_933; context="KRR / PR governance affected-head barrier"; writer_path=".github/workflows/pr-governance.yml"
@@ -1958,9 +1986,17 @@ jobs:
           fresh_duplicates=sorted(name for name,members in governed_heads.items() if len(members)>1)
           if fresh!=expected_snapshots or fresh_duplicates!=duplicates: raise SystemExit("Affected-head barrier current pull request snapshot changed before release.")
           source=request([f"repos/{repository}/actions/runs/{dispatcher}"],env=read_env)
+          def generation(run, *, current=False):
+              run_repo=run.get("repository") if isinstance(run,dict) else None
+              if not isinstance(run,dict) or type(run.get("id")) is not int or run["id"]<1 or run.get("name")!="PR governance dispatcher" or not path_matches(run.get("path")) or run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or not isinstance(run_repo,dict) or run_repo.get("full_name")!=repository or run.get("head_branch")!=branch or not isinstance(run.get("head_sha"),str) or run["head_sha"].lower()!=head.lower() or type(run.get("run_attempt")) is not int or run["run_attempt"]<1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              if current and run["run_attempt"]!=1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
+              if not current and run["run_attempt"]!=1: return None
+              return parse_time(run.get("created_at")),run["id"]
+          current_generation=generation(source,current=True)
+          if source.get("status") not in {"requested","queued","in_progress"}: raise SystemExit("Affected-head barrier dispatcher generation is not active.")
           def dispatcher_runs_page(page_number):
-              arguments=["gh","api","--hostname","github.com",f"repos/{repository}/actions/workflows/pr-governance.yml/runs?per_page=100&page={page_number}"]
-              if page_number == 6: arguments.insert(4,"--include")
+              query=urlencode({"branch":branch,"head_sha":head,"created":f">={source.get('created_at')}","per_page":"100","page":str(page_number)})
+              arguments=["gh","api","--hostname","github.com",f"repos/{repository}/actions/workflows/pr-governance.yml/runs?{query}"]
               try: response=subprocess.run(arguments,capture_output=True,text=True,check=False,env=read_env,timeout=20)
               except subprocess.TimeoutExpired as error: raise SystemExit("Affected-head barrier dispatcher generation timed out.") from error
               if response.returncode!=0: raise SystemExit("Affected-head barrier dispatcher generation is unavailable.")
@@ -1975,20 +2011,7 @@ jobs:
               if not isinstance(page,dict) or not isinstance(entries,list) or len(entries)>100 or not all(isinstance(run,dict) for run in entries) or type(total) is not int or total<0: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
               return page
           listed=[dispatcher_runs_page(1)]; total_count=listed[0]["total_count"]
-          for page_number in range(2,7):
-              if len(listed[-1]["workflow_runs"])<100: break
-              page=dispatcher_runs_page(page_number)
-              if page["total_count"]!=total_count: raise SystemExit("Affected-head barrier dispatcher generation count changed.")
-              listed.append(page)
-          if dispatcher_runs_page(1)!=listed[0] or sum(len(page["workflow_runs"]) for page in listed)!=total_count: raise SystemExit("Affected-head barrier dispatcher generation is incomplete.")
-          def generation(run, *, current=False):
-              run_repo=run.get("repository") if isinstance(run,dict) else None
-              if not isinstance(run,dict) or type(run.get("id")) is not int or run["id"]<1 or run.get("name")!="PR governance dispatcher" or not path_matches(run.get("path")) or run.get("event") not in {"pull_request_target","issue_comment","issues","schedule","workflow_dispatch","workflow_run"} or not isinstance(run_repo,dict) or run_repo.get("full_name")!=repository or run.get("head_branch")!=branch or not isinstance(run.get("head_sha"),str) or run["head_sha"].lower()!=head.lower() or type(run.get("run_attempt")) is not int or run["run_attempt"]<1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
-              if current and run["run_attempt"]!=1: raise SystemExit("Affected-head barrier dispatcher generation is invalid.")
-              if not current and run["run_attempt"]!=1: return None
-              return parse_time(run.get("created_at")),run["id"]
-          current_generation=generation(source,current=True)
-          if source.get("status") not in {"requested","queued","in_progress"}: raise SystemExit("Affected-head barrier dispatcher generation is not active.")
+          if total_count>100 or len(listed[0]["workflow_runs"])!=total_count or dispatcher_runs_page(1)!=listed[0]: raise SystemExit("Affected-head barrier dispatcher generation is incomplete.")
           def reconciles(run):
               # Only an explicit workflow_run, pull_request_target, or Issue
               # no-op can be ignored. Every incomplete, malformed, or
