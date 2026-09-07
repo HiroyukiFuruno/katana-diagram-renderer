@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -35,6 +36,8 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.scope = textwrap.dedent(match.group(1))
+        self.preflight_program = (ROOT / "scripts/review/pr_governance_preflight.py").read_bytes()
+        self.workflow_sha = "c" * 40
 
     @staticmethod
     def repository(default_branch: object = "master", identifier: object = REPOSITORY_ID) -> dict[str, object]:
@@ -69,10 +72,28 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
         """
         supplied = responses or {}
         reads: dict[str, int] = {}
+        script_endpoint = (
+            f"repos/{REPOSITORY}/contents/scripts/review/pr_governance_preflight.py"
+            f"?ref={self.workflow_sha}"
+        )
+        materialized_script = {
+            "type": "file",
+            "encoding": "base64",
+            "content": base64.b64encode(self.preflight_program).decode("ascii"),
+            "sha": "d" * 40,
+        }
 
         def fake_run(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             endpoint = arguments[-1]
+            if endpoint == script_endpoint:
+                return subprocess.CompletedProcess(arguments, 0, json.dumps(materialized_script), "")
             sequence = supplied.get(endpoint)
+            # The immutable workflow loader independently re-reads the
+            # repository before executing the preflight program. Preserve the
+            # test fixture sequence for the program itself after that trusted
+            # loader read.
+            if endpoint == f"repos/{REPOSITORY}" and sequence is not None:
+                sequence = [self.repository(), *sequence]
             index = reads.get(endpoint, 0)
             reads[endpoint] = index + 1
             value = sequence[min(index, len(sequence) - 1)] if sequence else self.repository() if endpoint == f"repos/{REPOSITORY}" else self.pull()
@@ -87,6 +108,11 @@ class GovernancePreflightIdentityTest(unittest.TestCase):
                 "GITHUB_OUTPUT": str(output),
                 "EVENT_NAME": "issue_comment",
                 "EVENT_ACTION": "deleted",
+                "DEFAULT_BRANCH": "master",
+                "WORKFLOW_REF": (
+                    f"{REPOSITORY}/.github/workflows/pr-governance.yml@refs/heads/master"
+                ),
+                "WORKFLOW_SHA": self.workflow_sha,
                 "ISSUE_NUMBER": str(NUMBER),
                 "ISSUE_PULL_REQUEST_URL": url,
             }

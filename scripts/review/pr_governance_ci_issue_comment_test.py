@@ -8,6 +8,35 @@ from pathlib import Path
 
 
 class GovernanceCiAndIssueContractTest(unittest.TestCase):
+    def assert_immutable_default_branch_loader(
+        self,
+        workflow: str,
+        script_path: str,
+        script: str,
+    ) -> None:
+        """The runner may execute only the script fetched at its trusted SHA."""
+        loader_start = workflow.index(f'script_path = "{script_path}"')
+        loader_end = workflow.index("\n\n      - name:", loader_start)
+        loader = workflow[loader_start:loader_end]
+        for expected in (
+            'workflow_ref != f"{repository}/.github/workflows/pr-governance.yml@refs/heads/{os.environ.get(\'DEFAULT_BRANCH\', \'\')}"',
+            'request(f"repos/{repository}/contents/{script_path}?ref={workflow_sha}")',
+            'content.get("type") != "file"',
+            'content.get("encoding") != "base64"',
+            'base64.b64decode(encoded.replace("\\n", ""), validate=True).decode("utf-8", "strict")',
+            'exec(compile(program, f"{script_path}@{workflow_sha}", "exec"), {"__name__": "__main__", "__file__": script_path})',
+        ):
+            with self.subTest(script=script_path, expected=expected):
+                self.assertIn(expected, loader)
+
+        for expected in (
+            'with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:',
+            'output.write("reconcile=" + ("true" if reconcile else "false") + "\\n")',
+            'output.write("valid=" + ("true" if valid else "false") + "\\n")',
+        ):
+            with self.subTest(script=script_path, expected=expected):
+                self.assertIn(expected, script)
+
     def test_documented_commit_recipes_satisfy_the_real_issue_reference_parser(self) -> None:
         root = Path(__file__).parents[2]
         parser = runpy.run_path(str(root / "scripts/hooks/verify_push_issue.py"))["issue_numbers"]
@@ -29,6 +58,7 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
     def setUp(self) -> None:
         root = Path(__file__).parents[2]
         self.dispatcher = (root / ".github/workflows/pr-governance.yml").read_text(encoding="utf-8")
+        self.preflight = (root / "scripts/review/pr_governance_preflight.py").read_text(encoding="utf-8")
         self.writer = (root / "scripts/review/pr_governance_status_writer.py").read_text(encoding="utf-8")
         self.writer_workflow = (root / ".github/workflows/pr-governance-status-writer.yml").read_text(encoding="utf-8")
 
@@ -108,8 +138,11 @@ class GovernanceCiAndIssueContractTest(unittest.TestCase):
         self.assertIn("outputs:\n      reconcile: ${{ steps.scope.outputs.reconcile }}", preflight)
         self.assertIn("valid: ${{ steps.scope.outputs.valid }}", preflight)
         self.assertIn("id: scope", preflight)
-        self.assertIn('output.write("reconcile="', preflight)
-        self.assertIn('output.write("valid="', preflight)
+        self.assert_immutable_default_branch_loader(
+            preflight,
+            "scripts/review/pr_governance_preflight.py",
+            self.preflight,
+        )
         self.assertIn("EVENT_SOURCE_VALID: ${{ needs.preflight-workflow-run-source.outputs.valid }}", barrier)
         self.assertIn('if os.environ.get("EVENT_SOURCE_VALID") != "true":', barrier)
         self.assertIn("barrier remains active", barrier)

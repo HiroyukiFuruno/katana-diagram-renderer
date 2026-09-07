@@ -143,6 +143,11 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
         assert callable(matcher)
         for external_id in (
             f"krr-governance/v1/{head.lower()}/writer-1",
+            # All-scope reconciliation publishes a dispatcher-scoped
+            # trusted check.  It is bound to the same current head and
+            # source run by the matcher, so it is a valid generation even
+            # though it has no writer segment.
+            f"krr-governance/v1/{head.lower()}/dispatcher-1",
         ):
             self.assertTrue(matcher(check(external_id)), external_id)
         for external_id in (
@@ -150,7 +155,6 @@ class GovernanceReviewSensorContractTest(unittest.TestCase):
             f"krr-governance/v1/{head.lower()}/writer-0",
             f"krr-governance/v1/{head.lower()}/dispatcher--1",
             f"krr-governance/v1/{head.lower()}/writer-1-extra",
-            f"krr-governance/v1/{head.lower()}/dispatcher-1",
             f"krr-governance/v1/{'b' * 40}/writer-1",
             None,
         ):
